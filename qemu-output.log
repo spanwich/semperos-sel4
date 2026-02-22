@@ -8,7 +8,7 @@ Press Ctrl-B to configure iPXE (PCI 00:02.0)...
 Booting from ROM..Boot config: debug_port = 0x3f8
 Boot config: disable_iommu = false
 Detected 1 boot module(s):
-  module #0: start=0xc13000 end=0xe0e240 size=0x1fb240 name='/sel4-image/capdl-loader-image-x86_64-pc99'
+  module #0: start=0xc13000 end=0xe34ea0 size=0x221ea0 name='/sel4-image/capdl-loader-image-x86_64-pc99'
 Parsing GRUB physical memory map
 	Physical Memory Region from 0 size 9fc00 type 1
 	Physical Memory Region from 9fc00 size 400 type 2
@@ -45,41 +45,138 @@ ACPI: MADT_ISO bus=0 source=10 gsi=10 flags=0xd
 ACPI: MADT_ISO bus=0 source=11 gsi=11 flags=0xd
 ACPI: 1 CPU(s) detected
 ELF-loading userland images from boot modules:
-size=0x3fc000 v_entry=0x4088d9 v_start=0x400000 v_end=0x7fc000 p_start=0xe0f000 p_end=0x120b000
-Moving loaded userland images to final location: from=0xe0f000 to=0xc12000 size=0x3fc000
+size=0x41c000 v_entry=0x4088d9 v_start=0x400000 v_end=0x81c000 p_start=0xe35000 p_end=0x1251000
+Moving loaded userland images to final location: from=0xe35000 to=0xc12000 size=0x41c000
 Starting node #0 with APIC ID 0
 Mapping kernel window is done
 available phys memory regions: 1
   [100000..1ffdf000)
 reserved virt address space regions: 1
-  [ffffff8000100000..ffffff800100e000)
+  [ffffff8000100000..ffffff800102e000)
 Booting all finished, dropped to user space
 [vDTU] Initializing endpoint table (4 PEs x 16 EPs)
-[vDTU] Initialized, managing endpoint table
+[vDTU] Initialized (8 msg channels, 4 mem channels available)
 [vDTU] Ready for configuration requests
-[SemperKernel] Starting (PE 0)
-[SemperKernel] Configuring VPE0 receive endpoint (EP 0)
-[vDTU] config_recv(target_pe=1, ep=0, buf_order=11, msg_order=9, flags=0)
-[vDTU]   -> assigned channel 0 (slot_count=4, slot_size=512)
-[SemperKernel] VPE0 recv EP 0 -> channel 0
-[SemperKernel] Configuring kernel receive endpoint (EP 1)
-[vDTU] config_recv(target_pe=0, ep=1, buf_order=11, msg_order=9, flags=0)
-[vDTU]   -> assigned channel 1 (slot_count=4, slot_size=512)
-[SemperKernel] Kernel recv EP 1 -> channel 1
-[SemperKernel] Configuring kernel send endpoint (EP 0)
-[vDTU] config_send(target_pe=0, ep=0, dest_pe=1, dest_ep=0, dest_vpe=0, msg_size=512, label=0xdeadbeef, credits=65535)
-[SemperKernel] Channels configured successfully
-[SemperKernel] Sending test message: "HELLO_VPE"
-[SemperKernel] Waiting for reply...
+=== SemperOS vDTU System Test ===
+[TEST 1] Basic message exchange...
+[vDTU] config_recv(pe=1, ep=0, buf_order=11, msg_order=9) -> channel 0 (4 slots x 512B)
+[vDTU] config_recv(pe=0, ep=1, buf_order=11, msg_order=9) -> channel 1 (4 slots x 512B)
+[vDTU] config_send(pe=0, ep=0, dest=1:0, label=0xdeadbeef) -> channel 0
 [VPE0] Starting (PE 1)
 [VPE0] Waiting for signal from kernel...
-[VPE0] Attached to receive ring (channel 0, slot_count=4, slot_size=512)
-[VPE0] Attached to reply ring (channel 1)
-[VPE0] Received message: "HELLO_VPE" (len=9, label=0xdeadbeef, from PE 0 EP 0)
-[VPE0] Sending reply: "ACK"
-[SemperKernel] Received reply: "ACK"
-[SemperKernel] Basic DTU channel test PASSED
-[SemperKernel] Done
-[VPE0] Done (handled 1 message)
+[VPE0] [exchange 1] Received: "HELLO_VPE" on channel 0 (from PE 0 EP 0)
+[VPE0] Sending reply: "ACK" on channel 1
+[TEST 1] Basic message exchange... PASSED
+[TEST 2] Multiple endpoints...
+[vDTU] config_recv(pe=1, ep=2, buf_order=11, msg_order=9) -> channel 2 (4 slots x 512B)
+[vDTU] config_recv(pe=0, ep=3, buf_order=11, msg_order=9) -> channel 3 (4 slots x 512B)
+[vDTU] config_send(pe=0, ep=2, dest=1:2, label=0xcafe) -> channel 2
+[VPE0] Waiting for signal from kernel...
+[VPE0] [exchange 2] Received: "TEST2_MSG" on channel 2 (from PE 0 EP 0)
+[VPE0] Sending reply: "ACK" on channel 3
+[TEST 2] Multiple endpoints... PASSED
+[TEST 3] Memory endpoint...
+[vDTU] config_mem(pe=1, ep=4, dest_pe=0, addr=0x0, size=0x1000, perm=3) -> mem channel 0
+[VPE0] Waiting for signal from kernel...
+[VPE0] [exchange 3] Received: "MEM_CHECK:0" on channel 0 (from PE 0 EP 0)
+[VPE0] Memory channel 0 contains: "MEMORY_TEST_DATA_12345678"
+[VPE0] Sending reply: "MEM_OK" on channel 1
+[TEST 3] Memory endpoint... PASSED
+[TEST 4] Endpoint invalidation...
+[vDTU] invalidate_ep(pe=0, ep=2) -> cleared send EP
+[vDTU] invalidate_ep(pe=0, ep=3) -> freed msg channel 3
+[vDTU] invalidate_ep(pe=1, ep=2) -> freed msg channel 2
+[vDTU] config_recv(pe=1, ep=5, buf_order=11, msg_order=9) -> channel 2 (4 slots x 512B)
+  New channel after recycling: 2
+[vDTU] invalidate_ep(pe=1, ep=5) -> freed msg channel 2
+[vDTU] invalidate_ep(pe=1, ep=4) -> freed mem channel 0
+[TEST 4] Endpoint invalidation... PASSED
+[TEST 5] Channel exhaustion...
+[vDTU] invalidate_eps(pe=0, first_ep=0)
+[vDTU] invalidate_ep(pe=0, ep=0) -> cleared send EP
+[vDTU] invalidate_ep(pe=0, ep=1) -> freed msg channel 1
+[vDTU] invalidate_ep(pe=0, ep=2) -> already invalid
+[vDTU] invalidate_ep(pe=0, ep=3) -> already invalid
+[vDTU] invalidate_ep(pe=0, ep=4) -> already invalid
+[vDTU] invalidate_ep(pe=0, ep=5) -> already invalid
+[vDTU] invalidate_ep(pe=0, ep=6) -> already invalid
+[vDTU] invalidate_ep(pe=0, ep=7) -> already invalid
+[vDTU] invalidate_ep(pe=0, ep=8) -> already invalid
+[vDTU] invalidate_ep(pe=0, ep=9) -> already invalid
+[vDTU] invalidate_ep(pe=0, ep=10) -> already invalid
+[vDTU] invalidate_ep(pe=0, ep=11) -> already invalid
+[vDTU] invalidate_ep(pe=0, ep=12) -> already invalid
+[vDTU] invalidate_ep(pe=0, ep=13) -> already invalid
+[vDTU] invalidate_ep(pe=0, ep=14) -> already invalid
+[vDTU] invalidate_ep(pe=0, ep=15) -> already invalid
+[vDTU] invalidate_eps(pe=1, first_ep=0)
+[vDTU] invalidate_ep(pe=1, ep=0) -> freed msg channel 0
+[vDTU] invalidate_ep(pe=1, ep=1) -> already invalid
+[vDTU] invalidate_ep(pe=1, ep=2) -> already invalid
+[vDTU] invalidate_ep(pe=1, ep=3) -> already invalid
+[vDTU] invalidate_ep(pe=1, ep=4) -> already invalid
+[vDTU] invalidate_ep(pe=1, ep=5) -> already invalid
+[vDTU] invalidate_ep(pe=1, ep=6) -> already invalid
+[vDTU] invalidate_ep(pe=1, ep=7) -> already invalid
+[vDTU] invalidate_ep(pe=1, ep=8) -> already invalid
+[vDTU] invalidate_ep(pe=1, ep=9) -> already invalid
+[vDTU] invalidate_ep(pe=1, ep=10) -> already invalid
+[vDTU] invalidate_ep(pe=1, ep=11) -> already invalid
+[vDTU] invalidate_ep(pe=1, ep=12) -> already invalid
+[vDTU] invalidate_ep(pe=1, ep=13) -> already invalid
+[vDTU] invalidate_ep(pe=1, ep=14) -> already invalid
+[vDTU] invalidate_ep(pe=1, ep=15) -> already invalid
+[vDTU] config_recv(pe=1, ep=0, buf_order=11, msg_order=9) -> channel 0 (4 slots x 512B)
+[vDTU] config_recv(pe=1, ep=1, buf_order=11, msg_order=9) -> channel 1 (4 slots x 512B)
+[vDTU] config_recv(pe=1, ep=2, buf_order=11, msg_order=9) -> channel 2 (4 slots x 512B)
+[vDTU] config_recv(pe=1, ep=3, buf_order=11, msg_order=9) -> channel 3 (4 slots x 512B)
+[vDTU] config_recv(pe=1, ep=4, buf_order=11, msg_order=9) -> channel 4 (4 slots x 512B)
+[vDTU] config_recv(pe=1, ep=5, buf_order=11, msg_order=9) -> channel 5 (4 slots x 512B)
+[vDTU] config_recv(pe=1, ep=6, buf_order=11, msg_order=9) -> channel 6 (4 slots x 512B)
+[vDTU] config_recv(pe=1, ep=7, buf_order=11, msg_order=9) -> channel 7 (4 slots x 512B)
+  Allocated 8 channels: 0 1 2 3 4 5 6 7 
+[vDTU] ERROR: no free message channels
+  9th allocation correctly rejected
+[vDTU] invalidate_ep(pe=1, ep=3) -> freed msg channel 3
+[vDTU] config_recv(pe=0, ep=0, buf_order=11, msg_order=9) -> channel 3 (4 slots x 512B)
+  After freeing one, got recycled channel: 3
+[vDTU] invalidate_eps(pe=0, first_ep=0)
+[vDTU] invalidate_ep(pe=0, ep=0) -> freed msg channel 3
+[vDTU] invalidate_ep(pe=0, ep=1) -> already invalid
+[vDTU] invalidate_ep(pe=0, ep=2) -> already invalid
+[vDTU] invalidate_ep(pe=0, ep=3) -> already invalid
+[vDTU] invalidate_ep(pe=0, ep=4) -> already invalid
+[vDTU] invalidate_ep(pe=0, ep=5) -> already invalid
+[vDTU] invalidate_ep(pe=0, ep=6) -> already invalid
+[vDTU] invalidate_ep(pe=0, ep=7) -> already invalid
+[vDTU] invalidate_ep(pe=0, ep=8) -> already invalid
+[vDTU] invalidate_ep(pe=0, ep=9) -> already invalid
+[vDTU] invalidate_ep(pe=0, ep=10) -> already invalid
+[vDTU] invalidate_ep(pe=0, ep=11) -> already invalid
+[vDTU] invalidate_ep(pe=0, ep=12) -> already invalid
+[vDTU] invalidate_ep(pe=0, ep=13) -> already invalid
+[vDTU] invalidate_ep(pe=0, ep=14) -> already invalid
+[vDTU] invalidate_ep(pe=0, ep=15) -> already invalid
+[vDTU] invalidate_eps(pe=1, first_ep=0)
+[vDTU] invalidate_ep(pe=1, ep=0) -> freed msg channel 0
+[vDTU] invalidate_ep(pe=1, ep=1) -> freed msg channel 1
+[vDTU] invalidate_ep(pe=1, ep=2) -> freed msg channel 2
+[vDTU] invalidate_ep(pe=1, ep=3) -> already invalid
+[vDTU] invalidate_ep(pe=1, ep=4) -> freed msg channel 4
+[vDTU] invalidate_ep(pe=1, ep=5) -> freed msg channel 5
+[vDTU] invalidate_ep(pe=1, ep=6) -> freed msg channel 6
+[vDTU] invalidate_ep(pe=1, ep=7) -> freed msg channel 7
+[vDTU] invalidate_ep(pe=1, ep=8) -> already invalid
+[vDTU] invalidate_ep(pe=1, ep=9) -> already invalid
+[vDTU] invalidate_ep(pe=1, ep=10) -> already invalid
+[vDTU] invalidate_ep(pe=1, ep=11) -> already invalid
+[vDTU] invalidate_ep(pe=1, ep=12) -> already invalid
+[vDTU] invalidate_ep(pe=1, ep=13) -> already invalid
+[vDTU] invalidate_ep(pe=1, ep=14) -> already invalid
+[vDTU] invalidate_ep(pe=1, ep=15) -> already invalid
+[TEST 5] Channel exhaustion... PASSED
+=== 5/5 tests PASSED ===
+=== All 5 tests PASSED ===
+[VPE0] Done (handled 3 exchanges)
 qemu-system-x86_64: terminating on signal 15 from pid 7 (timeout)
-QEMU_TIMEOUT: Exited after 30s
+QEMU_TIMEOUT: Exited after 60s

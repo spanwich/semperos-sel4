@@ -1,19 +1,19 @@
 /*
- * VDTUService.c -- Virtual DTU service component
+ * VDTUService.c -- Virtual DTU service component (full endpoint management)
  *
  * This component implements the vDTU control plane. It manages a table of
  * endpoint descriptors for all PEs in the system and handles configuration
  * RPCs from the SemperOS kernel.
  *
- * When the kernel configures a send endpoint on PE A targeting a receive
- * endpoint on PE B, the vDTU:
- *   1. Records the endpoint configuration in its table
- *   2. Assigns a channel index from the pre-allocated pool
- *   3. Returns the channel index so the caller can find the dataport
+ * Key behaviors:
+ *   - config_recv() allocates a message channel from the free pool
+ *   - config_send() returns the SAME channel as the target recv EP
+ *   - config_mem() allocates a memory channel from the free pool
+ *   - invalidate_ep() frees channels back to the pool (recv/mem types)
+ *   - wakeup_pe() emits the appropriate notification
  *
  * The vDTU does NOT sit on the data path and does NOT have access to any
- * shared memory dataports. After setup, messages flow directly through
- * shared memory ring buffers between components.
+ * shared memory dataports.
  */
 
 #include <stdio.h>
@@ -27,15 +27,14 @@
  * =========================================================================
  */
 
-#define MAX_PES         4       /* Max PEs in this prototype */
-#define EP_PER_PE       VDTU_EP_COUNT   /* 16 endpoints per PE */
+#define MAX_PES             4
+#define EP_PER_PE           VDTU_EP_COUNT   /* 16 endpoints per PE */
 
 /* PE IDs for this prototype */
-#define PE_KERNEL       0
-#define PE_VPE0         1
-#define PE_VDTU         2       /* vDTU itself (not a real PE) */
+#define PE_KERNEL           0
+#define PE_VPE0             1
 
-/* Pre-allocated channel count */
+/* Pre-allocated channel counts (must match .camkes assembly) */
 #define NUM_MSG_CHANNELS    8
 #define NUM_MEM_CHANNELS    4
 
@@ -54,33 +53,43 @@ enum ep_type {
 
 struct ep_desc {
     enum ep_type type;
+    int channel_idx;        /* Index into pre-allocated channel pool (-1 if unassigned) */
 
-    union {
-        struct {
-            int      dest_pe;
-            int      dest_ep;
-            int      dest_vpe;
-            int      msg_size;
-            uint64_t label;
-            int      credits;
-        } send;
+    /* Send EP fields */
+    int dest_pe;
+    int dest_ep;
+    int dest_vpe;
+    int msg_size;
+    uint64_t label;
+    int credits;
 
-        struct {
-            int buf_order;
-            int msg_order;
-            int flags;
-            int channel_idx;    /* which pre-allocated channel to use */
-        } recv;
+    /* Receive EP fields */
+    int buf_order;
+    int msg_order;
+    int slot_count;         /* Derived: 1 << (buf_order - msg_order) */
+    int slot_size;          /* Derived: 1 << msg_order */
+    int flags;
 
-        struct {
-            int      dest_pe;
-            uint64_t addr;
-            uint64_t size;
-            int      dest_vpe;
-            int      perm;
-            int      channel_idx;
-        } mem;
-    };
+    /* Memory EP fields */
+    uint64_t mem_addr;
+    uint64_t mem_size;
+    int mem_perm;           /* R=1, W=2, RW=3 */
+};
+
+/*
+ * =========================================================================
+ *  Channel Pool Tracking
+ * =========================================================================
+ */
+
+struct channel_pool {
+    int msg_in_use[NUM_MSG_CHANNELS];       /* 0=free, 1=assigned */
+    int msg_assigned_pe[NUM_MSG_CHANNELS];  /* Which PE owns the recv EP */
+    int msg_assigned_ep[NUM_MSG_CHANNELS];  /* Which recv EP number */
+
+    int mem_in_use[NUM_MEM_CHANNELS];
+    int mem_assigned_pe[NUM_MEM_CHANNELS];
+    int mem_assigned_ep[NUM_MEM_CHANNELS];
 };
 
 /*
@@ -89,53 +98,61 @@ struct ep_desc {
  * =========================================================================
  */
 
-/* Endpoint table: endpoints[pe][ep] */
 static struct ep_desc endpoints[MAX_PES][EP_PER_PE];
-
-/* VPE ID for each PE */
+static struct channel_pool pool;
 static int pe_vpe_id[MAX_PES];
-
-/* Privilege flag for each PE */
 static int pe_privileged[MAX_PES];
-
-/* Track which message channels have been assigned */
-static int msg_channel_assigned[NUM_MSG_CHANNELS];
-
-/* Next free message channel index */
-static int next_msg_channel = 0;
-
-/* Next free memory channel index */
-static int next_mem_channel = 0;
 
 /*
  * =========================================================================
- *  Channel Assignment
- *
- *  When a recv endpoint is configured, the vDTU assigns one of the
- *  pre-allocated dataports as the ring buffer backing store. When a
- *  send endpoint is later configured to target that recv endpoint,
- *  the sender knows which shared memory to write to.
+ *  Channel Assignment (free-list based)
  * =========================================================================
  */
 
-static int assign_msg_channel(void)
+static int alloc_msg_channel(int pe, int ep)
 {
-    if (next_msg_channel >= NUM_MSG_CHANNELS) {
-        printf("[vDTU] ERROR: no free message channels\n");
-        return -1;
+    for (int i = 0; i < NUM_MSG_CHANNELS; i++) {
+        if (!pool.msg_in_use[i]) {
+            pool.msg_in_use[i] = 1;
+            pool.msg_assigned_pe[i] = pe;
+            pool.msg_assigned_ep[i] = ep;
+            return i;
+        }
     }
-    int ch = next_msg_channel++;
-    msg_channel_assigned[ch] = 1;
-    return ch;
+    printf("[vDTU] ERROR: no free message channels\n");
+    return -1;
 }
 
-static int assign_mem_channel(void)
+static void free_msg_channel(int ch)
 {
-    if (next_mem_channel >= NUM_MEM_CHANNELS) {
-        printf("[vDTU] ERROR: no free memory channels\n");
-        return -1;
+    if (ch >= 0 && ch < NUM_MSG_CHANNELS) {
+        pool.msg_in_use[ch] = 0;
+        pool.msg_assigned_pe[ch] = -1;
+        pool.msg_assigned_ep[ch] = -1;
     }
-    return next_mem_channel++;
+}
+
+static int alloc_mem_channel(int pe, int ep)
+{
+    for (int i = 0; i < NUM_MEM_CHANNELS; i++) {
+        if (!pool.mem_in_use[i]) {
+            pool.mem_in_use[i] = 1;
+            pool.mem_assigned_pe[i] = pe;
+            pool.mem_assigned_ep[i] = ep;
+            return i;
+        }
+    }
+    printf("[vDTU] ERROR: no free memory channels\n");
+    return -1;
+}
+
+static void free_mem_channel(int ch)
+{
+    if (ch >= 0 && ch < NUM_MEM_CHANNELS) {
+        pool.mem_in_use[ch] = 0;
+        pool.mem_assigned_pe[ch] = -1;
+        pool.mem_assigned_ep[ch] = -1;
+    }
 }
 
 /*
@@ -144,132 +161,181 @@ static int assign_mem_channel(void)
  * =========================================================================
  */
 
-int config_config_send(int target_pe, int ep_id,
-                       int dest_pe, int dest_ep, int dest_vpe,
-                       int msg_size, uint64_t label, int credits)
-{
-    printf("[vDTU] config_send(target_pe=%d, ep=%d, dest_pe=%d, dest_ep=%d, "
-           "dest_vpe=%d, msg_size=%d, label=0x%lx, credits=%d)\n",
-           target_pe, ep_id, dest_pe, dest_ep, dest_vpe,
-           msg_size, (unsigned long)label, credits);
-
-    if (target_pe < 0 || target_pe >= MAX_PES ||
-        ep_id < 0 || ep_id >= EP_PER_PE) {
-        printf("[vDTU] ERROR: invalid PE or EP index\n");
-        return -1;
-    }
-
-    struct ep_desc *ep = &endpoints[target_pe][ep_id];
-    ep->type = EP_SEND;
-    ep->send.dest_pe   = dest_pe;
-    ep->send.dest_ep   = dest_ep;
-    ep->send.dest_vpe  = dest_vpe;
-    ep->send.msg_size  = msg_size;
-    ep->send.label     = label;
-    ep->send.credits   = credits;
-
-    return 0;
-}
-
 int config_config_recv(int target_pe, int ep_id,
                        int buf_order, int msg_order, int flags)
 {
-    printf("[vDTU] config_recv(target_pe=%d, ep=%d, buf_order=%d, "
-           "msg_order=%d, flags=%d)\n",
-           target_pe, ep_id, buf_order, msg_order, flags);
-
     if (target_pe < 0 || target_pe >= MAX_PES ||
         ep_id < 0 || ep_id >= EP_PER_PE) {
-        printf("[vDTU] ERROR: invalid PE or EP index\n");
+        printf("[vDTU] ERROR: config_recv invalid params (pe=%d, ep=%d)\n",
+               target_pe, ep_id);
         return -1;
     }
 
-    int ch = assign_msg_channel();
+    struct ep_desc *ep = &endpoints[target_pe][ep_id];
+    if (ep->type != EP_INVALID) {
+        printf("[vDTU] ERROR: config_recv pe=%d ep=%d already configured (type=%d)\n",
+               target_pe, ep_id, ep->type);
+        return -1;
+    }
+
+    int ch = alloc_msg_channel(target_pe, ep_id);
     if (ch < 0)
         return -1;
 
-    struct ep_desc *ep = &endpoints[target_pe][ep_id];
-    ep->type = EP_RECEIVE;
-    ep->recv.buf_order   = buf_order;
-    ep->recv.msg_order   = msg_order;
-    ep->recv.flags       = flags;
-    ep->recv.channel_idx = ch;
-
-    /* Compute slot parameters from orders.
-     * slot_count = 1 << (buf_order - msg_order)
-     * slot_size  = 1 << msg_order
-     * Cap to what fits in a 4 KiB dataport. */
+    /* Compute slot parameters from orders */
     uint32_t slot_size  = 1u << msg_order;
     uint32_t slot_count = 1u << (buf_order - msg_order);
 
+    /* Cap to what fits in a 4 KiB dataport */
     size_t needed = vdtu_ring_total_size(slot_count, slot_size);
     if (needed > 4096) {
         slot_count = (4096 - VDTU_RING_CTRL_SIZE) / slot_size;
-        /* Round down to power of 2 */
         uint32_t p = 1;
         while (p * 2 <= slot_count) p *= 2;
         slot_count = p;
         if (slot_count < 2) slot_count = 2;
     }
 
-    printf("[vDTU]   -> assigned channel %d (slot_count=%u, slot_size=%u)\n",
-           ch, slot_count, slot_size);
+    ep->type        = EP_RECEIVE;
+    ep->channel_idx = ch;
+    ep->buf_order   = buf_order;
+    ep->msg_order   = msg_order;
+    ep->slot_count  = (int)slot_count;
+    ep->slot_size   = (int)slot_size;
+    ep->flags       = flags;
 
-    /* The vDTU does not initialize ring buffers directly -- it has no
-     * dataport access. The kernel/VPE components initialize ring buffers
-     * in their own view of the shared memory using the channel index. */
+    printf("[vDTU] config_recv(pe=%d, ep=%d, buf_order=%d, msg_order=%d) "
+           "-> channel %d (%d slots x %dB)\n",
+           target_pe, ep_id, buf_order, msg_order,
+           ch, (int)slot_count, (int)slot_size);
 
-    return ch;  /* Return channel index so caller can find the dataport */
+    return ch;
+}
+
+int config_config_send(int target_pe, int ep_id,
+                       int dest_pe, int dest_ep, int dest_vpe,
+                       int msg_size, uint64_t label, int credits)
+{
+    if (target_pe < 0 || target_pe >= MAX_PES ||
+        ep_id < 0 || ep_id >= EP_PER_PE) {
+        printf("[vDTU] ERROR: config_send invalid params (pe=%d, ep=%d)\n",
+               target_pe, ep_id);
+        return -1;
+    }
+
+    if (dest_pe < 0 || dest_pe >= MAX_PES ||
+        dest_ep < 0 || dest_ep >= EP_PER_PE) {
+        printf("[vDTU] ERROR: config_send invalid dest (pe=%d, ep=%d)\n",
+               dest_pe, dest_ep);
+        return -1;
+    }
+
+    /* Look up the destination receive EP */
+    struct ep_desc *dest = &endpoints[dest_pe][dest_ep];
+    if (dest->type != EP_RECEIVE) {
+        printf("[vDTU] ERROR: config_send dest pe=%d ep=%d is not RECEIVE (type=%d)\n",
+               dest_pe, dest_ep, dest->type);
+        return -1;
+    }
+
+    struct ep_desc *ep = &endpoints[target_pe][ep_id];
+
+    /* If this EP was previously configured, clear it first (but don't free
+     * channels for SEND type - they belong to the recv EP) */
+    if (ep->type != EP_INVALID) {
+        ep->type = EP_INVALID;
+        ep->channel_idx = -1;
+    }
+
+    ep->type        = EP_SEND;
+    ep->channel_idx = dest->channel_idx;  /* Same channel as target recv EP */
+    ep->dest_pe     = dest_pe;
+    ep->dest_ep     = dest_ep;
+    ep->dest_vpe    = dest_vpe;
+    ep->msg_size    = msg_size;
+    ep->label       = label;
+    ep->credits     = credits;
+
+    printf("[vDTU] config_send(pe=%d, ep=%d, dest=%d:%d, label=0x%lx) -> channel %d\n",
+           target_pe, ep_id, dest_pe, dest_ep,
+           (unsigned long)label, ep->channel_idx);
+
+    return ep->channel_idx;
 }
 
 int config_config_mem(int target_pe, int ep_id,
                       int dest_pe, uint64_t addr, uint64_t size,
                       int dest_vpe, int perm)
 {
-    printf("[vDTU] config_mem(target_pe=%d, ep=%d, dest_pe=%d, "
-           "addr=0x%lx, size=0x%lx, dest_vpe=%d, perm=%d)\n",
-           target_pe, ep_id, dest_pe,
-           (unsigned long)addr, (unsigned long)size, dest_vpe, perm);
-
     if (target_pe < 0 || target_pe >= MAX_PES ||
         ep_id < 0 || ep_id >= EP_PER_PE) {
+        printf("[vDTU] ERROR: config_mem invalid params (pe=%d, ep=%d)\n",
+               target_pe, ep_id);
         return -1;
     }
 
-    int ch = assign_mem_channel();
+    struct ep_desc *ep = &endpoints[target_pe][ep_id];
+    if (ep->type != EP_INVALID) {
+        printf("[vDTU] ERROR: config_mem pe=%d ep=%d already configured (type=%d)\n",
+               target_pe, ep_id, ep->type);
+        return -1;
+    }
+
+    int ch = alloc_mem_channel(target_pe, ep_id);
     if (ch < 0)
         return -1;
 
-    struct ep_desc *ep = &endpoints[target_pe][ep_id];
-    ep->type = EP_MEMORY;
-    ep->mem.dest_pe     = dest_pe;
-    ep->mem.addr        = addr;
-    ep->mem.size        = size;
-    ep->mem.dest_vpe    = dest_vpe;
-    ep->mem.perm        = perm;
-    ep->mem.channel_idx = ch;
+    ep->type        = EP_MEMORY;
+    ep->channel_idx = ch;
+    ep->dest_pe     = dest_pe;
+    ep->mem_addr    = addr;
+    ep->mem_size    = size;
+    ep->dest_vpe    = dest_vpe;
+    ep->mem_perm    = perm;
 
-    printf("[vDTU]   -> assigned memory channel %d\n", ch);
+    printf("[vDTU] config_mem(pe=%d, ep=%d, dest_pe=%d, addr=0x%lx, size=0x%lx, perm=%d) "
+           "-> mem channel %d\n",
+           target_pe, ep_id, dest_pe,
+           (unsigned long)addr, (unsigned long)size, perm, ch);
+
     return ch;
 }
 
 int config_invalidate_ep(int target_pe, int ep_id)
 {
-    printf("[vDTU] invalidate_ep(target_pe=%d, ep=%d)\n", target_pe, ep_id);
-
     if (target_pe < 0 || target_pe >= MAX_PES ||
         ep_id < 0 || ep_id >= EP_PER_PE) {
         return -1;
     }
 
-    memset(&endpoints[target_pe][ep_id], 0, sizeof(struct ep_desc));
+    struct ep_desc *ep = &endpoints[target_pe][ep_id];
+
+    if (ep->type == EP_RECEIVE) {
+        printf("[vDTU] invalidate_ep(pe=%d, ep=%d) -> freed msg channel %d\n",
+               target_pe, ep_id, ep->channel_idx);
+        free_msg_channel(ep->channel_idx);
+    } else if (ep->type == EP_MEMORY) {
+        printf("[vDTU] invalidate_ep(pe=%d, ep=%d) -> freed mem channel %d\n",
+               target_pe, ep_id, ep->channel_idx);
+        free_mem_channel(ep->channel_idx);
+    } else if (ep->type == EP_SEND) {
+        printf("[vDTU] invalidate_ep(pe=%d, ep=%d) -> cleared send EP\n",
+               target_pe, ep_id);
+        /* Send EP doesn't own the channel - just clear the entry */
+    } else {
+        printf("[vDTU] invalidate_ep(pe=%d, ep=%d) -> already invalid\n",
+               target_pe, ep_id);
+    }
+
+    memset(ep, 0, sizeof(*ep));
+    ep->channel_idx = -1;
+
     return 0;
 }
 
 int config_invalidate_eps(int target_pe, int first_ep)
 {
-    printf("[vDTU] invalidate_eps(target_pe=%d, first_ep=%d)\n",
-           target_pe, first_ep);
+    printf("[vDTU] invalidate_eps(pe=%d, first_ep=%d)\n", target_pe, first_ep);
 
     if (target_pe < 0 || target_pe >= MAX_PES ||
         first_ep < 0 || first_ep >= EP_PER_PE) {
@@ -277,14 +343,14 @@ int config_invalidate_eps(int target_pe, int first_ep)
     }
 
     for (int i = first_ep; i < EP_PER_PE; i++) {
-        memset(&endpoints[target_pe][i], 0, sizeof(struct ep_desc));
+        config_invalidate_ep(target_pe, i);
     }
     return 0;
 }
 
 int config_set_vpe_id(int target_pe, int vpe_id)
 {
-    printf("[vDTU] set_vpe_id(target_pe=%d, vpe_id=%d)\n", target_pe, vpe_id);
+    printf("[vDTU] set_vpe_id(pe=%d, vpe_id=%d)\n", target_pe, vpe_id);
 
     if (target_pe < 0 || target_pe >= MAX_PES)
         return -1;
@@ -295,7 +361,7 @@ int config_set_vpe_id(int target_pe, int vpe_id)
 
 int config_set_privilege(int target_pe, int priv)
 {
-    printf("[vDTU] set_privilege(target_pe=%d, priv=%d)\n", target_pe, priv);
+    printf("[vDTU] set_privilege(pe=%d, priv=%d)\n", target_pe, priv);
 
     if (target_pe < 0 || target_pe >= MAX_PES)
         return -1;
@@ -306,18 +372,18 @@ int config_set_privilege(int target_pe, int priv)
 
 int config_wakeup_pe(int target_pe)
 {
-    printf("[vDTU] wakeup_pe(target_pe=%d)\n", target_pe);
+    printf("[vDTU] wakeup_pe(pe=%d)\n", target_pe);
 
     if (target_pe < 0 || target_pe >= MAX_PES)
         return -1;
 
-    /* Signal the target PE's notification to wake it from seL4_Wait(). */
     if (target_pe == PE_KERNEL) {
         notify_kernel_emit();
     } else if (target_pe == PE_VPE0) {
         notify_vpe0_emit();
     } else {
         printf("[vDTU] WARNING: wakeup_pe for unknown PE %d\n", target_pe);
+        return -1;
     }
 
     return 0;
@@ -340,21 +406,31 @@ void pre_init(void)
            MAX_PES, EP_PER_PE);
 
     memset(endpoints, 0, sizeof(endpoints));
+    memset(&pool, 0, sizeof(pool));
     memset(pe_vpe_id, 0, sizeof(pe_vpe_id));
     memset(pe_privileged, 0, sizeof(pe_privileged));
-    memset(msg_channel_assigned, 0, sizeof(msg_channel_assigned));
 
-    printf("[vDTU] Initialized, managing endpoint table\n");
+    /* Set all channel_idx to -1 (unassigned) */
+    for (int pe = 0; pe < MAX_PES; pe++) {
+        for (int ep = 0; ep < EP_PER_PE; ep++) {
+            endpoints[pe][ep].channel_idx = -1;
+        }
+    }
+    for (int i = 0; i < NUM_MSG_CHANNELS; i++) {
+        pool.msg_assigned_pe[i] = -1;
+        pool.msg_assigned_ep[i] = -1;
+    }
+    for (int i = 0; i < NUM_MEM_CHANNELS; i++) {
+        pool.mem_assigned_pe[i] = -1;
+        pool.mem_assigned_ep[i] = -1;
+    }
+
+    printf("[vDTU] Initialized (%d msg channels, %d mem channels available)\n",
+           NUM_MSG_CHANNELS, NUM_MEM_CHANNELS);
 }
 
 int run(void)
 {
-    /* The vDTU service is entirely RPC-driven.
-     * After initialization, it waits for config RPCs from the kernel.
-     * The CAmkES runtime handles the RPC dispatch loop automatically.
-     *
-     * For the prototype, the run() function just confirms startup
-     * and then returns (CAmkES handles the event loop). */
     printf("[vDTU] Ready for configuration requests\n");
     return 0;
 }

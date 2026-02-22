@@ -1,146 +1,172 @@
 /*
  * VPE0.c -- Application VPE test stub (CAmkES component)
  *
- * Simple echo server: waits for a notification from the kernel, reads a
- * message from the ring buffer, sends a reply, and signals the kernel.
+ * Handles messages from the kernel in a loop for tests 1-3:
+ *   - "HELLO_VPE"       -> reply "ACK"
+ *   - "TEST2_MSG"       -> reply "ACK"
+ *   - "MEM_CHECK:<chan>" -> read memory dataport, verify, reply "MEM_OK"/"MEM_FAIL"
  *
- * In the real system, this component would run a SemperOS application
- * binary with the m3 user-space library.
+ * After 3 message exchanges, VPE0 exits. Tests 4 and 5 are pure control
+ * plane (vDTU config/invalidate RPCs) that don't involve VPE0 data path.
  */
 
 #include <stdio.h>
 #include <string.h>
 #include <camkes.h>
 #include "vdtu_ring.h"
+#include "vdtu_channels.h"
 
-#define MY_PE   1   /* VPE0 is PE 1 */
+#define MY_PE   1
 
-/* Ring buffer handles */
-static struct vdtu_ring recv_ring;  /* messages from kernel */
-static struct vdtu_ring reply_ring; /* replies back to kernel */
+/* Channel table */
+static struct vdtu_channel_table channels;
 
-/*
- * Get a pointer to the dataport for a given channel index.
- */
-static void *get_msgchan_dataport(int channel_idx)
+/* Number of message exchanges to handle (tests 1, 2, 3) */
+#define NUM_EXCHANGES 3
+
+static void init_channel_table(void)
 {
-    switch (channel_idx) {
-        case 0: return (void *)msgchan_kv_0;
-        case 1: return (void *)msgchan_kv_1;
-        case 2: return (void *)msgchan_kv_2;
-        case 3: return (void *)msgchan_kv_3;
-        case 4: return (void *)msgchan_kv_4;
-        case 5: return (void *)msgchan_kv_5;
-        case 6: return (void *)msgchan_kv_6;
-        case 7: return (void *)msgchan_kv_7;
-        default: return NULL;
-    }
+    volatile void *msg[] = {
+        (volatile void *)msgchan_kv_0,
+        (volatile void *)msgchan_kv_1,
+        (volatile void *)msgchan_kv_2,
+        (volatile void *)msgchan_kv_3,
+        (volatile void *)msgchan_kv_4,
+        (volatile void *)msgchan_kv_5,
+        (volatile void *)msgchan_kv_6,
+        (volatile void *)msgchan_kv_7,
+    };
+    volatile void *mem[] = {
+        (volatile void *)memep_kv_0,
+        (volatile void *)memep_kv_1,
+        (volatile void *)memep_kv_2,
+        (volatile void *)memep_kv_3,
+    };
+    vdtu_channels_init(&channels, msg, mem);
 }
 
 /*
- * CAmkES component entry point.
- *
- * VPE0 is started after SemperKernel has configured the channels.
- * Due to priority scheduling (kernel=200 > VPE0=150), the kernel runs
- * first, initializes ring buffers, sends a message, and signals us.
- *
- * Channel assignment is coordinated through the vDTU:
- *   - Channel 0: kernel -> VPE0 messages (VPE0 is consumer)
- *   - Channel 1: VPE0 -> kernel replies (VPE0 is producer)
- *
- * These indices match what config_recv returns to the kernel in
- * setup_channels(). In a real implementation, the vDTU would
- * communicate channel assignments to VPE0 as part of VPE setup.
+ * Handle a single message exchange.
+ * The kernel signals us, we read from the appropriate channel, process, reply.
  */
+static int handle_message(int exchange_num)
+{
+    const struct vdtu_message *msg;
+    struct vdtu_ring *recv_ring;
+    char buf[256];
+    int len;
+
+    /* Try each possible receive channel to find the message.
+     * In a real system, we'd know which channel to check. For the test,
+     * we scan attached channels. */
+    int recv_chan = -1;
+    for (int ch = 0; ch < VDTU_MSG_CHANNELS; ch++) {
+        /* Try to attach (idempotent if already attached) */
+        if (!channels.msg[ch]) continue;
+        if (!channels.msg_rings[ch].ctrl) {
+            /* Try attaching */
+            vdtu_channels_attach_ring(&channels, ch);
+        }
+        struct vdtu_ring *r = vdtu_channels_get_ring(&channels, ch);
+        if (r && !vdtu_ring_is_empty(r)) {
+            recv_chan = ch;
+            break;
+        }
+    }
+
+    if (recv_chan < 0) {
+        printf("[VPE0] ERROR: no message found on any channel\n");
+        return -1;
+    }
+
+    recv_ring = vdtu_channels_get_ring(&channels, recv_chan);
+    msg = vdtu_ring_fetch(recv_ring);
+    if (!msg) {
+        printf("[VPE0] ERROR: fetch returned NULL on channel %d\n", recv_chan);
+        return -1;
+    }
+
+    len = msg->hdr.length;
+    if (len > (int)sizeof(buf) - 1) len = (int)sizeof(buf) - 1;
+    memcpy(buf, msg->data, len);
+    buf[len] = '\0';
+
+    printf("[VPE0] [exchange %d] Received: \"%s\" on channel %d "
+           "(from PE %d EP %d)\n",
+           exchange_num, buf, recv_chan,
+           msg->hdr.sender_core_id, msg->hdr.sender_ep_id);
+
+    /* Remember reply channel from replylabel */
+    int reply_chan = (int)msg->hdr.replylabel;
+    vdtu_ring_ack(recv_ring);
+
+    /* Determine reply based on message content */
+    const char *reply_text = NULL;
+
+    if (strncmp(buf, "MEM_CHECK:", 10) == 0) {
+        /* Memory endpoint test: read from the specified memory channel */
+        int mem_chan = buf[10] - '0';
+        volatile void *mem_ptr = vdtu_channels_get_mem(&channels, mem_chan);
+        if (!mem_ptr) {
+            printf("[VPE0] ERROR: cannot access mem channel %d\n", mem_chan);
+            reply_text = "MEM_FAIL";
+        } else {
+            char mem_buf[64];
+            memcpy(mem_buf, (const void *)mem_ptr, sizeof(mem_buf) - 1);
+            mem_buf[sizeof(mem_buf) - 1] = '\0';
+            printf("[VPE0] Memory channel %d contains: \"%s\"\n", mem_chan, mem_buf);
+            if (strncmp(mem_buf, "MEMORY_TEST_DATA_12345678", 25) == 0) {
+                reply_text = "MEM_OK";
+            } else {
+                reply_text = "MEM_FAIL";
+            }
+        }
+    } else {
+        /* For HELLO_VPE, TEST2_MSG, or anything else: reply "ACK" */
+        reply_text = "ACK";
+    }
+
+    /* Send reply on the reply channel */
+    /* Attach to reply channel if not already attached */
+    if (!channels.msg_rings[reply_chan].ctrl) {
+        vdtu_channels_attach_ring(&channels, reply_chan);
+    }
+    struct vdtu_ring *reply_ring = vdtu_channels_get_ring(&channels, reply_chan);
+    if (!reply_ring) {
+        printf("[VPE0] ERROR: cannot get reply ring for channel %d\n", reply_chan);
+        return -1;
+    }
+
+    printf("[VPE0] Sending reply: \"%s\" on channel %d\n", reply_text, reply_chan);
+    int rc = vdtu_ring_send(reply_ring,
+                            MY_PE, 0, 0, 0,
+                            0, 0, VDTU_FLAG_REPLY,
+                            reply_text, (uint16_t)strlen(reply_text));
+    if (rc != 0) {
+        printf("[VPE0] ERROR: reply send failed: %d\n", rc);
+        return -1;
+    }
+
+    signal_kernel_emit();
+    return 0;
+}
+
 int run(void)
 {
     printf("[VPE0] Starting (PE %d)\n", MY_PE);
 
-    /*
-     * Wait for the kernel to finish setting up channels and send a message.
-     * The kernel signals us via the direct data path notification after
-     * writing to the ring buffer. seL4 notifications are binary semaphores,
-     * so if the kernel signals before we wait, we'll return immediately.
-     */
-    printf("[VPE0] Waiting for signal from kernel...\n");
-    signal_from_kernel_wait();
+    init_channel_table();
 
-    /*
-     * Attach to channel 0 (kernel -> VPE0 messages).
-     * The kernel already initialized this ring buffer.
-     */
-    void *recv_mem = get_msgchan_dataport(0);
-    if (!recv_mem) {
-        printf("[VPE0] ERROR: cannot access receive dataport\n");
-        return 1;
-    }
-    vdtu_ring_attach(&recv_ring, recv_mem);
-    printf("[VPE0] Attached to receive ring (channel 0, "
-           "slot_count=%u, slot_size=%u)\n",
-           recv_ring.ctrl->slot_count, recv_ring.ctrl->slot_size);
+    for (int i = 0; i < NUM_EXCHANGES; i++) {
+        printf("[VPE0] Waiting for signal from kernel...\n");
+        signal_from_kernel_wait();
 
-    /*
-     * Attach to channel 1 (VPE0 -> kernel replies).
-     * The kernel already initialized this ring buffer too.
-     */
-    void *reply_mem = get_msgchan_dataport(1);
-    if (!reply_mem) {
-        printf("[VPE0] ERROR: cannot access reply dataport\n");
-        return 1;
-    }
-    vdtu_ring_attach(&reply_ring, reply_mem);
-    printf("[VPE0] Attached to reply ring (channel 1)\n");
-
-    /*
-     * Read the message from the ring buffer.
-     */
-    const struct vdtu_message *msg = vdtu_ring_fetch(&recv_ring);
-    if (!msg) {
-        printf("[VPE0] ERROR: notification received but no message in ring\n");
-        return 1;
+        if (handle_message(i + 1) != 0) {
+            printf("[VPE0] ERROR: handle_message failed at exchange %d\n", i + 1);
+            break;
+        }
     }
 
-    /* Extract message contents */
-    char buf[256];
-    int len = msg->hdr.length;
-    if (len > (int)sizeof(buf) - 1)
-        len = (int)sizeof(buf) - 1;
-    memcpy(buf, msg->data, len);
-    buf[len] = '\0';
-
-    printf("[VPE0] Received message: \"%s\" (len=%d, label=0x%lx, "
-           "from PE %d EP %d)\n",
-           buf, msg->hdr.length, (unsigned long)msg->hdr.label,
-           msg->hdr.sender_core_id, msg->hdr.sender_ep_id);
-
-    /* Remember reply info before acking */
-    uint8_t  reply_ep   = msg->hdr.reply_ep_id;
-    uint64_t replylabel = msg->hdr.replylabel;
-
-    /* Acknowledge (consume) the message */
-    vdtu_ring_ack(&recv_ring);
-
-    /* Send reply "ACK" */
-    const char *reply_text = "ACK";
-    printf("[VPE0] Sending reply: \"%s\"\n", reply_text);
-
-    int rc = vdtu_ring_send(&reply_ring,
-                            MY_PE, 0,      /* sender PE, EP */
-                            0,             /* sender VPE */
-                            reply_ep,      /* reply EP (from original msg) */
-                            replylabel,    /* label */
-                            0,             /* replylabel */
-                            VDTU_FLAG_REPLY,
-                            reply_text,
-                            (uint16_t)strlen(reply_text));
-    if (rc != 0) {
-        printf("[VPE0] ERROR: reply send failed: %d\n", rc);
-        return 1;
-    }
-
-    /* Signal kernel that reply is available (direct data path notification) */
-    signal_kernel_emit();
-
-    printf("[VPE0] Done (handled 1 message)\n");
+    printf("[VPE0] Done (handled %d exchanges)\n", NUM_EXCHANGES);
     return 0;
 }

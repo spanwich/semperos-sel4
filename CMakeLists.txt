@@ -29,8 +29,9 @@ include(settings.cmake)
 # Shared include directory for all components
 set(VDTU_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/components/include")
 
-# Ring buffer shared library (compiled into each component)
+# Shared library sources (compiled into each component)
 set(VDTU_RING_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/vdtu_ring.c")
+set(VDTU_CHANNELS_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/vdtu_channels.c")
 
 # =========================================================================
 #  VDTUService Component
@@ -50,6 +51,7 @@ DeclareCAmkESComponent(SemperKernel
     SOURCES
         components/SemperKernel/SemperKernel.c
         ${VDTU_RING_SRC}
+        ${VDTU_CHANNELS_SRC}
     INCLUDES
         ${VDTU_INCLUDE_DIR}
 )
@@ -61,6 +63,7 @@ DeclareCAmkESComponent(VPE0
     SOURCES
         components/VPE0/VPE0.c
         ${VDTU_RING_SRC}
+        ${VDTU_CHANNELS_SRC}
     INCLUDES
         ${VDTU_INCLUDE_DIR}
 )
