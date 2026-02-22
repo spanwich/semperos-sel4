@@ -4,9 +4,8 @@
  * Replaces arch/baremetal/kernel.cc. Bridge from CAmkES run() entry
  * to SemperOS kernel initialization and WorkLoop.
  *
- * On sel4, endpoint configuration (config_recv_local) is deferred to
- * kernel_start() because CAmkES RPC calls require run() context —
- * they cannot be made during INIT_PRIO static initialization.
+ * On sel4, endpoint configuration is deferred to kernel_start() because
+ * CAmkES RPC calls require run() context.
  */
 
 extern "C" {
@@ -15,6 +14,7 @@ extern "C" {
 
 #include <base/log/Kernel.h>
 #include <base/util/Math.h>
+#include <base/util/String.h>
 
 #include "Platform.h"
 #include "DTU.h"
@@ -33,19 +33,19 @@ using namespace kernel;
 
 /*
  * Configure syscall and kernelcall receive endpoints.
- * This is deferred from INIT_PRIO constructors because CAmkES RPC
- * (vdtu_config_recv) is not available during static initialization.
+ * Deferred from INIT_PRIO constructors — CAmkES RPC not available
+ * during static initialization.
  */
 static void configure_recv_endpoints(void)
 {
     SyscallHandler &sysch = SyscallHandler::get();
 
-    /* Configure SYSC_GATE recv endpoints (6 gates for syscalls from VPEs) */
+    /* Configure 1 SYSC_GATE recv endpoint (for syscalls from VPEs).
+     * Prototype uses 1 gate (channel budget: 8 total).
+     * Channel allocation: 1 SYSC + 1 SRV + 1 KRNLC + 1 VPE0_RECV + 1 VPE0_SEND = 5/8 */
     int buford = m3::getnextlog2(m3::DTU::MAX_MSG_SLOTS) + VPE::SYSC_CREDIT_ORD;
-    for (uint i = 0; i < DTU::SYSC_GATES; i++) {
-        DTU::get().config_recv_local(sysch.epid(i), 0, buford, VPE::SYSC_CREDIT_ORD, 0);
-    }
-    printf("[SemperKernel] Configured %d SYSC_GATE recv endpoints\n", DTU::SYSC_GATES);
+    DTU::get().config_recv_local(sysch.epid(0), 0, buford, VPE::SYSC_CREDIT_ORD, 0);
+    printf("[SemperKernel] Configured SYSC_GATE recv endpoint (ep %zu)\n", sysch.epid(0));
 
     /* Configure service recv endpoint */
     int srv_buford = m3::nextlog2<Service::SRV_MSG_SIZE * m3::DTU::MAX_MSG_SLOTS>::val;
@@ -53,13 +53,52 @@ static void configure_recv_endpoints(void)
                                  m3::nextlog2<Service::SRV_MSG_SIZE>::val, 0);
     printf("[SemperKernel] Configured service recv endpoint (ep %zu)\n", sysch.srvepid());
 
-    /* Configure KRNLC_GATE recv endpoints (for inter-kernel calls).
-     * Only configure the first gate for Task 04 (single-kernel). */
+    /* Configure 1 KRNLC_GATE (single-kernel) */
     KernelcallHandler &krnlch = KernelcallHandler::get();
     int kbuford = m3::getnextlog2(m3::DTU::MAX_MSG_SLOTS) + Kernelcalls::MSG_ORD;
-    /* Only configure 1 KRNLC gate to save channels (we have 8 channels total) */
     DTU::get().config_recv_local(krnlch.epid(0), 0, kbuford, Kernelcalls::MSG_ORD, 0);
     printf("[SemperKernel] Configured 1 KRNLC_GATE recv endpoint\n");
+}
+
+/*
+ * Create and start VPE0 (the first user VPE).
+ *
+ * VPE0 is PE 2 in our platform config. Creating the VPE object
+ * calls VPE::init() which:
+ *   1. Attaches the default receive endpoint (DEF_RECVEP on VPE0)
+ *   2. Configures the syscall send endpoint (SYSC_EP on VPE0)
+ *
+ * After init, VPE0's CAmkES component can send syscalls to the kernel.
+ */
+static VPE *create_vpe0(void)
+{
+    SyscallHandler &sysch = SyscallHandler::get();
+
+    /* Reserve a syscall EP slot for VPE0 */
+    int vpe_id = 0;
+    int sysc_ep = sysch.reserve_ep(vpe_id);
+    if (sysc_ep < 0) {
+        printf("[SemperKernel] ERROR: no syscall EP available for VPE0\n");
+        return nullptr;
+    }
+
+    /* VPE0 is on PE 2 (core 2) */
+    size_t vpe0_core = 2;
+
+    printf("[SemperKernel] Creating VPE0 on PE %zu (syscall EP %d)\n", vpe0_core, sysc_ep);
+
+    /* Create the VPE object. The constructor calls init() which:
+     * - RecvBufs::attach() for DEF_RECVEP
+     * - config_send_remote() for SYSC_EP -> kernel's sysc_ep */
+    VPE *vpe0 = new VPE(m3::String("VPE0"), vpe_id, vpe0_core, false, sysc_ep);
+
+    /* Start VPE0 (calls DTU::wakeup which is a no-op on sel4,
+     * since CAmkES components are always running) */
+    vpe0->start(0, nullptr, 0);
+
+    printf("[SemperKernel] VPE0 created and started\n");
+
+    return vpe0;
 }
 
 extern "C" void kernel_start(void) {
@@ -77,14 +116,18 @@ extern "C" void kernel_start(void) {
     PEManager::create();
     printf("[SemperKernel] PEManager created\n");
 
+    /* Create and start VPE0 */
+    VPE *vpe0 = create_vpe0();
+    if (!vpe0) {
+        printf("[SemperKernel] FATAL: Failed to create VPE0\n");
+        return;
+    }
+
     printf("[SemperKernel] Entering WorkLoop (polling %d SYSC + %d KRNLC gates)\n",
            DTU::SYSC_GATES, DTU::KRNLC_GATES);
 
-    /* Enter the real kernel WorkLoop — polls all recv endpoints.
-     * Must use kernel::WorkLoop (overrides m3::WorkLoop::run()),
-     * NOT m3::env()->workloop() which is a plain m3::WorkLoop. */
+    /* Enter the real kernel WorkLoop */
     static kernel::WorkLoop kworkloop;
-    /* Transfer the permanent work items so has_items() returns true */
     kworkloop.add(nullptr, false);
     kworkloop.run();
 

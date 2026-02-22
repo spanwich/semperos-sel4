@@ -218,7 +218,7 @@ assembly {
         vdtu.priority = 250;
         /* SemperKernel gets PE ID 0 */
         kernel0.priority = 200;
-        /* VPE0 gets PE ID 1 */
-        vpe0.priority = 150;
+        /* VPE0 gets PE ID 2 — same priority as kernel for seL4_Yield() scheduling */
+        vpe0.priority = 200;
     }
 }

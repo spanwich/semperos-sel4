@@ -89,8 +89,15 @@ void WorkLoop::run() {
         for(int i = 0; i < DTU::SYSC_GATES; i++) {
             msg = dtu.fetch_msg(sysep[i]);
             if(msg) {
-                // we know the subscriber here, so optimize that a bit
                 RecvGate *rgate = reinterpret_cast<RecvGate*>(msg->label);
+#if defined(__sel4__)
+                /* On sel4, VPE sends may not have the correct label
+                 * (vDTU doesn't auto-fill from EP config like gem5 HW).
+                 * Use a fallback gate for the EP. */
+                RecvGate fallback_gate(sysep[i], nullptr);
+                if(!msg->label)
+                    rgate = &fallback_gate;
+#endif
                 GateIStream is(*rgate, msg);
                 sysch.handle_message(is, nullptr);
                 EVENT_TRACE_FLUSH_LIGHT();

@@ -440,14 +440,21 @@ Errors::Code DTU::reply(int ep, const void *data, size_t size, size_t msgoff) {
     uint64_t replylabel = orig->replylabel;
 
     /* Find a send channel to the sender's reply EP.
-     * If none exists, we need to configure one on-the-fly. */
+     * If none exists, configure one on-the-fly. */
     int reply_ch = find_send_channel_for(sender_pe, reply_ep_id);
     if (reply_ch < 0) {
-        /* Auto-configure: ask vDTU for send access to the sender's reply EP */
-        /* Find a free local EP slot for this auto-send channel */
-        int auto_ep = kernel::DTU::get().alloc_ep();
-        if (auto_ep >= EP_COUNT) {
-            printf("[DTU] reply: no free EP for auto-send to pe=%d ep=%d\n",
+        /* Auto-configure: ask vDTU for send access to the sender's reply EP.
+         * Find a free EP slot (scan for EP_NONE, don't use alloc_ep()
+         * which may be exhausted by INIT_PRIO allocations). */
+        int auto_ep = -1;
+        for (int i = 0; i < EP_COUNT; i++) {
+            if (ep_type[i] == EP_NONE) {
+                auto_ep = i;
+                break;
+            }
+        }
+        if (auto_ep < 0) {
+            printf("[DTU] reply: no free EP slot for auto-send to pe=%d ep=%d\n",
                    sender_pe, reply_ep_id);
             return Errors::NO_SPACE;
         }
@@ -480,9 +487,7 @@ Errors::Code DTU::reply(int ep, const void *data, size_t size, size_t msgoff) {
                             VDTU_FLAG_REPLY,
                             data, (uint16_t)size);
 
-    /* Also ack the original message since reply implies consumption.
-     * Note: GateIStream sets _ack=false after reply(), so finish() won't
-     * double-ack. But we do it here for safety. */
+    /* Also ack the original message since reply implies consumption. */
     struct vdtu_ring *recv_ring = vdtu_channels_get_ring(&channels, ep_channel[ep]);
     if (recv_ring)
         vdtu_ring_ack(recv_ring);

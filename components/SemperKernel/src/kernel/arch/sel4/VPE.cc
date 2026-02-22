@@ -59,11 +59,17 @@ void VPE::init_memory(int, const char *) {
 /* --- Functions from baremetal/VPE.cc, adapted for sel4 --- */
 
 void VPE::init() {
-    /* Attach default receive endpoint */
+    /* Attach default receive endpoint.
+     * Use buf_order=11 (2048B buffer), msg_order=9 (512B slots) → 4 slots.
+     * DEF_RCVBUF_ORDER=8 is too small (256B = 1 slot = 0 usable capacity). */
+    int buf_order = 11;  /* 2048 bytes total */
+    int msg_order = VPE::SYSC_CREDIT_ORD;  /* 512 byte slots */
     UNUSED m3::Errors::Code res = RecvBufs::attach(
         *this, m3::DTU::DEF_RECVEP, Platform::def_recvbuf(core()),
-        DEF_RCVBUF_ORDER, DEF_RCVBUF_ORDER, 0);
-    assert(res == m3::Errors::NO_ERROR);
+        buf_order, msg_order, 0);
+    /* Non-fatal if no channels available */
+    if (res != m3::Errors::NO_ERROR)
+        KLOG(ERR, "DEF_RECVEP attach failed for PE " << core());
 
     /* Configure syscall endpoint */
     DTU::get().config_send_remote(

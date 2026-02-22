@@ -16,6 +16,9 @@
 #include <base/Errors.h>
 #include <assert.h>
 
+/* Yield wrapper (implemented in camkes_entry.c which can include sel4 headers) */
+extern "C" void sel4_yield_wrapper(void);
+
 #define DTU_PKG_SIZE        (static_cast<size_t>(8))
 
 /* Bit-field constants from gem5 — kept for compatibility */
@@ -151,7 +154,9 @@ public:
     void mark_read(int ep, size_t off);
 
     bool wait() const {
-        /* On sel4 we could seL4_Wait, but for now just return true */
+        /* Yield to let other CAmkES components (VPE0) run.
+         * On single-core QEMU, busy-polling starves lower-priority threads. */
+        sel4_yield_wrapper();
         return true;
     }
     void wait_until_ready(int) const {
