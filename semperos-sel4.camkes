@@ -8,7 +8,7 @@
  *
  * Connection types:
  *   1. seL4RPCCall:     Config RPC (SemperKernel -> VDTUService)
- *   2. seL4SharedData:  Message ring buffers (dataports between components)
+ *   2. seL4SharedData:  Message ring buffers (point-to-point: kernel <-> VPE0)
  *   3. seL4Notification: Doorbell signaling for message arrival
  *
  * Pre-allocation strategy:
@@ -22,9 +22,14 @@
  *     (6 for SYSC_GATES + 1 for DEF_RECVEP + 1 spare)
  *   - 4 memory dataports: SemperKernel <-> VPE0
  *     (for DTU READ/WRITE memory endpoint operations)
- *   - 2 message channels: SemperKernel <-> VDTUService
- *     (for vDTU's own internal messaging, if needed)
  *   - 1 RPC connection:   SemperKernel -> VDTUService (config calls)
+ *
+ * Data path separation:
+ *   The vDTU is control plane only -- it manages an endpoint table and
+ *   assigns channels, but NEVER touches the data path memory. All
+ *   seL4SharedData connections are point-to-point between kernel and VPE0.
+ *   Direct notifications between kernel and VPE0 avoid routing signals
+ *   through the vDTU.
  */
 
 import <std_connector.camkes>;
@@ -54,47 +59,33 @@ procedure VDTUConfig {
  */
 
 component VDTUService {
+    control;
+
     /* Config RPC: served to SemperKernel */
     provides VDTUConfig config;
 
     /*
-     * Pre-allocated message channel dataports (SemperKernel <-> VPE0).
-     * These are mapped into all three components. The vDTU manages which
-     * ring buffer corresponds to which DTU endpoint pair.
-     *
-     * Each dataport is 4 KiB (1 page), sufficient for a ring buffer with
-     * 4 slots of 512 bytes (64 + 4*512 = 2112 bytes, fits in 4 KiB).
-     * For larger slot counts/sizes, use larger dataports.
+     * The vDTU is control plane only. It does NOT have dataport access to
+     * message channels or memory endpoints. It maintains an in-memory
+     * endpoint table mapping (pe, ep) -> channel_index. The actual shared
+     * memory is point-to-point between kernel and VPE0.
      */
-    dataport Buf(4096) msgchan_kv_0;
-    dataport Buf(4096) msgchan_kv_1;
-    dataport Buf(4096) msgchan_kv_2;
-    dataport Buf(4096) msgchan_kv_3;
-    dataport Buf(4096) msgchan_kv_4;
-    dataport Buf(4096) msgchan_kv_5;
-    dataport Buf(4096) msgchan_kv_6;
-    dataport Buf(4096) msgchan_kv_7;
 
-    /* Pre-allocated memory endpoint dataports (SemperKernel <-> VPE0) */
-    dataport Buf(4096) memep_kv_0;
-    dataport Buf(4096) memep_kv_1;
-    dataport Buf(4096) memep_kv_2;
-    dataport Buf(4096) memep_kv_3;
-
-    /* Notifications: vDTU can signal kernel or VPE when messages arrive */
+    /* Control plane notifications: vDTU can wake kernel or VPE0 (wakeup_pe) */
     emits    Signal notify_kernel;
     emits    Signal notify_vpe0;
-    consumes Signal kernel_done;
 
-    composition {}
-    configuration {}
+    /* Kernel signals vDTU when done (for coordination) */
+    consumes Signal kernel_done;
 }
 
 component SemperKernel {
+    control;
+
     /* Config RPC: calls vDTU to set up endpoints */
     uses VDTUConfig vdtu;
 
-    /* Pre-allocated message channel dataports (shared with VPE0 via vDTU) */
+    /* Pre-allocated message channel dataports (shared with VPE0) */
     dataport Buf(4096) msgchan_kv_0;
     dataport Buf(4096) msgchan_kv_1;
     dataport Buf(4096) msgchan_kv_2;
@@ -110,12 +101,22 @@ component SemperKernel {
     dataport Buf(4096) memep_kv_2;
     dataport Buf(4096) memep_kv_3;
 
-    /* Notification: vDTU signals when messages arrive */
-    consumes Signal notify_kernel;
+    /* Control plane: vDTU can wake kernel (for wakeup_pe) */
+    consumes Signal vdtu_wakeup;
+
+    /* Control plane: kernel signals vDTU when done */
     emits    Signal kernel_done;
+
+    /* Data path: kernel signals VPE0 that a message is available */
+    emits    Signal signal_vpe0;
+
+    /* Data path: VPE0 signals kernel that a reply is available */
+    consumes Signal signal_from_vpe0;
 }
 
 component VPE0 {
+    control;
+
     /* Pre-allocated message channel dataports (shared with SemperKernel) */
     dataport Buf(4096) msgchan_kv_0;
     dataport Buf(4096) msgchan_kv_1;
@@ -132,8 +133,14 @@ component VPE0 {
     dataport Buf(4096) memep_kv_2;
     dataport Buf(4096) memep_kv_3;
 
-    /* Notification: vDTU signals when messages arrive */
-    consumes Signal notify_vpe0;
+    /* Control plane: vDTU can wake VPE0 (for wakeup_pe) */
+    consumes Signal vdtu_wakeup;
+
+    /* Data path: kernel signals VPE0 that a message is available */
+    consumes Signal signal_from_kernel;
+
+    /* Data path: VPE0 signals kernel that a reply is available */
+    emits    Signal signal_kernel;
 }
 
 /*
@@ -154,10 +161,9 @@ assembly {
         connection seL4RPCCall config_rpc(from kernel0.vdtu, to vdtu.config);
 
         /*
-         * Message channel dataports (kernel0 <-> vpe0, mapped through vdtu).
-         * All three components share the same physical pages for each channel.
-         * At runtime, the vDTU initializes the ring buffer in these dataports
-         * when config_recv/config_send are called.
+         * Message channel dataports: kernel0 <-> vpe0 (point-to-point).
+         * Each connection allocates one set of physical pages shared
+         * between exactly two components. The vDTU does NOT access these.
          */
         connection seL4SharedData msgchan0(from kernel0.msgchan_kv_0,
                                            to vpe0.msgchan_kv_0);
@@ -176,7 +182,7 @@ assembly {
         connection seL4SharedData msgchan7(from kernel0.msgchan_kv_7,
                                            to vpe0.msgchan_kv_7);
 
-        /* Memory endpoint dataports */
+        /* Memory endpoint dataports: kernel0 <-> vpe0 */
         connection seL4SharedData memep0(from kernel0.memep_kv_0,
                                          to vpe0.memep_kv_0);
         connection seL4SharedData memep1(from kernel0.memep_kv_1,
@@ -186,49 +192,33 @@ assembly {
         connection seL4SharedData memep3(from kernel0.memep_kv_3,
                                          to vpe0.memep_kv_3);
 
-        /* vDTU also needs access to message channels (for init/management) */
-        connection seL4SharedData vdtu_msgchan0(from vdtu.msgchan_kv_0,
-                                                to vpe0.msgchan_kv_0);
-        connection seL4SharedData vdtu_msgchan1(from vdtu.msgchan_kv_1,
-                                                to vpe0.msgchan_kv_1);
-        connection seL4SharedData vdtu_msgchan2(from vdtu.msgchan_kv_2,
-                                                to vpe0.msgchan_kv_2);
-        connection seL4SharedData vdtu_msgchan3(from vdtu.msgchan_kv_3,
-                                                to vpe0.msgchan_kv_3);
-        connection seL4SharedData vdtu_msgchan4(from vdtu.msgchan_kv_4,
-                                                to vpe0.msgchan_kv_4);
-        connection seL4SharedData vdtu_msgchan5(from vdtu.msgchan_kv_5,
-                                                to vpe0.msgchan_kv_5);
-        connection seL4SharedData vdtu_msgchan6(from vdtu.msgchan_kv_6,
-                                                to vpe0.msgchan_kv_6);
-        connection seL4SharedData vdtu_msgchan7(from vdtu.msgchan_kv_7,
-                                                to vpe0.msgchan_kv_7);
-
-        /* vDTU memory endpoint access */
-        connection seL4SharedData vdtu_memep0(from vdtu.memep_kv_0,
-                                              to vpe0.memep_kv_0);
-        connection seL4SharedData vdtu_memep1(from vdtu.memep_kv_1,
-                                              to vpe0.memep_kv_1);
-        connection seL4SharedData vdtu_memep2(from vdtu.memep_kv_2,
-                                              to vpe0.memep_kv_2);
-        connection seL4SharedData vdtu_memep3(from vdtu.memep_kv_3,
-                                              to vpe0.memep_kv_3);
-
-        /* Notifications */
-        connection seL4Notification notify_kern(from vdtu.notify_kernel,
-                                                to kernel0.notify_kernel);
-        connection seL4Notification notify_v0(from vdtu.notify_vpe0,
-                                              to vpe0.notify_vpe0);
+        /*
+         * Control plane notifications: vDTU -> kernel, vDTU -> VPE0
+         * Used by wakeup_pe() to wake a PE from seL4_Wait().
+         */
+        connection seL4Notification vdtu_wake_kern(from vdtu.notify_kernel,
+                                                    to kernel0.vdtu_wakeup);
+        connection seL4Notification vdtu_wake_vpe0(from vdtu.notify_vpe0,
+                                                    to vpe0.vdtu_wakeup);
         connection seL4Notification kern_done(from kernel0.kernel_done,
                                               to vdtu.kernel_done);
+
+        /*
+         * Data path notifications: kernel <-> VPE0 (direct, no vDTU)
+         * The sender signals the receiver after writing to the ring buffer.
+         */
+        connection seL4Notification kern_to_vpe0(from kernel0.signal_vpe0,
+                                                  to vpe0.signal_from_kernel);
+        connection seL4Notification vpe0_to_kern(from vpe0.signal_kernel,
+                                                  to kernel0.signal_from_vpe0);
     }
 
     configuration {
+        /* vDTU runs at highest priority (handles config RPCs promptly) */
+        vdtu.priority = 250;
         /* SemperKernel gets PE ID 0 */
         kernel0.priority = 200;
         /* VPE0 gets PE ID 1 */
         vpe0.priority = 150;
-        /* vDTU runs at highest priority (handles config RPCs promptly) */
-        vdtu.priority = 250;
     }
 }

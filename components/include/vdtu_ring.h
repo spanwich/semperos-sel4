@@ -35,7 +35,11 @@ extern "C" {
  *  DTU Message Header (from src/include/base/arch/gem5/DTU.h:150-161)
  *
  *  This struct is PACKED and matches the gem5 DTU Header exactly.
- *  sizeof(vdtu_msg_header) == VDTU_HEADER_SIZE == 26 bytes
+ *  sizeof(vdtu_msg_header) == VDTU_HEADER_SIZE == 25 bytes
+ *
+ *  Verified against SemperOS gem5 DTU.h:150-161 (struct Header):
+ *  flags(1) + senderCoreId(2) + senderEpId(1) + replyEpId(1) +
+ *  length(2) + senderVpeId(2) + label(8) + replylabel(8) = 25 bytes
  * --------------------------------------------------------------------------
  */
 

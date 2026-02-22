@@ -1,8 +1,8 @@
 /*
  * VPE0.c -- Application VPE test stub (CAmkES component)
  *
- * Simple echo server: polls its receive ring buffer for messages,
- * prints the payload, and sends a reply "ACK" back.
+ * Simple echo server: waits for a notification from the kernel, reads a
+ * message from the ring buffer, sends a reply, and signals the kernel.
  *
  * In the real system, this component would run a SemperOS application
  * binary with the m3 user-space library.
@@ -41,8 +41,8 @@ static void *get_msgchan_dataport(int channel_idx)
  * CAmkES component entry point.
  *
  * VPE0 is started after SemperKernel has configured the channels.
- * It attaches to the ring buffers that the kernel initialized in the
- * shared dataports, then enters a poll loop.
+ * Due to priority scheduling (kernel=200 > VPE0=150), the kernel runs
+ * first, initializes ring buffers, sends a message, and signals us.
  *
  * Channel assignment is coordinated through the vDTU:
  *   - Channel 0: kernel -> VPE0 messages (VPE0 is consumer)
@@ -55,6 +55,15 @@ static void *get_msgchan_dataport(int channel_idx)
 int run(void)
 {
     printf("[VPE0] Starting (PE %d)\n", MY_PE);
+
+    /*
+     * Wait for the kernel to finish setting up channels and send a message.
+     * The kernel signals us via the direct data path notification after
+     * writing to the ring buffer. seL4 notifications are binary semaphores,
+     * so if the kernel signals before we wait, we'll return immediately.
+     */
+    printf("[VPE0] Waiting for signal from kernel...\n");
+    signal_from_kernel_wait();
 
     /*
      * Attach to channel 0 (kernel -> VPE0 messages).
@@ -83,65 +92,55 @@ int run(void)
     printf("[VPE0] Attached to reply ring (channel 1)\n");
 
     /*
-     * Poll for messages.
+     * Read the message from the ring buffer.
      */
-    printf("[VPE0] Waiting for messages...\n");
-
-    int handled = 0;
-    int attempts = 0;
-    while (handled < 1) {  /* Handle 1 message for the test */
-        const struct vdtu_message *msg = vdtu_ring_fetch(&recv_ring);
-        if (!msg) {
-            /* No message available, poll again */
-            attempts++;
-            if (attempts > 1000000) {
-                printf("[VPE0] Timeout waiting for messages\n");
-                return 1;
-            }
-            continue;
-        }
-
-        /* Got a message */
-        char buf[256];
-        int len = msg->hdr.length;
-        if (len > (int)sizeof(buf) - 1)
-            len = (int)sizeof(buf) - 1;
-        memcpy(buf, msg->data, len);
-        buf[len] = '\0';
-
-        printf("[VPE0] Received message: \"%s\" (len=%d, label=0x%lx, "
-               "from PE %d EP %d)\n",
-               buf, msg->hdr.length, (unsigned long)msg->hdr.label,
-               msg->hdr.sender_core_id, msg->hdr.sender_ep_id);
-
-        /* Remember reply info before acking */
-        uint8_t  reply_ep   = msg->hdr.reply_ep_id;
-        uint64_t replylabel = msg->hdr.replylabel;
-
-        /* Acknowledge (consume) the message */
-        vdtu_ring_ack(&recv_ring);
-
-        /* Send reply "ACK" */
-        const char *reply_text = "ACK";
-        printf("[VPE0] Sending reply: \"%s\"\n", reply_text);
-
-        int rc = vdtu_ring_send(&reply_ring,
-                                MY_PE, 0,      /* sender PE, EP */
-                                0,             /* sender VPE */
-                                reply_ep,      /* reply EP (from original msg) */
-                                replylabel,    /* label */
-                                0,             /* replylabel */
-                                VDTU_FLAG_REPLY,
-                                reply_text,
-                                (uint16_t)strlen(reply_text));
-        if (rc != 0) {
-            printf("[VPE0] ERROR: reply send failed: %d\n", rc);
-            return 1;
-        }
-
-        handled++;
+    const struct vdtu_message *msg = vdtu_ring_fetch(&recv_ring);
+    if (!msg) {
+        printf("[VPE0] ERROR: notification received but no message in ring\n");
+        return 1;
     }
 
-    printf("[VPE0] Done (handled %d messages)\n", handled);
+    /* Extract message contents */
+    char buf[256];
+    int len = msg->hdr.length;
+    if (len > (int)sizeof(buf) - 1)
+        len = (int)sizeof(buf) - 1;
+    memcpy(buf, msg->data, len);
+    buf[len] = '\0';
+
+    printf("[VPE0] Received message: \"%s\" (len=%d, label=0x%lx, "
+           "from PE %d EP %d)\n",
+           buf, msg->hdr.length, (unsigned long)msg->hdr.label,
+           msg->hdr.sender_core_id, msg->hdr.sender_ep_id);
+
+    /* Remember reply info before acking */
+    uint8_t  reply_ep   = msg->hdr.reply_ep_id;
+    uint64_t replylabel = msg->hdr.replylabel;
+
+    /* Acknowledge (consume) the message */
+    vdtu_ring_ack(&recv_ring);
+
+    /* Send reply "ACK" */
+    const char *reply_text = "ACK";
+    printf("[VPE0] Sending reply: \"%s\"\n", reply_text);
+
+    int rc = vdtu_ring_send(&reply_ring,
+                            MY_PE, 0,      /* sender PE, EP */
+                            0,             /* sender VPE */
+                            reply_ep,      /* reply EP (from original msg) */
+                            replylabel,    /* label */
+                            0,             /* replylabel */
+                            VDTU_FLAG_REPLY,
+                            reply_text,
+                            (uint16_t)strlen(reply_text));
+    if (rc != 0) {
+        printf("[VPE0] ERROR: reply send failed: %d\n", rc);
+        return 1;
+    }
+
+    /* Signal kernel that reply is available (direct data path notification) */
+    signal_kernel_emit();
+
+    printf("[VPE0] Done (handled 1 message)\n");
     return 0;
 }

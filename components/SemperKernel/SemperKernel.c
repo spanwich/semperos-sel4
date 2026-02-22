@@ -3,9 +3,10 @@
  *
  * This is a pure C test stub that validates the CAmkES plumbing:
  *   1. Calls vDTU config RPC to set up endpoints
- *   2. Initializes a ring buffer in a shared dataport
+ *   2. Initializes ring buffers in shared dataports
  *   3. Sends a test message through the ring buffer
- *   4. Polls for a reply
+ *   4. Signals VPE0 via notification, then waits for reply notification
+ *   5. Reads reply from ring buffer
  *
  * This does NOT contain real SemperOS code. Integration with the actual
  * SemperOS kernel (C++) is Task 04.
@@ -45,7 +46,6 @@ static struct vdtu_ring recv_ring;
 /*
  * Get a pointer to the dataport for a given channel index.
  * In the real CAmkES build, these map to msgchan_kv_N dataport symbols.
- * For the stub, we provide the mapping explicitly.
  */
 static void *get_msgchan_dataport(int channel_idx)
 {
@@ -73,8 +73,8 @@ static int setup_channels(void)
 
     /* Step 1: Configure a receive endpoint on VPE0 (EP 0).
      * This is where our messages will arrive.
-     * buf_order = 14 (16 KiB), msg_order = 9 (512 B) -> 32 slots
-     * But we're limited to 4 KiB dataport, so vDTU will cap the slot count. */
+     * buf_order = 11 (2 KiB), msg_order = 9 (512 B) -> 4 slots
+     * Fits in a 4 KiB dataport. */
     rc = vdtu_config_recv(VPE0_PE, 0, /* ep */
                           11, /* buf_order: 1<<11 = 2048 */
                           9,  /* msg_order: 1<<9 = 512 */
@@ -129,10 +129,9 @@ static int setup_channels(void)
         return -1;
     }
 
-    /* Attach to the recv ring (VPE0 is the producer, kernel is consumer).
-     * We attach rather than init because VPE0 will init its send side. */
-    /* Actually for the test, kernel inits the recv ring too since it starts
-     * first. VPE0 will attach. */
+    /* Initialize the recv ring (VPE0 will produce replies here).
+     * Kernel inits both rings since it starts first (higher priority).
+     * VPE0 will attach to these after receiving our signal. */
     rc = vdtu_ring_init(&recv_ring, recv_mem,
                         VDTU_DEFAULT_SLOT_COUNT, VDTU_SYSC_MSG_SIZE);
     if (rc != 0) {
@@ -168,25 +167,24 @@ static void run_test(void)
         return;
     }
 
-    /* Signal VPE0 that a message is available */
-    /* In real CAmkES: notify_vpe0_emit(); */
-    /* For the stub, VPE0 polls. */
+    /* Signal VPE0 that a message is available.
+     * This uses a direct kernel -> VPE0 notification (data path). */
+    signal_vpe0_emit();
 
-    /* Poll for reply on recv ring */
+    /* Wait for reply notification from VPE0.
+     * This blocks until VPE0 signals us after writing the reply.
+     * Blocking drops our priority, allowing VPE0 (priority 150) to run. */
     printf("[SemperKernel] Waiting for reply...\n");
-    const struct vdtu_message *reply = NULL;
-    int attempts = 0;
-    while (!(reply = vdtu_ring_fetch(&recv_ring))) {
-        /* In real impl: seL4_Wait on notification.
-         * For the stub: busy-wait with a limit. */
-        attempts++;
-        if (attempts > 1000000) {
-            printf("[SemperKernel] Timeout waiting for reply\n");
-            return;
-        }
+    signal_from_vpe0_wait();
+
+    /* VPE0 has signaled -- reply should be in the recv ring */
+    const struct vdtu_message *reply = vdtu_ring_fetch(&recv_ring);
+    if (!reply) {
+        printf("[SemperKernel] ERROR: notification received but no message in ring\n");
+        return;
     }
 
-    /* Got reply */
+    /* Read reply */
     char buf[256];
     int len = reply->hdr.length;
     if (len > (int)sizeof(buf) - 1)

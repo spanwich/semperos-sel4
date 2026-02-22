@@ -10,30 +10,27 @@
 #   interfaces/            - CAmkES IDL files
 #
 # Build:
-#   mkdir build && cd build
-#   cmake -DCMAKE_TOOLCHAIN_FILE=<seL4-path>/kernel/gcc.cmake \
-#         -G Ninja -C ../easy-settings.cmake ..
+#   cd camkes-vm-examples
+#   rm -rf build-semperos && mkdir build-semperos && cd build-semperos
+#   cmake -G Ninja \
+#         -DPLATFORM=pc99 \
+#         -C ../projects/semperos-sel4/settings.cmake \
+#         ../projects/semperos-sel4
 #   ninja
-#
-# Run on QEMU:
-#   ./simulate
 #
 
 cmake_minimum_required(VERSION 3.7.2)
 
 project(semperos-sel4 C)
 
-# Include the CAmkES build system
-include(${CAMKES_TOOL_DIR}/camkes.cmake)
+# Include settings (sets up seL4/CAmkES build environment)
+include(settings.cmake)
 
 # Shared include directory for all components
 set(VDTU_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/components/include")
 
 # Ring buffer shared library (compiled into each component)
 set(VDTU_RING_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/vdtu_ring.c")
-
-# Import CAmkES interfaces
-CAmkESAddImportPath("${CMAKE_CURRENT_SOURCE_DIR}/interfaces")
 
 # =========================================================================
 #  VDTUService Component
@@ -72,3 +69,6 @@ DeclareCAmkESComponent(VPE0
 #  CAmkES Assembly
 # =========================================================================
 DeclareCAmkESRootserver(semperos-sel4.camkes)
+
+# Generate final bootable image
+GenerateCAmkESRootserver()

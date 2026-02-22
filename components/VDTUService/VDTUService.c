@@ -8,11 +8,12 @@
  * When the kernel configures a send endpoint on PE A targeting a receive
  * endpoint on PE B, the vDTU:
  *   1. Records the endpoint configuration in its table
- *   2. Identifies which pre-allocated dataport connects A and B
- *   3. Initializes the ring buffer in that dataport (if not already done)
+ *   2. Assigns a channel index from the pre-allocated pool
+ *   3. Returns the channel index so the caller can find the dataport
  *
- * The vDTU does NOT sit on the data path: after setup, messages flow
- * directly through shared memory ring buffers between components.
+ * The vDTU does NOT sit on the data path and does NOT have access to any
+ * shared memory dataports. After setup, messages flow directly through
+ * shared memory ring buffers between components.
  */
 
 #include <stdio.h>
@@ -97,8 +98,8 @@ static int pe_vpe_id[MAX_PES];
 /* Privilege flag for each PE */
 static int pe_privileged[MAX_PES];
 
-/* Track which message channels have been initialized */
-static int msg_channel_initialized[NUM_MSG_CHANNELS];
+/* Track which message channels have been assigned */
+static int msg_channel_assigned[NUM_MSG_CHANNELS];
 
 /* Next free message channel index */
 static int next_msg_channel = 0;
@@ -123,7 +124,9 @@ static int assign_msg_channel(void)
         printf("[vDTU] ERROR: no free message channels\n");
         return -1;
     }
-    return next_msg_channel++;
+    int ch = next_msg_channel++;
+    msg_channel_assigned[ch] = 1;
+    return ch;
 }
 
 static int assign_mem_channel(void)
@@ -192,17 +195,15 @@ int config_config_recv(int target_pe, int ep_id,
     ep->recv.flags       = flags;
     ep->recv.channel_idx = ch;
 
-    /* Initialize the ring buffer in the assigned dataport.
+    /* Compute slot parameters from orders.
      * slot_count = 1 << (buf_order - msg_order)
      * slot_size  = 1 << msg_order
-     * For the prototype, we cap at what fits in a 4 KiB dataport. */
+     * Cap to what fits in a 4 KiB dataport. */
     uint32_t slot_size  = 1u << msg_order;
     uint32_t slot_count = 1u << (buf_order - msg_order);
 
-    /* Cap to what fits in a 4 KiB page */
     size_t needed = vdtu_ring_total_size(slot_count, slot_size);
     if (needed > 4096) {
-        /* Reduce slot count to fit */
         slot_count = (4096 - VDTU_RING_CTRL_SIZE) / slot_size;
         /* Round down to power of 2 */
         uint32_t p = 1;
@@ -214,11 +215,9 @@ int config_config_recv(int target_pe, int ep_id,
     printf("[vDTU]   -> assigned channel %d (slot_count=%u, slot_size=%u)\n",
            ch, slot_count, slot_size);
 
-    /* TODO: In the real implementation, initialize the ring buffer in the
-     * dataport memory. For now, we just record the assignment.
-     * The SemperKernel and VPE0 stubs will initialize their own view
-     * of the ring buffer using the channel index. */
-    msg_channel_initialized[ch] = 1;
+    /* The vDTU does not initialize ring buffers directly -- it has no
+     * dataport access. The kernel/VPE components initialize ring buffers
+     * in their own view of the shared memory using the channel index. */
 
     return ch;  /* Return channel index so caller can find the dataport */
 }
@@ -312,8 +311,15 @@ int config_wakeup_pe(int target_pe)
     if (target_pe < 0 || target_pe >= MAX_PES)
         return -1;
 
-    /* In the real implementation, this would signal the target PE's
-     * notification to wake it from a seL4_Wait(). For now, no-op. */
+    /* Signal the target PE's notification to wake it from seL4_Wait(). */
+    if (target_pe == PE_KERNEL) {
+        notify_kernel_emit();
+    } else if (target_pe == PE_VPE0) {
+        notify_vpe0_emit();
+    } else {
+        printf("[vDTU] WARNING: wakeup_pe for unknown PE %d\n", target_pe);
+    }
+
     return 0;
 }
 
@@ -336,7 +342,7 @@ void pre_init(void)
     memset(endpoints, 0, sizeof(endpoints));
     memset(pe_vpe_id, 0, sizeof(pe_vpe_id));
     memset(pe_privileged, 0, sizeof(pe_privileged));
-    memset(msg_channel_initialized, 0, sizeof(msg_channel_initialized));
+    memset(msg_channel_assigned, 0, sizeof(msg_channel_assigned));
 
     printf("[vDTU] Initialized, managing endpoint table\n");
 }
