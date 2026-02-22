@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Virtual Data Transfer Unit (vDTU) prototype that virtualizes the SemperOS gem5-simulated DTU hardware on seL4/CAmkES for x86_64. Currently on **Task 04** (SemperOS kernel integration). See `DESIGN.md` for the full architecture specification and `docs/task04-kernel-integration.md` for kernel porting details.
+Virtual Data Transfer Unit (vDTU) prototype that virtualizes the SemperOS gem5-simulated DTU hardware on seL4/CAmkES for x86_64. **Task 04 complete** — real SemperOS kernel boots and processes syscalls. See `DESIGN.md` for architecture and `docs/task04-kernel-integration.md` for kernel porting details.
 
 SemperOS source code is at `~/SemperOS`.
 
@@ -42,7 +42,7 @@ Compiles and runs 10 host-side unit tests (no seL4 required). Tests cover init v
 |-----------|------|----------|
 | **VDTUService** | Control plane: endpoint table, channel assignment via RPC | 250 |
 | **SemperKernel** | SemperOS kernel (PE 0): C++11, arch/sel4/ backend, vDTU data path | 200 |
-| **VPE0** | Application echo server (PE 1): receives messages, sends replies | 150 |
+| **VPE0** | First user VPE (PE 2): sends syscalls to kernel, receives replies | 200 |
 
 ### Connections
 
@@ -73,7 +73,8 @@ CAmkES requires static connections, but SemperOS creates endpoints dynamically. 
 | `components/SemperKernel/src/kernel/arch/sel4/` | sel4 backend: DTU, Platform, VPE, kernel entry, libbase stubs |
 | `components/SemperKernel/src/include/` | SemperOS headers (base/, m3/, thread/) with sel4 patches |
 | `components/SemperKernel/SemperKernel.c` | Old vDTU test stub (retained for reference) |
-| `components/VPE0/VPE0.c` | Echo server: attach to rings, poll, reply |
+| `components/VPE0/VPE0.c` | Syscall sender: sends NOOP to kernel, receives reply |
+| `docs/task04-kernel-integration.md` | Kernel porting details, architecture decisions, file map |
 | `interfaces/VDTUConfig.idl4` | CAmkES RPC interface (9 procedures) |
 | `DESIGN.md` | Full architecture specification and DTU-to-CAmkES mapping |
 
@@ -85,7 +86,7 @@ CAmkES requires static connections, but SemperOS creates endpoints dynamically. 
 | FETCH_MSG | `vdtu_ring_fetch()` from shared dataport |
 | ACK_MSG | `vdtu_ring_ack()` (advance tail) |
 | READ/WRITE (memory EP) | Direct `memcpy()` on shared dataport |
-| wait()/HLT | `seL4_Wait()` on notification |
+| wait()/HLT | `seL4_Yield()` (cooperative scheduling on single-core QEMU) |
 | WAKEUP_CORE | `seL4_Signal()` on notification |
 | Endpoint config | RPC to vDTU → endpoint table update + channel assignment |
 
@@ -99,15 +100,24 @@ SemperOS kernel is C++11. CAmkES natively supports `.cc` files via `DeclareCAmkE
 
 See `docs/task04-kernel-integration.md` for full details.
 
+## Known Limitations (Task 04)
+
+- **Single kernel only** — ThreadManager is stubbed (single-threaded). Cooperative threading needed for multi-kernel revocation (Section 4.3.3). Safe for Task 04 since revocation callbacks never block.
+- **1 SYSC_GATE configured** (not 6) to save channel budget (8 channels total). Sufficient for single-VPE prototype.
+- **seL4_Yield scheduling** — kernel and VPE0 must have equal priority for `seL4_Yield()` to work on single-core QEMU. Production would use notification-based waking.
+- **Label pass-through** — VPE0 sends `label=0`; WorkLoop uses fallback RecvGate for sel4. The gem5 DTU auto-fills label from EP config.
+- **No memory EPs** — `read_mem`/`write_mem` are stubs. Memory dataports are allocated but not wired to DTU operations.
+- **`<camkes.h>` not includable from C++** — seL4 utility headers use C-only constructs (`typeof`, `_Static_assert`). CAmkES symbols are declared manually via `extern "C"`.
+
 ## Status
 
-Current: **Task 04 (Kernel Integration)** — sub-tasks 04a–04c complete (kernel compiles and boots).
+Current: **Task 04 complete** — SemperOS kernel boots and processes syscalls on seL4/CAmkES.
 
 - ~~Task 02: vDTU Prototype~~ (done)
 - ~~Task 04a: C++ in CAmkES~~ (done)
 - ~~Task 04b: Import kernel source~~ (done)
 - ~~Task 04c: Platform + kernel entry~~ (done)
-- Task 04d: DTU data path (vDTU ring buffer integration)
-- Task 04e: VPE + PEManager real implementations
-- Task 04f: Integration test (VPE0 syscall → kernel → reply)
-- Task 05: Multi-kernel with inter-kernel channels and DDL protocol
+- ~~Task 04d: DTU data path~~ (done)
+- ~~Task 04e: VPE + PEManager~~ (done)
+- ~~Task 04f: Integration test~~ (done — NOOP syscall end-to-end)
+- Task 05: Multi-kernel with inter-kernel channels, cooperative threading, DDL protocol

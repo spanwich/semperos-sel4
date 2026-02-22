@@ -8,9 +8,8 @@ Task 02/03 with the real SemperOS kernel code, using a new `arch/sel4/` backend
 that substitutes gem5 DTU hardware operations with vDTU shared-memory
 operations.
 
-**Status**: Sub-tasks 04a–04c complete. Kernel compiles, links, and boots on
-QEMU. Sub-tasks 04d–04f (DTU data path, VPE management, integration test)
-remain.
+**Status**: All sub-tasks 04a–04f complete. SemperOS kernel compiles, boots,
+enters WorkLoop, and processes NOOP syscalls from VPE0 on QEMU x86_64.
 
 ## Sub-task 04a: C++ in CAmkES
 
@@ -297,22 +296,165 @@ docker run --rm \
 | `m3/VPE.h` | `Functional.h` include |
 | `m3/server/*.h` | `Functional.h` include |
 
-## Remaining Work (04d–04f)
+## Sub-task 04d: DTU Data Path (Complete)
 
-### 04d: DTU Data Path
+### Endpoint-to-Channel Mapping
 
-Replace DTU stubs with vDTU ring buffer operations:
-- `config_recv_local` → RPC `vdtu_config_recv()` + `init_ring()`
-- `config_send_local` → RPC `vdtu_config_send()` + `attach_ring()`
-- `fetch_msg` → `vdtu_ring_fetch()` on mapped channel
-- `send_to` → `vdtu_ring_send()` with DTU header
-- `ack_msg` → `vdtu_ring_ack()`
+Static tables in `arch/sel4/DTU.cc`:
 
-### 04e: VPE + PEManager
+```
+ep_channel[EP_COUNT]     — SemperOS EP ID → vDTU channel index (-1 if unconfigured)
+ep_type[EP_COUNT]        — EP_NONE / EP_RECV / EP_SEND / EP_MEM
+ep_send_config[EP_COUNT] — cached dest_pe, dest_ep, dest_vpe, label for send EPs
+```
 
-Fill in real endpoint configuration so VPEs can exchange messages with kernel.
+### Method Implementations
 
-### 04f: Integration Test
+| m3::DTU Method | Implementation |
+|----------------|----------------|
+| `fetch_msg(ep)` | `vdtu_ring_fetch()` on `ep_channel[ep]` → cast to `Message*` |
+| `reply(ep, data, len, off)` | Extract sender from original msg header at `off`, find/auto-configure send channel, `vdtu_ring_send()` with `VDTU_FLAG_REPLY` |
+| `mark_read(ep, off)` | `vdtu_ring_ack()` on recv ring |
+| `send(ep, msg, size, replylbl, reply_ep)` | `vdtu_ring_send()` on mapped send channel |
+| `is_valid(ep)` | `ep_type[ep] != EP_NONE` |
 
-VPE0 sends a CREATE syscall → kernel WorkLoop fetches → SyscallHandler
-dispatches → reply sent → VPE0 receives.
+| kernel::DTU Method | Implementation |
+|--------------------|----------------|
+| `config_recv_local(ep, ...)` | RPC `vdtu_config_recv()` → `vdtu_channels_init_ring()` |
+| `config_recv_remote(vpe, ep, ...)` | RPC `vdtu_config_recv()` for remote PE |
+| `config_send_local(ep, ...)` | RPC `vdtu_config_send()` → `vdtu_channels_attach_ring()` |
+| `config_send_remote(vpe, ep, ...)` | RPC `vdtu_config_send()` for remote PE |
+| `invalidate_ep/eps(vpe, ep)` | RPC to vDTU + clear local mapping |
+| `send_to(vpe, ep, ...)` | Look up send channel → `vdtu_ring_send()` |
+
+### Reply Auto-Configuration
+
+The gem5 DTU hardware reads reply routing from the original message header.
+On sel4, `m3::DTU::reply()` does this in software:
+
+1. Cast `msgoff` back to `Message*` to extract `senderCoreId`, `replyEpId`
+2. `find_send_channel_for(sender_pe, reply_ep_id)` — check existing send EPs
+3. If not found: scan for free EP slot (not `alloc_ep()` which may be
+   exhausted), RPC `vdtu_config_send()`, `vdtu_channels_attach_ring()`
+4. `vdtu_ring_send()` with `VDTU_FLAG_REPLY` flag
+5. `vdtu_ring_ack()` on the recv ring (reply implies consumption)
+
+### `<camkes.h>` in C++ Workaround
+
+seL4 utility headers use C-only constructs (`typeof`, `_Static_assert`).
+CAmkES-generated symbols are declared manually:
+
+```cpp
+extern "C" {
+extern volatile void *msgchan_kv_0, *msgchan_kv_1, ...;
+int vdtu_config_recv(int target_pe, int ep_id, ...);
+void sel4_yield_wrapper(void);  // wraps seL4_Yield()
+}
+```
+
+The `sel4_yield_wrapper()` is in `camkes_entry.c` (C file that can include
+`<sel4/sel4.h>`).
+
+### INIT_PRIO Deferral
+
+SyscallHandler and KernelcallHandler constructors (INIT_PRIO_USER(3)) call
+`config_recv_local()` which does vDTU RPC. CAmkES RPC is not available during
+static initialization (before `run()`). Fix: `#if !defined(__sel4__)` around
+the config calls, deferred to `configure_recv_endpoints()` in `kernel_start()`.
+
+## Sub-task 04e: VPE Management (Complete)
+
+### VPE Creation Flow
+
+```
+kernel_start()
+  → configure_recv_endpoints()     // 1 SYSC + 1 SRV + 1 KRNLC = 3 channels
+  → RecvBufs::init()
+  → PEManager::create()
+  → create_vpe0()
+      → SyscallHandler::reserve_ep(0)  // reserve SYSC gate slot
+      → new VPE("VPE0", 0, core=2, ...)
+          → VPE::init()
+              → RecvBufs::attach(DEF_RECVEP)  // channel 3, 4 slots × 512B
+              → config_send_remote(SYSC_EP)    // shares channel 0
+      → vpe0->start()                          // DTU::wakeup (no-op on sel4)
+  → kernel::WorkLoop::run()                    // polls all recv EPs
+```
+
+### Channel Budget
+
+8 message channels total:
+
+| Channel | EP | Purpose |
+|---------|----|---------|
+| 0 | kernel EP 0 (SYSC_GATE) | VPE0 → kernel syscalls |
+| 1 | kernel EP 15 (SRV) | Service messages |
+| 2 | kernel EP 6 (KRNLC) | Inter-kernel calls |
+| 3 | VPE0 EP 1 (DEF_RECVEP) | Kernel → VPE0 replies |
+| 4–7 | — | Free |
+
+### VPE Recv Buffer Fix
+
+`DEF_RCVBUF_ORDER=8` (256 bytes) with `msg_order=8` gives 1 slot = 0 usable
+capacity (SPSC invariant: one slot always empty). Fixed to `buf_order=11`
+(2048B), `msg_order=9` (512B) → 4 usable slots.
+
+### seL4 Priority Scheduling
+
+seL4 uses strict preemptive priority. `seL4_Yield()` only yields to threads of
+the **same** priority. Kernel (200) and VPE0 must have equal priority for
+round-robin scheduling on single-core QEMU.
+
+## Sub-task 04f: Integration Test (Complete)
+
+### End-to-End NOOP Syscall
+
+VPE0 sends a NOOP syscall (opcode=18) to the kernel:
+
+```
+VPE0                          Kernel WorkLoop
+  │                               │
+  ├─ vdtu_ring_send(ch=0,        │
+  │    opcode=18, replyEp=1)     │
+  │                               │
+  │                     ┌─────────┤
+  │                     │ fetch_msg(ep=0) → Message*
+  │                     │ SyscallHandler::handle_message()
+  │                     │   → msg >> op  (op=18=NOOP)
+  │                     │   → noop(is)
+  │                     │   → reply_vmsg(is, 0)
+  │                     │     → m3::DTU::reply()
+  │                     │       → auto-config send to PE2:EP1
+  │                     │       → vdtu_ring_send(ch=3, error=0)
+  │                     └─────────┤
+  │                               │
+  ├─ poll channel 3               │
+  ├─ vdtu_ring_fetch() → reply    │
+  ├─ error_code = 0 (NO_ERROR)   │
+  └─ "NOOP syscall succeeded!"   │
+```
+
+### QEMU Output
+
+```
+[SemperKernel] Creating VPE0 on PE 2 (syscall EP 0)
+[SemperKernel] VPE0 created and started
+[SemperKernel] Entering WorkLoop (polling 6 SYSC + 8 KRNLC gates)
+[VPE0] Sending NOOP syscall (opcode=18) on channel 0
+[VPE0] Got reply: error_code=0 (0=NO_ERROR)
+[VPE0] NOOP syscall succeeded!
+[VPE0] === Integration test complete ===
+```
+
+## Task 05 Prerequisites
+
+For multi-kernel support, the following stubs must become real implementations:
+
+| Component | Current | Needed |
+|-----------|---------|--------|
+| ThreadManager | Single-threaded stub | Cooperative context switching (setjmp/longjmp or ucontext) |
+| WorkLoop threading | `yield()` is no-op | Must save/restore thread context for blocking operations |
+| Revocation algorithm | Works but `wait_for()` returns immediately | Must actually block current thread, resume on `notify()` |
+| KPE::start | Stub | Spawn child kernel on another PE via CAmkES |
+| MHTInstance | Default constructor only | Partition migration, membership updates |
+| Inter-kernel channels | Not configured | KRNLC_GATE recv/send between kernel PEs |
