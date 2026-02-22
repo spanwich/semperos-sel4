@@ -1,0 +1,134 @@
+/*
+ * VDTUConfig.idl4 -- CAmkES procedure interface for vDTU endpoint configuration
+ *
+ * This RPC interface replaces the DTU MMIO register writes that the SemperOS
+ * kernel performs to configure endpoints on remote PEs. Instead of writing
+ * directly to hardware registers, the kernel calls these procedures which
+ * the vDTU service handles by updating its internal endpoint table and
+ * connecting the appropriate shared memory channels.
+ *
+ * Mapping from SemperOS kernel DTU functions:
+ *   config_send_remote()  -> config_send()
+ *   config_recv_remote()  -> config_recv()
+ *   config_mem_remote()   -> config_mem()
+ *   invalidate_ep()       -> invalidate_ep()
+ *   invalidate_eps()      -> invalidate_eps()
+ *   set_vpeid()           -> set_vpe_id()
+ *   deprivilege/privilege  -> set_privilege()
+ *   wakeup()              -> wakeup_pe()
+ */
+
+procedure VDTUConfig {
+    /*
+     * Configure a send endpoint on a target PE.
+     *
+     * Maps to: kernel::DTU::config_send_remote()
+     *
+     * @param target_pe   PE whose DTU to configure
+     * @param ep_id       Endpoint index (0..EP_COUNT-1)
+     * @param dest_pe     Destination PE for messages
+     * @param dest_ep     Destination endpoint on dest_pe
+     * @param dest_vpe    Destination VPE ID
+     * @param msg_size    Maximum message size (bytes, power of 2)
+     * @param label       64-bit label written into message headers
+     * @param credits     Credit count (0xFFFF = unlimited)
+     * @return            0 on success, negative on error
+     */
+    int config_send(in int target_pe, in int ep_id,
+                    in int dest_pe, in int dest_ep, in int dest_vpe,
+                    in int msg_size, in uint64_t label, in int credits);
+
+    /*
+     * Configure a receive endpoint on a target PE.
+     *
+     * Maps to: kernel::DTU::config_recv_remote()
+     *
+     * @param target_pe   PE whose DTU to configure
+     * @param ep_id       Endpoint index (0..EP_COUNT-1)
+     * @param buf_order   log2(total buffer size in bytes)
+     * @param msg_order   log2(per-message slot size in bytes)
+     * @param flags       Endpoint flags (currently unused, pass 0)
+     * @return            0 on success, negative on error
+     */
+    int config_recv(in int target_pe, in int ep_id,
+                    in int buf_order, in int msg_order, in int flags);
+
+    /*
+     * Configure a memory endpoint on a target PE.
+     *
+     * Maps to: kernel::DTU::config_mem_remote()
+     *
+     * @param target_pe   PE whose DTU to configure
+     * @param ep_id       Endpoint index (0..EP_COUNT-1)
+     * @param dest_pe     PE whose memory to access
+     * @param addr        Base address in dest_pe's address space
+     * @param size        Size of accessible region (bytes)
+     * @param dest_vpe    Destination VPE ID
+     * @param perm        Permission flags (R=1, W=2, RW=3)
+     * @return            0 on success, negative on error
+     */
+    int config_mem(in int target_pe, in int ep_id,
+                   in int dest_pe, in uint64_t addr, in uint64_t size,
+                   in int dest_vpe, in int perm);
+
+    /*
+     * Invalidate a single endpoint on a target PE.
+     *
+     * Maps to: kernel::DTU::invalidate_ep()
+     *
+     * @param target_pe   PE whose DTU to configure
+     * @param ep_id       Endpoint index to invalidate
+     * @return            0 on success, negative on error
+     */
+    int invalidate_ep(in int target_pe, in int ep_id);
+
+    /*
+     * Invalidate all endpoints starting from first_ep on a target PE.
+     *
+     * Maps to: kernel::DTU::invalidate_eps()
+     *
+     * @param target_pe   PE whose DTU to configure
+     * @param first_ep    First endpoint to invalidate (inclusive)
+     * @return            0 on success, negative on error
+     */
+    int invalidate_eps(in int target_pe, in int first_ep);
+
+    /*
+     * Set the VPE ID on a target PE's DTU.
+     *
+     * Maps to: kernel::DTU::set_vpeid() / unset_vpeid()
+     *
+     * @param target_pe   PE whose DTU to configure
+     * @param vpe_id      VPE ID to set (0x7FF = INVALID_ID to unset)
+     * @return            0 on success, negative on error
+     */
+    int set_vpe_id(in int target_pe, in int vpe_id);
+
+    /*
+     * Set privilege mode on a target PE's DTU.
+     *
+     * Maps to: kernel::DTU::privilege() / deprivilege()
+     *
+     * @param target_pe   PE to configure
+     * @param priv        1 = privileged (kernel), 0 = unprivileged (user)
+     * @return            0 on success, negative on error
+     */
+    int set_privilege(in int target_pe, in int priv);
+
+    /*
+     * Signal a PE to wake up from sleep/idle.
+     *
+     * Maps to: kernel::DTU::wakeup()
+     *
+     * @param target_pe   PE to wake up
+     * @return            0 on success, negative on error
+     */
+    int wakeup_pe(in int target_pe);
+
+    /*
+     * Query the number of endpoints per PE.
+     *
+     * @return  EP_COUNT (16 in the current configuration)
+     */
+    int get_ep_count();
+};

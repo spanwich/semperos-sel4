@@ -1,0 +1,234 @@
+/*
+ * semperos-sel4.camkes -- CAmkES assembly for SemperOS on seL4
+ *
+ * Architecture:
+ *   - VDTUService:    Virtual DTU control plane (endpoint configuration)
+ *   - SemperKernel:   SemperOS kernel instance (kid=0)
+ *   - VPE0:           Application VPE (test stub)
+ *
+ * Connection types:
+ *   1. seL4RPCCall:     Config RPC (SemperKernel -> VDTUService)
+ *   2. seL4SharedData:  Message ring buffers (dataports between components)
+ *   3. seL4Notification: Doorbell signaling for message arrival
+ *
+ * Pre-allocation strategy:
+ *   CAmkES requires static declaration of all connections. DTU endpoints
+ *   are created dynamically at runtime. We pre-allocate a pool of shared
+ *   memory channels and notifications, then have the vDTU assign them to
+ *   DTU endpoints as they are configured.
+ *
+ *   For the minimal prototype (1 kernel + 1 VPE):
+ *   - 8 message channels: SemperKernel <-> VPE0
+ *     (6 for SYSC_GATES + 1 for DEF_RECVEP + 1 spare)
+ *   - 4 memory dataports: SemperKernel <-> VPE0
+ *     (for DTU READ/WRITE memory endpoint operations)
+ *   - 2 message channels: SemperKernel <-> VDTUService
+ *     (for vDTU's own internal messaging, if needed)
+ *   - 1 RPC connection:   SemperKernel -> VDTUService (config calls)
+ */
+
+import <std_connector.camkes>;
+
+/* Import the vDTU config interface */
+procedure VDTUConfig {
+    int config_send(in int target_pe, in int ep_id,
+                    in int dest_pe, in int dest_ep, in int dest_vpe,
+                    in int msg_size, in uint64_t label, in int credits);
+    int config_recv(in int target_pe, in int ep_id,
+                    in int buf_order, in int msg_order, in int flags);
+    int config_mem(in int target_pe, in int ep_id,
+                   in int dest_pe, in uint64_t addr, in uint64_t size,
+                   in int dest_vpe, in int perm);
+    int invalidate_ep(in int target_pe, in int ep_id);
+    int invalidate_eps(in int target_pe, in int first_ep);
+    int set_vpe_id(in int target_pe, in int vpe_id);
+    int set_privilege(in int target_pe, in int priv);
+    int wakeup_pe(in int target_pe);
+    int get_ep_count();
+};
+
+/*
+ * =========================================================================
+ *  Component Definitions
+ * =========================================================================
+ */
+
+component VDTUService {
+    /* Config RPC: served to SemperKernel */
+    provides VDTUConfig config;
+
+    /*
+     * Pre-allocated message channel dataports (SemperKernel <-> VPE0).
+     * These are mapped into all three components. The vDTU manages which
+     * ring buffer corresponds to which DTU endpoint pair.
+     *
+     * Each dataport is 4 KiB (1 page), sufficient for a ring buffer with
+     * 4 slots of 512 bytes (64 + 4*512 = 2112 bytes, fits in 4 KiB).
+     * For larger slot counts/sizes, use larger dataports.
+     */
+    dataport Buf(4096) msgchan_kv_0;
+    dataport Buf(4096) msgchan_kv_1;
+    dataport Buf(4096) msgchan_kv_2;
+    dataport Buf(4096) msgchan_kv_3;
+    dataport Buf(4096) msgchan_kv_4;
+    dataport Buf(4096) msgchan_kv_5;
+    dataport Buf(4096) msgchan_kv_6;
+    dataport Buf(4096) msgchan_kv_7;
+
+    /* Pre-allocated memory endpoint dataports (SemperKernel <-> VPE0) */
+    dataport Buf(4096) memep_kv_0;
+    dataport Buf(4096) memep_kv_1;
+    dataport Buf(4096) memep_kv_2;
+    dataport Buf(4096) memep_kv_3;
+
+    /* Notifications: vDTU can signal kernel or VPE when messages arrive */
+    emits    Signal notify_kernel;
+    emits    Signal notify_vpe0;
+    consumes Signal kernel_done;
+
+    composition {}
+    configuration {}
+}
+
+component SemperKernel {
+    /* Config RPC: calls vDTU to set up endpoints */
+    uses VDTUConfig vdtu;
+
+    /* Pre-allocated message channel dataports (shared with VPE0 via vDTU) */
+    dataport Buf(4096) msgchan_kv_0;
+    dataport Buf(4096) msgchan_kv_1;
+    dataport Buf(4096) msgchan_kv_2;
+    dataport Buf(4096) msgchan_kv_3;
+    dataport Buf(4096) msgchan_kv_4;
+    dataport Buf(4096) msgchan_kv_5;
+    dataport Buf(4096) msgchan_kv_6;
+    dataport Buf(4096) msgchan_kv_7;
+
+    /* Pre-allocated memory endpoint dataports */
+    dataport Buf(4096) memep_kv_0;
+    dataport Buf(4096) memep_kv_1;
+    dataport Buf(4096) memep_kv_2;
+    dataport Buf(4096) memep_kv_3;
+
+    /* Notification: vDTU signals when messages arrive */
+    consumes Signal notify_kernel;
+    emits    Signal kernel_done;
+}
+
+component VPE0 {
+    /* Pre-allocated message channel dataports (shared with SemperKernel) */
+    dataport Buf(4096) msgchan_kv_0;
+    dataport Buf(4096) msgchan_kv_1;
+    dataport Buf(4096) msgchan_kv_2;
+    dataport Buf(4096) msgchan_kv_3;
+    dataport Buf(4096) msgchan_kv_4;
+    dataport Buf(4096) msgchan_kv_5;
+    dataport Buf(4096) msgchan_kv_6;
+    dataport Buf(4096) msgchan_kv_7;
+
+    /* Pre-allocated memory endpoint dataports */
+    dataport Buf(4096) memep_kv_0;
+    dataport Buf(4096) memep_kv_1;
+    dataport Buf(4096) memep_kv_2;
+    dataport Buf(4096) memep_kv_3;
+
+    /* Notification: vDTU signals when messages arrive */
+    consumes Signal notify_vpe0;
+}
+
+/*
+ * =========================================================================
+ *  Assembly: wire everything together
+ * =========================================================================
+ */
+
+assembly {
+    composition {
+        component VDTUService   vdtu;
+        component SemperKernel  kernel0;
+        component VPE0          vpe0;
+
+        /*
+         * Config RPC: kernel0 -> vdtu
+         */
+        connection seL4RPCCall config_rpc(from kernel0.vdtu, to vdtu.config);
+
+        /*
+         * Message channel dataports (kernel0 <-> vpe0, mapped through vdtu).
+         * All three components share the same physical pages for each channel.
+         * At runtime, the vDTU initializes the ring buffer in these dataports
+         * when config_recv/config_send are called.
+         */
+        connection seL4SharedData msgchan0(from kernel0.msgchan_kv_0,
+                                           to vpe0.msgchan_kv_0);
+        connection seL4SharedData msgchan1(from kernel0.msgchan_kv_1,
+                                           to vpe0.msgchan_kv_1);
+        connection seL4SharedData msgchan2(from kernel0.msgchan_kv_2,
+                                           to vpe0.msgchan_kv_2);
+        connection seL4SharedData msgchan3(from kernel0.msgchan_kv_3,
+                                           to vpe0.msgchan_kv_3);
+        connection seL4SharedData msgchan4(from kernel0.msgchan_kv_4,
+                                           to vpe0.msgchan_kv_4);
+        connection seL4SharedData msgchan5(from kernel0.msgchan_kv_5,
+                                           to vpe0.msgchan_kv_5);
+        connection seL4SharedData msgchan6(from kernel0.msgchan_kv_6,
+                                           to vpe0.msgchan_kv_6);
+        connection seL4SharedData msgchan7(from kernel0.msgchan_kv_7,
+                                           to vpe0.msgchan_kv_7);
+
+        /* Memory endpoint dataports */
+        connection seL4SharedData memep0(from kernel0.memep_kv_0,
+                                         to vpe0.memep_kv_0);
+        connection seL4SharedData memep1(from kernel0.memep_kv_1,
+                                         to vpe0.memep_kv_1);
+        connection seL4SharedData memep2(from kernel0.memep_kv_2,
+                                         to vpe0.memep_kv_2);
+        connection seL4SharedData memep3(from kernel0.memep_kv_3,
+                                         to vpe0.memep_kv_3);
+
+        /* vDTU also needs access to message channels (for init/management) */
+        connection seL4SharedData vdtu_msgchan0(from vdtu.msgchan_kv_0,
+                                                to vpe0.msgchan_kv_0);
+        connection seL4SharedData vdtu_msgchan1(from vdtu.msgchan_kv_1,
+                                                to vpe0.msgchan_kv_1);
+        connection seL4SharedData vdtu_msgchan2(from vdtu.msgchan_kv_2,
+                                                to vpe0.msgchan_kv_2);
+        connection seL4SharedData vdtu_msgchan3(from vdtu.msgchan_kv_3,
+                                                to vpe0.msgchan_kv_3);
+        connection seL4SharedData vdtu_msgchan4(from vdtu.msgchan_kv_4,
+                                                to vpe0.msgchan_kv_4);
+        connection seL4SharedData vdtu_msgchan5(from vdtu.msgchan_kv_5,
+                                                to vpe0.msgchan_kv_5);
+        connection seL4SharedData vdtu_msgchan6(from vdtu.msgchan_kv_6,
+                                                to vpe0.msgchan_kv_6);
+        connection seL4SharedData vdtu_msgchan7(from vdtu.msgchan_kv_7,
+                                                to vpe0.msgchan_kv_7);
+
+        /* vDTU memory endpoint access */
+        connection seL4SharedData vdtu_memep0(from vdtu.memep_kv_0,
+                                              to vpe0.memep_kv_0);
+        connection seL4SharedData vdtu_memep1(from vdtu.memep_kv_1,
+                                              to vpe0.memep_kv_1);
+        connection seL4SharedData vdtu_memep2(from vdtu.memep_kv_2,
+                                              to vpe0.memep_kv_2);
+        connection seL4SharedData vdtu_memep3(from vdtu.memep_kv_3,
+                                              to vpe0.memep_kv_3);
+
+        /* Notifications */
+        connection seL4Notification notify_kern(from vdtu.notify_kernel,
+                                                to kernel0.notify_kernel);
+        connection seL4Notification notify_v0(from vdtu.notify_vpe0,
+                                              to vpe0.notify_vpe0);
+        connection seL4Notification kern_done(from kernel0.kernel_done,
+                                              to vdtu.kernel_done);
+    }
+
+    configuration {
+        /* SemperKernel gets PE ID 0 */
+        kernel0.priority = 200;
+        /* VPE0 gets PE ID 1 */
+        vpe0.priority = 150;
+        /* vDTU runs at highest priority (handles config RPCs promptly) */
+        vdtu.priority = 250;
+    }
+}
