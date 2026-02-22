@@ -15,6 +15,9 @@
 #include "vdtu_ring.h"
 #include "vdtu_channels.h"
 
+/* C++ test function (defined in cxx_test.cc) */
+extern void cxx_test(void);
+
 #define MY_PE       0
 #define VPE0_PE     1
 
@@ -336,6 +339,8 @@ static void test5_channel_exhaustion(void)
 int run(void)
 {
     printf("=== SemperOS vDTU System Test ===\n");
+
+    cxx_test();
 
     init_channel_table();
 

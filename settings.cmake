@@ -86,5 +86,5 @@ if("${GLOBAL_COMPONENTS_PATH}" STREQUAL "GLOBAL_COMPONENTS_PATH-NOTFOUND")
 endif()
 include(${GLOBAL_COMPONENTS_PATH})
 
-# Default heap size for components
-set(CAmkESDefaultHeapSize 4096 CACHE STRING "" FORCE)
+# Default heap size for components (SemperOS kernel needs ~4 MiB for buffers)
+set(CAmkESDefaultHeapSize 4194304 CACHE STRING "" FORCE)

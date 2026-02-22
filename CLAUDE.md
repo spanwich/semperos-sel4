@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Virtual Data Transfer Unit (vDTU) prototype that virtualizes the SemperOS gem5-simulated DTU hardware on seL4/CAmkES for x86_64. This is **Task 02** in a 5-task roadmap toward full SemperOS integration. See `DESIGN.md` for the full architecture specification.
+Virtual Data Transfer Unit (vDTU) prototype that virtualizes the SemperOS gem5-simulated DTU hardware on seL4/CAmkES for x86_64. Currently on **Task 04** (SemperOS kernel integration). See `DESIGN.md` for the full architecture specification and `docs/task04-kernel-integration.md` for kernel porting details.
 
 SemperOS source code is at `~/SemperOS`.
 
@@ -41,7 +41,7 @@ Compiles and runs 10 host-side unit tests (no seL4 required). Tests cover init v
 | Component | Role | Priority |
 |-----------|------|----------|
 | **VDTUService** | Control plane: endpoint table, channel assignment via RPC | 250 |
-| **SemperKernel** | Kernel test stub (PE 0): configures endpoints, sends test messages | 200 |
+| **SemperKernel** | SemperOS kernel (PE 0): C++11, arch/sel4/ backend, vDTU data path | 200 |
 | **VPE0** | Application echo server (PE 1): receives messages, sends replies | 150 |
 
 ### Connections
@@ -69,7 +69,10 @@ CAmkES requires static connections, but SemperOS creates endpoints dynamically. 
 | `components/include/vdtu_ring.h` | Ring buffer API + DTU message header struct |
 | `src/vdtu_ring.c` | Ring buffer implementation (shared across all components) |
 | `components/VDTUService/VDTUService.c` | Endpoint table management, RPC handlers, channel assignment |
-| `components/SemperKernel/SemperKernel.c` | Kernel stub: config sequence + test message exchange |
+| `components/SemperKernel/camkes_entry.c` | CAmkES run() → C++ kernel_start() bridge |
+| `components/SemperKernel/src/kernel/arch/sel4/` | sel4 backend: DTU, Platform, VPE, kernel entry, libbase stubs |
+| `components/SemperKernel/src/include/` | SemperOS headers (base/, m3/, thread/) with sel4 patches |
+| `components/SemperKernel/SemperKernel.c` | Old vDTU test stub (retained for reference) |
 | `components/VPE0/VPE0.c` | Echo server: attach to rings, poll, reply |
 | `interfaces/VDTUConfig.idl4` | CAmkES RPC interface (9 procedures) |
 | `DESIGN.md` | Full architecture specification and DTU-to-CAmkES mapping |
@@ -86,10 +89,25 @@ CAmkES requires static connections, but SemperOS creates endpoints dynamically. 
 | WAKEUP_CORE | `seL4_Signal()` on notification |
 | Endpoint config | RPC to vDTU → endpoint table update + channel assignment |
 
+## C++ in CAmkES
+
+SemperOS kernel is C++11. CAmkES natively supports `.cc` files via `DeclareCAmkESComponent`. The seL4 toolchain applies `-nostdinc++`, so all C++ standard library headers are replaced:
+- `<cassert>` → `<assert.h>`, `<cstring>` → `<string.h>`, etc.
+- `<functional>` → `base/util/Functional.h` (custom `std::function`/`std::bind`/`std::move`)
+- `operator new/delete` → musl `malloc`/`free` (in `cxx_runtime.cc`)
+- `CAmkESDefaultHeapSize` must be ≥ 4 MiB (kernel allocates receive buffers during init)
+
+See `docs/task04-kernel-integration.md` for full details.
+
 ## Status
 
-Current: **Task 02 (vDTU Prototype)** — proof-of-concept with test stubs.
+Current: **Task 04 (Kernel Integration)** — sub-tasks 04a–04c complete (kernel compiles and boots).
 
-- Task 03: Full vDTU (notification waking, memory endpoints)
-- Task 04: Real SemperOS kernel + m3 library integration
+- ~~Task 02: vDTU Prototype~~ (done)
+- ~~Task 04a: C++ in CAmkES~~ (done)
+- ~~Task 04b: Import kernel source~~ (done)
+- ~~Task 04c: Platform + kernel entry~~ (done)
+- Task 04d: DTU data path (vDTU ring buffer integration)
+- Task 04e: VPE + PEManager real implementations
+- Task 04f: Integration test (VPE0 syscall → kernel → reply)
 - Task 05: Multi-kernel with inter-kernel channels and DDL protocol
