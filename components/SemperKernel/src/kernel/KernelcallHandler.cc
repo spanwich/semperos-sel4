@@ -48,7 +48,7 @@ KernelcallHandler::KernelcallHandler()
     for(uint i = 0; i < KRNLC_SLOTS; i++)
         _epOccup[i] = -1;
 
-    #if !defined(__t2__)
+    #if !defined(__t2__) && !defined(__sel4__)
     // configure receive buffer (we need to do that manually in the kernel)
     int buford = m3::getnextlog2(m3::DTU::MAX_MSG_SLOTS) + Kernelcalls::MSG_ORD;
     size_t bufsize = static_cast<size_t>(1) << buford;

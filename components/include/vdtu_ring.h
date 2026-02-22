@@ -115,8 +115,13 @@ struct vdtu_ring_ctrl {
 };
 
 /* Compile-time check that control is exactly 64 bytes */
+#ifdef __cplusplus
+static_assert(sizeof(struct vdtu_ring_ctrl) == VDTU_RING_CTRL_SIZE,
+              "ring ctrl must be 64 bytes");
+#else
 _Static_assert(sizeof(struct vdtu_ring_ctrl) == VDTU_RING_CTRL_SIZE,
                "ring ctrl must be 64 bytes");
+#endif
 
 /*
  * --------------------------------------------------------------------------

@@ -453,16 +453,30 @@ void Backtrace::print(OStream &) {
  *   void remove(WorkItem *item);
  *   virtual void run();
  * ================================================================ */
-void WorkLoop::add(WorkItem *, bool) {
-    /* stub */
+void WorkLoop::add(WorkItem *item, bool permanent) {
+    if(_count < MAX_ITEMS) {
+        _items[_count++] = item;
+        if(permanent)
+            _permanents++;
+        _changed = true;
+    }
 }
 
-void WorkLoop::remove(WorkItem *) {
-    /* stub */
+void WorkLoop::remove(WorkItem *item) {
+    for(size_t i = 0; i < _count; ++i) {
+        if(_items[i] == item) {
+            _items[i] = _items[--_count];
+            _changed = true;
+            return;
+        }
+    }
 }
 
 void WorkLoop::run() {
-    /* stub */
+    /* base class run() — overridden by kernel::WorkLoop */
+    while(has_items()) {
+        DTU::get().wait();
+    }
 }
 
 /* ================================================================

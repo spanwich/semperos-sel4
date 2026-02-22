@@ -100,7 +100,7 @@ static m3::Errors::Code do_activate(VPE *vpe, size_t epid, MsgCapability *oldcap
 }
 
 SyscallHandler::SyscallHandler() : _serv_ep(DTU::get().alloc_ep()) {
-#if !defined(__t2__)
+#if !defined(__t2__) && !defined(__sel4__)
     // configure both receive buffers (we need to do that manually in the kernel)
     if(Platform::pe_count() > DTU::SYSC_GATES * m3::DTU::MAX_MSG_SLOTS)
         KLOG(ERR, "Not enough msg slots for " << Platform::pe_count() << " PEs");
@@ -117,6 +117,9 @@ SyscallHandler::SyscallHandler() : _serv_ep(DTU::get().alloc_ep()) {
     bufsize = static_cast<size_t>(1) << buford;
     DTU::get().config_recv_local(srvepid(), reinterpret_cast<uintptr_t>(new uint8_t[bufsize]),
         buford, m3::nextlog2<Service::SRV_MSG_SIZE>::val, 0);
+#else
+    for(uint i = 0; i < SYSC_SLOTS; i++)
+        _epOccup[i] = -1;
 #endif
 
     // add a dummy item to workloop; we handle everything manually anyway
