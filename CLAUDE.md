@@ -100,24 +100,25 @@ SemperOS kernel is C++11. CAmkES natively supports `.cc` files via `DeclareCAmkE
 
 See `docs/task04-kernel-integration.md` for full details.
 
-## Known Limitations (Task 04)
+## Known Limitations
 
-- **Single kernel only** — ThreadManager is stubbed (single-threaded). Cooperative threading needed for multi-kernel revocation (Section 4.3.3). Safe for Task 04 since revocation callbacks never block.
+- **Single kernel only** — ThreadManager is stubbed (single-threaded). Cooperative threading needed for multi-kernel revocation (Section 4.3.3). Safe for Tasks 04-05 since all operations are local.
 - **1 SYSC_GATE configured** (not 6) to save channel budget (8 channels total). Sufficient for single-VPE prototype.
-- **seL4_Yield scheduling** — kernel and VPE0 must have equal priority for `seL4_Yield()` to work on single-core QEMU. Production would use notification-based waking.
-- **Label pass-through** — VPE0 sends `label=0`; WorkLoop uses fallback RecvGate for sel4. The gem5 DTU auto-fills label from EP config.
-- **No memory EPs** — `read_mem`/`write_mem` are stubs. Memory dataports are allocated but not wired to DTU operations.
-- **`<camkes.h>` not includable from C++** — seL4 utility headers use C-only constructs (`typeof`, `_Static_assert`). CAmkES symbols are declared manually via `extern "C"`.
+- **seL4_Yield scheduling** — kernel and VPE0 must have equal priority (200) for `seL4_Yield()` on single-core QEMU.
+- **Label pass-through** — VPE0 sends `label=0`; WorkLoop looks up VPE from `senderCoreId` via PEManager.
+- **64 KiB kernel stack** — revocation + logging call depth exceeds 16 KiB default. Set via `kernel0._stack_size = 65536` in CAmkES assembly.
+- **No memory EPs** — `read_mem`/`write_mem` are stubs.
+- **`<camkes.h>` not includable from C++** — CAmkES symbols declared manually via `extern "C"`.
+- **OBTAIN/DELEGATE not tested** — requires second VPE (Task 06).
 
 ## Status
 
-Current: **Task 04 complete** — SemperOS kernel boots and processes syscalls on seL4/CAmkES.
+Current: **Task 05 complete** — capability operations (CREATEGATE + REVOKE) working on seL4.
 
 - ~~Task 02: vDTU Prototype~~ (done)
-- ~~Task 04a: C++ in CAmkES~~ (done)
-- ~~Task 04b: Import kernel source~~ (done)
-- ~~Task 04c: Platform + kernel entry~~ (done)
-- ~~Task 04d: DTU data path~~ (done)
-- ~~Task 04e: VPE + PEManager~~ (done)
-- ~~Task 04f: Integration test~~ (done — NOOP syscall end-to-end)
-- Task 05: Multi-kernel with inter-kernel channels, cooperative threading, DDL protocol
+- ~~Task 04: Kernel Integration~~ (done — kernel boots, WorkLoop, NOOP syscall)
+- ~~Task 05a: Fix post-reply fault~~ (done — double-ack, _ack flag, EP range)
+- ~~Task 05b: CREATEGATE syscall~~ (done — MsgCapability in CapTable)
+- ~~Task 05c: REVOKE syscall~~ (done — capability removal, non-existent handling)
+- ~~Task 05d: End-to-end test~~ (done — 5/5 tests pass, no faults)
+- Task 06: Multi-VPE with OBTAIN/DELEGATE, cooperative threading
