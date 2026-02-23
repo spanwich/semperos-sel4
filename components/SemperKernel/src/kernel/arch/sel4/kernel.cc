@@ -72,31 +72,21 @@ static void configure_recv_endpoints(void)
  */
 static VPE *create_vpe0(void)
 {
-    SyscallHandler &sysch = SyscallHandler::get();
-
-    /* Reserve a syscall EP slot for VPE0 */
-    int vpe_id = 0;
-    int sysc_ep = sysch.reserve_ep(vpe_id);
-    if (sysc_ep < 0) {
-        printf("[SemperKernel] ERROR: no syscall EP available for VPE0\n");
+    /* Create VPE0 via PEManager::create() so it's stored in _vpes[core].
+     * This is needed so the WorkLoop can look up the VPE from the
+     * sender's core ID to find the correct RecvGate session. */
+    m3::PEDesc pe(m3::PEType::COMP_IMEM);
+    VPE *vpe0 = PEManager::get().create(m3::String("VPE0"), pe, -1, m3::KIF::INV_SEL);
+    if (!vpe0) {
+        printf("[SemperKernel] ERROR: PEManager::create() failed for VPE0\n");
         return nullptr;
     }
 
-    /* VPE0 is on PE 2 (core 2) */
-    size_t vpe0_core = 2;
+    printf("[SemperKernel] Created VPE0 on PE %zu (id=%zu)\n", vpe0->core(), vpe0->id());
 
-    printf("[SemperKernel] Creating VPE0 on PE %zu (syscall EP %d)\n", vpe0_core, sysc_ep);
-
-    /* Create the VPE object. The constructor calls init() which:
-     * - RecvBufs::attach() for DEF_RECVEP
-     * - config_send_remote() for SYSC_EP -> kernel's sysc_ep */
-    VPE *vpe0 = new VPE(m3::String("VPE0"), vpe_id, vpe0_core, false, sysc_ep);
-
-    /* Start VPE0 (calls DTU::wakeup which is a no-op on sel4,
-     * since CAmkES components are always running) */
+    /* Start VPE0 */
     vpe0->start(0, nullptr, 0);
-
-    printf("[SemperKernel] VPE0 created and started\n");
+    printf("[SemperKernel] VPE0 started\n");
 
     return vpe0;
 }

@@ -288,8 +288,12 @@ public:
      */
     Errors::Code reply(const void *data, size_t len) {
         Errors::Code res = _gate->reply_sync(data, len, DTU::get().get_msgoff(_gate->epid(), _msg));
-        // it's already acked
+#if !defined(__sel4__)
+        // On gem5, reply() implicitly consumes the message in hardware.
+        // On sel4, our ring buffer reply() does NOT consume — let finish()
+        // call mark_read() to advance the tail.
         _ack = false;
+#endif
         return res;
     }
 

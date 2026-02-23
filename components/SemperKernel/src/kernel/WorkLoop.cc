@@ -23,6 +23,7 @@
 #include "KernelcallHandler.h"
 #include "SyscallHandler.h"
 #include "WorkLoop.h"
+#include "pes/PEManager.h"
 #include "thread/ThreadManager.h"
 
 #if defined(__host__)
@@ -93,10 +94,13 @@ void WorkLoop::run() {
 #if defined(__sel4__)
                 /* On sel4, VPE sends may not have the correct label
                  * (vDTU doesn't auto-fill from EP config like gem5 HW).
-                 * Use a fallback gate for the EP. */
-                RecvGate fallback_gate(sysep[i], nullptr);
-                if(!msg->label)
-                    rgate = &fallback_gate;
+                 * Look up the VPE from senderCoreId via PEManager. */
+                if(!msg->label) {
+                    int sender_core = msg->senderCoreId;
+                    if(PEManager::get().exists(sender_core)) {
+                        rgate = &PEManager::get().vpe(sender_core).syscall_gate();
+                    }
+                }
 #endif
                 GateIStream is(*rgate, msg);
                 sysch.handle_message(is, nullptr);

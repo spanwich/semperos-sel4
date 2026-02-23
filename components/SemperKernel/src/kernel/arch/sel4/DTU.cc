@@ -446,8 +446,13 @@ Errors::Code DTU::reply(int ep, const void *data, size_t size, size_t msgoff) {
         /* Auto-configure: ask vDTU for send access to the sender's reply EP.
          * Find a free EP slot (scan for EP_NONE, don't use alloc_ep()
          * which may be exhausted by INIT_PRIO allocations). */
+        /* Find a free EP slot OUTSIDE the SYSC/KRNLC gate range.
+         * The WorkLoop polls EPs 0-5 (SYSC) and 6-13 (KRNLC).
+         * Using an EP in those ranges for auto-reply would cause
+         * the kernel to fetch its own reply messages. Start scanning
+         * from FIRST_FREE_EP (14). */
         int auto_ep = -1;
-        for (int i = 0; i < EP_COUNT; i++) {
+        for (int i = kernel::DTU::FIRST_FREE_EP; i < EP_COUNT; i++) {
             if (ep_type[i] == EP_NONE) {
                 auto_ep = i;
                 break;
@@ -487,10 +492,9 @@ Errors::Code DTU::reply(int ep, const void *data, size_t size, size_t msgoff) {
                             VDTU_FLAG_REPLY,
                             data, (uint16_t)size);
 
-    /* Also ack the original message since reply implies consumption. */
-    struct vdtu_ring *recv_ring = vdtu_channels_get_ring(&channels, ep_channel[ep]);
-    if (recv_ring)
-        vdtu_ring_ack(recv_ring);
+    /* Don't ack here — GateIStream::finish() will call mark_read() to
+     * consume the original message. Acking here caused a double-ack fault
+     * because finish() would advance the tail past valid data. */
 
     return (rc == 0) ? Errors::NO_ERROR : Errors::NO_SPACE;
 }

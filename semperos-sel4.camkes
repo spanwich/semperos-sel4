@@ -216,8 +216,9 @@ assembly {
     configuration {
         /* vDTU runs at highest priority (handles config RPCs promptly) */
         vdtu.priority = 250;
-        /* SemperKernel gets PE ID 0 */
+        /* SemperKernel gets PE ID 0 — needs large stack for revocation + logging */
         kernel0.priority = 200;
+        kernel0._stack_size = 65536;  /* 64 KiB stack for revocation + logging */
         /* VPE0 gets PE ID 2 — same priority as kernel for seL4_Yield() scheduling */
         vpe0.priority = 200;
     }
