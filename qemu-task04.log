@@ -1,0 +1,128 @@
+c[?7l[2J[0mSeaBIOS (version 1.15.0-1)
+
+
+iPXE (https://ipxe.org) 00:02.0 CA00 PCI2.10 PnP PMM+1FF8B0D0+1FECB0D0 CA00
+Press Ctrl-B to configure iPXE (PCI 00:02.0)...                                                                               
+
+
+Booting from ROM..Boot config: debug_port = 0x3f8
+Boot config: disable_iommu = false
+Detected 1 boot module(s):
+  module #0: start=0xc13000 end=0x106ff88 size=0x45cf88 name='/sel4-image/capdl-loader-image-x86_64-pc99'
+Parsing GRUB physical memory map
+	Physical Memory Region from 0 size 9fc00 type 1
+	Physical Memory Region from 9fc00 size 400 type 2
+	Physical Memory Region from f0000 size 10000 type 2
+	Physical Memory Region from 100000 size 1fedf000 type 1
+Adding physical memory region 0x100000-0x1ffdf000
+	Physical Memory Region from 1ffdf000 size 21000 type 2
+	Physical Memory Region from b0000000 size 10000000 type 2
+	Physical Memory Region from fed1c000 size 4000 type 2
+	Physical Memory Region from fffc0000 size 40000 type 2
+Multiboot gave us no video information
+ACPI: RSDP paddr=0xf59f0
+ACPI: RSDP vaddr=0xf59f0
+ACPI: RSDT paddr=0x1ffe22ba
+ACPI: RSDT vaddr=0x1ffe22ba
+SKIM window for mitigating Meltdown (https://www.meltdownattack.com) not necessary for AMD and performance is being needlessly affected, consider disabling
+Kernel loaded to: start=0x100000 end=0xc12000 size=0xb12000 entry=0x100300
+ACPI: RSDT paddr=0x1ffe22ba
+ACPI: RSDT vaddr=0x1ffe22ba
+ACPI: FADT paddr=0x1ffe20b2
+ACPI: FADT vaddr=0x1ffe20b2
+ACPI: FADT flags=0x84a5
+ACPI: 0 IOMMUs detected
+ACPI: MADT paddr=0x1ffe21a6
+ACPI: MADT vaddr=0x1ffe21a6
+ACPI: MADT apic_addr=0xfee00000
+ACPI: MADT flags=0x1
+ACPI: MADT_APIC apic_id=0x0
+ACPI: MADT_IOAPIC ioapic_id=0 ioapic_addr=0xfec00000 gsib=0
+ACPI: MADT_ISO bus=0 source=0 gsi=2 flags=0x0
+ACPI: MADT_ISO bus=0 source=5 gsi=5 flags=0xd
+ACPI: MADT_ISO bus=0 source=9 gsi=9 flags=0xd
+ACPI: MADT_ISO bus=0 source=10 gsi=10 flags=0xd
+ACPI: MADT_ISO bus=0 source=11 gsi=11 flags=0xd
+ACPI: 1 CPU(s) detected
+ELF-loading userland images from boot modules:
+size=0x65c000 v_entry=0x4088d9 v_start=0x400000 v_end=0xa5c000 p_start=0x1070000 p_end=0x16cc000
+Moving loaded userland images to final location: from=0x1070000 to=0xc12000 size=0x65c000
+Starting node #0 with APIC ID 0
+Mapping kernel window is done
+available phys memory regions: 1
+  [100000..1ffdf000)
+reserved virt address space regions: 1
+  [ffffff8000100000..ffffff800126e000)
+Booting all finished, dropped to user space
+[vDTU] Initializing endpoint table (4 PEs x 16 EPs)
+[vDTU] Initialized (8 msg channels, 4 mem channels available)
+[vDTU] Ready for configuration requests
+[VPE0] Starting (PE 2, VPE ID 0)
+[VPE0] Looking for configured channels...
+=== SemperOS Kernel on seL4/CAmkES ===
+[CXX] Testing new/delete/virtual dispatch...
+[CXX] OK: new/delete/virtual dispatch all working (got 42)
+[SemperKernel] Starting SemperOS kernel on seL4/CAmkES
+[SemperKernel] Platform: 4 PEs, kernel PE=0, kernel ID=0
+[vDTU] config_recv(pe=0, ep=0, buf_order=14, msg_order=9) -> channel 0 (4 slots x 512B)
+[SemperKernel] Configured SYSC_GATE recv endpoint (ep 0)
+[vDTU] config_recv(pe=0, ep=15, buf_order=13, msg_order=8) -> channel 1 (8 slots x 256B)
+[SemperKernel] Configured service recv endpoint (ep 15)
+[vDTU] config_recv(pe=0, ep=6, buf_order=16, msg_order=11) -> channel 2 (2 slots x 2048B)
+[SemperKernel] Configured 1 KRNLC_GATE recv endpoint
+[SemperKernel] RecvBufs initialized
+[SemperKernel] PEManager created
+[SemperKernel] Creating VPE0 on PE 2 (syscall EP 0)
+[vDTU] config_recv(pe=2, ep=1, buf_order=11, msg_order=9) -> channel 3 (4 slots x 512B)
+[vDTU] config_send(pe=2, ep=0, dest=0:0, label=0x690d50) -> channel 0
+[SemperKernel] VPE0 created and started
+[SemperKernel] Entering WorkLoop (polling 6 SYSC + 8 KRNLC gates)
+[VPE0] Found send channel: 0
+[VPE0] Found reply channel: 1
+[VPE0] Sending NOOP syscall (opcode=18) on channel 0
+[VPE0] Syscall sent, waiting for kernel to process...
+[VPE0] Waiting for reply (polling recv channels)...
+[vDTU] config_send(pe=0, ep=1, dest=2:1, label=0x1) -> channel 3
+FAULT HANDLER: data fault from kernel0.kernel0_0_control (ID 0x1) on address 0x19, pc = 0x4073f0, fsr = 0x4
+FAULT HANDLER: Register dump:
+FAULT HANDLER: rip:	0x4073f0
+FAULT HANDLER: rsp:	0x887b90
+FAULT HANDLER: rflags:	0x206
+FAULT HANDLER: rax:	0x1
+FAULT HANDLER: rbx:	0x1
+FAULT HANDLER: rcx:	0x887c28
+FAULT HANDLER: rdx:	0x8
+FAULT HANDLER: rsi:	0x887c28
+FAULT HANDLER: rdi:	0x1
+FAULT HANDLER: rbp:	0x887b90
+FAULT HANDLER: r8:	0x8aa040
+FAULT HANDLER: r9:	0x1
+FAULT HANDLER: r10:	0x10000000003
+FAULT HANDLER: r11:	0x212
+FAULT HANDLER: r12:	0x8aa040
+FAULT HANDLER: r13:	0x467180
+FAULT HANDLER: r14:	0x0
+FAULT HANDLER: r15:	0x0
+FAULT HANDLER: fs_base:	0x87d0c0
+FAULT HANDLER: gs_base:	0x0
+FAULT HANDLER:   memory map:
+FAULT HANDLER:     +-- 0x000000000088bfff --
+FAULT HANDLER:     |   guard page
+FAULT HANDLER:     +-- 0x000000000088b000 --
+FAULT HANDLER:     |   IPC buffer
+FAULT HANDLER:     +-- 0x000000000088a000 --
+FAULT HANDLER:     |   guard page
+FAULT HANDLER:     +-- 0x0000000000889000 --
+FAULT HANDLER:     |   guard page
+FAULT HANDLER:     +-- 0x0000000000888000 --
+FAULT HANDLER:     |   stack
+FAULT HANDLER:     +-- 0x0000000000884000 --
+FAULT HANDLER:     |   guard page
+FAULT HANDLER:     +-- 0x0000000000883000 --
+FAULT HANDLER:     |   code and data
+FAULT HANDLER:     +-- 0x0000000000400000 --
+[VPE0] Got reply: error_code=0 (0=NO_ERROR)
+[VPE0] NOOP syscall succeeded!
+[VPE0] === Integration test complete ===
+qemu-system-x86_64: terminating on signal 15 from pid 7 (timeout)
+QEMU_TIMEOUT: Exited after 25s
