@@ -122,6 +122,14 @@ DeclareCAmkESComponent(VPE0
 )
 
 # =========================================================================
+#  VPE1 Component — Passive VPE for EXCHANGE testing (Task 06)
+# =========================================================================
+DeclareCAmkESComponent(VPE1
+    SOURCES
+        components/VPE1/VPE1.c
+)
+
+# =========================================================================
 #  CAmkES Assembly
 # =========================================================================
 DeclareCAmkESRootserver(semperos-sel4.camkes)

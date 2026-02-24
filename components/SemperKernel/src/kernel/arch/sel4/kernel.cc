@@ -91,6 +91,46 @@ static VPE *create_vpe0(void)
     return vpe0;
 }
 
+/*
+ * Create VPE1 (the second user VPE) and install cross-VPE capabilities.
+ *
+ * VPE1 is PE 3 in our platform config. It is a passive VPE whose CapTable
+ * is manipulated by the kernel during EXCHANGE syscalls from VPE0.
+ *
+ * After creating VPE1, we install a VPECapability at selector 2 in VPE0's
+ * CapTable. This allows VPE0 to reference VPE1 as the target of EXCHANGE
+ * syscalls (the tcap parameter).
+ *
+ * Note: VPE::init() configures endpoints via vDTU RPC. Since VPE1 has no
+ * CAmkES shared data channels, the endpoints are bookkeeping-only. VPE1
+ * never sends or receives messages in the EXCHANGE path.
+ */
+static VPE *create_vpe1(VPE *vpe0)
+{
+    m3::PEDesc pe(m3::PEType::COMP_IMEM);
+    VPE *vpe1 = PEManager::get().create(m3::String("VPE1"), pe, -1, m3::KIF::INV_SEL);
+    if (!vpe1) {
+        printf("[SemperKernel] ERROR: PEManager::create() failed for VPE1\n");
+        return nullptr;
+    }
+
+    printf("[SemperKernel] Created VPE1 on PE %zu (id=%zu)\n", vpe1->core(), vpe1->id());
+
+    /* Install VPECapability for VPE1 in VPE0's CapTable at selector 2.
+     * VPE0 already has: sel 0 = self VPECap, sel 1 = MemCap.
+     * This mimics what createvpe() does: obtain() clones the VPE1's self-cap
+     * (at sel 0 in VPE1's table) into VPE0's table at the target selector.
+     * This establishes a parent-child relationship for revocation. */
+    vpe0->objcaps().obtain(2, vpe1->objcaps().get(0));
+    printf("[SemperKernel] Installed VPE1 cap at VPE0 selector 2\n");
+
+    /* Start VPE1 */
+    vpe1->start(0, nullptr, 0);
+    printf("[SemperKernel] VPE1 started (passive mode)\n");
+
+    return vpe1;
+}
+
 extern "C" void kernel_start(void) {
     printf("[SemperKernel] Starting SemperOS kernel on seL4/CAmkES\n");
     printf("[SemperKernel] Platform: %zu PEs, kernel PE=%zu, kernel ID=%u\n",
@@ -111,6 +151,12 @@ extern "C" void kernel_start(void) {
     if (!vpe0) {
         printf("[SemperKernel] FATAL: Failed to create VPE0\n");
         return;
+    }
+
+    /* Create VPE1 and install cross-VPE capabilities (Task 06) */
+    VPE *vpe1 = create_vpe1(vpe0);
+    if (!vpe1) {
+        printf("[SemperKernel] WARNING: Failed to create VPE1 (EXCHANGE tests unavailable)\n");
     }
 
     printf("[SemperKernel] Entering WorkLoop (polling %d SYSC + %d KRNLC gates)\n",

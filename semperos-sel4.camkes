@@ -4,11 +4,12 @@
  * Architecture:
  *   - VDTUService:    Virtual DTU control plane (endpoint configuration)
  *   - SemperKernel:   SemperOS kernel instance (kid=0)
- *   - VPE0:           Application VPE (test stub)
+ *   - VPE0:           Application VPE (test harness, PE 2)
+ *   - VPE1:           Second VPE (passive, PE 3) — Task 06 EXCHANGE target
  *
  * Connection types:
  *   1. seL4RPCCall:     Config RPC (SemperKernel -> VDTUService)
- *   2. seL4SharedData:  Message ring buffers (point-to-point: kernel <-> VPE0)
+ *   2. seL4SharedData:  Message ring buffers (point-to-point: kernel <-> VPEs)
  *   3. seL4Notification: Doorbell signaling for message arrival
  *
  * Pre-allocation strategy:
@@ -17,12 +18,13 @@
  *   memory channels and notifications, then have the vDTU assign them to
  *   DTU endpoints as they are configured.
  *
- *   For the minimal prototype (1 kernel + 1 VPE):
+ *   For the multi-VPE prototype (1 kernel + 2 VPEs):
  *   - 8 message channels: SemperKernel <-> VPE0
  *     (6 for SYSC_GATES + 1 for DEF_RECVEP + 1 spare)
  *   - 4 memory dataports: SemperKernel <-> VPE0
  *     (for DTU READ/WRITE memory endpoint operations)
  *   - 1 RPC connection:   SemperKernel -> VDTUService (config calls)
+ *   - VPE1 is passive (no dataports) — kernel manipulates its CapTable directly
  *
  * Data path separation:
  *   The vDTU is control plane only -- it manages an endpoint table and
@@ -144,6 +146,15 @@ component VPE0 {
 }
 
 /*
+ * VPE1: Passive VPE for EXCHANGE syscall testing (Task 06).
+ * VPE1's CapTable is manipulated directly by the kernel during EXCHANGE.
+ * No shared data channels needed — VPE1 doesn't send/receive messages.
+ */
+component VPE1 {
+    control;
+}
+
+/*
  * =========================================================================
  *  Assembly: wire everything together
  * =========================================================================
@@ -154,6 +165,7 @@ assembly {
         component VDTUService   vdtu;
         component SemperKernel  kernel0;
         component VPE0          vpe0;
+        component VPE1          vpe1;
 
         /*
          * Config RPC: kernel0 -> vdtu
@@ -218,8 +230,12 @@ assembly {
         vdtu.priority = 250;
         /* SemperKernel gets PE ID 0 — needs large stack for revocation + logging */
         kernel0.priority = 200;
-        kernel0._stack_size = 65536;  /* 64 KiB stack for revocation + logging */
+        kernel0._stack_size = 131072;  /* 128 KiB stack for cross-VPE revocation */
         /* VPE0 gets PE ID 2 — same priority as kernel for seL4_Yield() scheduling */
         vpe0.priority = 200;
+        /* VPE1 gets PE ID 3 — passive EXCHANGE target, same priority for seL4_Yield() */
+        vpe1.priority = 200;
+        /* VPE1 is passive — minimal heap (default 4 MiB would exhaust untyped memory) */
+        vpe1._heap_size = 4096;
     }
 }

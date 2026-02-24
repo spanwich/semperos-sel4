@@ -86,5 +86,8 @@ if("${GLOBAL_COMPONENTS_PATH}" STREQUAL "GLOBAL_COMPONENTS_PATH-NOTFOUND")
 endif()
 include(${GLOBAL_COMPONENTS_PATH})
 
-# Default heap size for components (SemperOS kernel needs ~4 MiB for buffers)
+# Request 4 MiB heap from CAmkES (component.common.c template).
+# Note: Due to cmake ordering, this may not override the 1 MiB default in
+# libsel4camkes/CMakeLists.txt. The SemperKernel component supplements
+# the heap with a 4 MiB static BSS allocation in camkes_entry.c.
 set(CAmkESDefaultHeapSize 4194304 CACHE STRING "" FORCE)

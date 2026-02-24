@@ -43,6 +43,7 @@ Compiles and runs 10 host-side unit tests (no seL4 required). Tests cover init v
 | **VDTUService** | Control plane: endpoint table, channel assignment via RPC | 250 |
 | **SemperKernel** | SemperOS kernel (PE 0): C++11, arch/sel4/ backend, vDTU data path | 200 |
 | **VPE0** | First user VPE (PE 2): sends syscalls to kernel, receives replies | 200 |
+| **VPE1** | Second user VPE (PE 3): passive EXCHANGE target, no dataports | 200 |
 
 ### Connections
 
@@ -96,24 +97,29 @@ SemperOS kernel is C++11. CAmkES natively supports `.cc` files via `DeclareCAmkE
 - `<cassert>` → `<assert.h>`, `<cstring>` → `<string.h>`, etc.
 - `<functional>` → `base/util/Functional.h` (custom `std::function`/`std::bind`/`std::move`)
 - `operator new/delete` → musl `malloc`/`free` (in `cxx_runtime.cc`)
-- `CAmkESDefaultHeapSize` must be ≥ 4 MiB (kernel allocates receive buffers during init)
+- Kernel heap: 4 MiB static BSS buffer in `camkes_entry.c` (CAmkES's `CAmkESDefaultHeapSize` cmake override doesn't work; see heap fix below)
 
 See `docs/task04-kernel-integration.md` for full details.
 
+## CAmkES Heap Fix (Critical)
+
+CAmkES forces `LibSel4MuslcSysMorecoreBytes=0` in `camkes.cmake`, disabling musl's static morecore. CAmkES provides a 1 MiB heap via its `component.common.c` template, but the `CAmkESDefaultHeapSize` cmake variable override does NOT propagate to the generated config header. Fix: `camkes_entry.c` defines a 4 MiB static buffer and a `__attribute__((constructor(200)))` function that sets `morecore_area`/`morecore_size` BEFORE musl init (priority 201) and CAmkES init (priority 202). This ensures the first malloc call uses the 4 MiB buffer.
+
 ## Known Limitations
 
-- **Single kernel only** — ThreadManager is stubbed (single-threaded). Cooperative threading needed for multi-kernel revocation (Section 4.3.3). Safe for Tasks 04-05 since all operations are local.
-- **1 SYSC_GATE configured** (not 6) to save channel budget (8 channels total). Sufficient for single-VPE prototype.
-- **seL4_Yield scheduling** — kernel and VPE0 must have equal priority (200) for `seL4_Yield()` on single-core QEMU.
+- **Single kernel only** — ThreadManager is stubbed (single-threaded). Cooperative threading needed for multi-kernel revocation (Section 4.3.3). Safe for Tasks 04-06 since all operations are local.
+- **1 SYSC_GATE configured** (not 6) to save channel budget (8 channels total). Sufficient for dual-VPE prototype.
+- **seL4_Yield scheduling** — kernel, VPE0, and VPE1 must have equal priority (200) for `seL4_Yield()` on single-core QEMU.
 - **Label pass-through** — VPE0 sends `label=0`; WorkLoop looks up VPE from `senderCoreId` via PEManager.
-- **64 KiB kernel stack** — revocation + logging call depth exceeds 16 KiB default. Set via `kernel0._stack_size = 65536` in CAmkES assembly.
+- **128 KiB kernel stack** — cross-VPE revocation call depth exceeds 64 KiB. Set via `kernel0._stack_size = 131072` in CAmkES assembly.
 - **No memory EPs** — `read_mem`/`write_mem` are stubs.
 - **`<camkes.h>` not includable from C++** — CAmkES symbols declared manually via `extern "C"`.
-- **OBTAIN/DELEGATE not tested** — requires second VPE (Task 06).
+- **VPE1 is passive** — no shared data channels, doesn't send/receive messages. Only its CapTable is used.
+- **OBTAIN/DELEGATE not tested** — requires service infrastructure + cooperative threading (future task).
 
 ## Status
 
-Current: **Task 05 complete** — capability operations (CREATEGATE + REVOKE) working on seL4.
+Current: **Task 06 complete** — EXCHANGE syscall + cross-VPE revocation, 8/8 tests pass.
 
 - ~~Task 02: vDTU Prototype~~ (done)
 - ~~Task 04: Kernel Integration~~ (done — kernel boots, WorkLoop, NOOP syscall)
@@ -121,4 +127,5 @@ Current: **Task 05 complete** — capability operations (CREATEGATE + REVOKE) wo
 - ~~Task 05b: CREATEGATE syscall~~ (done — MsgCapability in CapTable)
 - ~~Task 05c: REVOKE syscall~~ (done — capability removal, non-existent handling)
 - ~~Task 05d: End-to-end test~~ (done — 5/5 tests pass, no faults)
-- Task 06: Multi-VPE with OBTAIN/DELEGATE, cooperative threading
+- ~~Task 06: EXCHANGE syscall + cross-VPE revocation~~ (done — 8/8 tests pass)
+- Task 07: OBTAIN/DELEGATE + cooperative threading (future)

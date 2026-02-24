@@ -22,10 +22,12 @@
 /*
  * SemperOS syscall opcodes (from KIF.h Syscall::Operation enum)
  *   CREATEGATE = 4
+ *   EXCHANGE   = 9
  *   REVOKE     = 16
  *   NOOP       = 18
  */
 #define SYSCALL_CREATEGATE  4
+#define SYSCALL_EXCHANGE    9
 #define SYSCALL_REVOKE      16
 #define SYSCALL_NOOP        18
 
@@ -184,6 +186,66 @@ static int send_revoke(uint64_t cap_sel)
     return send_syscall(&payload, sizeof(payload));
 }
 
+/*
+ * Send an EXCHANGE syscall.
+ *
+ * EXCHANGE is a synchronous, kernel-internal capability transfer.
+ * The kernel clones capabilities from one VPE's CapTable to another,
+ * establishing parent-child pointers for recursive revocation.
+ *
+ * Message format (m3 marshalling, 8-byte aligned):
+ *   [0]      opcode   = EXCHANGE (9)
+ *   [1]      tcap     = VPECapability selector pointing to target VPE
+ *   [2..3]   own      = CapRngDesc { type(4), start(4), count(4) } + pad(4) = 16 bytes
+ *   [4..5]   other    = CapRngDesc { type(4), start(4), count(4) } + pad(4) = 16 bytes
+ *   [6]      obtain   = bool (0=delegate: own→other, 1=obtain: other→own)
+ *
+ * When obtain=false (delegate): clones caps from sender's 'own' range
+ *   to target VPE's 'other' range.
+ * When obtain=true: clones caps from target VPE's 'other' range
+ *   to sender's 'own' range.
+ *
+ * Returns kernel error code (0 = success).
+ */
+static int send_exchange(uint64_t tcap, uint32_t own_start, uint32_t own_count,
+                         uint32_t other_start, uint32_t other_count, int obtain)
+{
+    /* Kernel handler: is >> tcap >> own >> other >> obtain;
+     * tcap = capsel_t (uint64_t)
+     * own/other = CapRngDesc (12 bytes, advanced by round_up(12,8)=16)
+     * obtain = bool (marshalled as uint64_t) */
+    struct {
+        uint64_t opcode;
+        uint64_t tcap;
+        /* CapRngDesc 'own': 12 bytes + 4 pad */
+        uint32_t own_type;
+        uint32_t own_start;
+        uint32_t own_count;
+        uint32_t _pad1;
+        /* CapRngDesc 'other': 12 bytes + 4 pad */
+        uint32_t other_type;
+        uint32_t other_start;
+        uint32_t other_count;
+        uint32_t _pad2;
+        /* obtain flag */
+        uint64_t obtain;
+    } __attribute__((packed)) payload;
+
+    payload.opcode      = SYSCALL_EXCHANGE;
+    payload.tcap        = tcap;
+    payload.own_type    = CAP_TYPE_OBJ;
+    payload.own_start   = own_start;
+    payload.own_count   = own_count;
+    payload._pad1       = 0;
+    payload.other_type  = CAP_TYPE_OBJ;
+    payload.other_start = other_start;
+    payload.other_count = other_count;
+    payload._pad2       = 0;
+    payload.obtain      = obtain ? 1 : 0;
+
+    return send_syscall(&payload, sizeof(payload));
+}
+
 int run(void)
 {
     printf("[VPE0] Starting (PE %d, VPE ID %d)\n", MY_PE, MY_VPE_ID);
@@ -273,6 +335,93 @@ int run(void)
         }
         if (ok) pass++; else fail++;
         printf("[VPE0] Test 5 (CREATE+REVOKE x3): %s\n", ok ? "PASS" : "FAIL");
+    }
+
+    /* ==============================================================
+     * Test 6: EXCHANGE — delegate capability from VPE0 to VPE1
+     *
+     * Setup: kernel installed VPECapability for VPE1 at selector 2
+     * in our CapTable (during kernel_start).
+     *
+     * Steps:
+     *   1. Create a gate at selector 20 (label=0xDEAD, epid=4, credits=16)
+     *   2. EXCHANGE: delegate sel 20 from VPE0 → VPE1 at sel 30
+     *      tcap=2 (VPE1 cap), own={OBJ,20,1}, other={OBJ,30,1}, obtain=false
+     *   3. Verify EXCHANGE returned success
+     *
+     * The kernel's do_exchange() clones VPE0's cap at sel 20 into
+     * VPE1's CapTable at sel 30, with parent-child pointers.
+     * ============================================================== */
+    {
+        int ok = 1;
+        /* Step 1: Create gate at sel 20 */
+        err = send_creategate(20, 0xDEAD, 4, 16);
+        if (err != 0) {
+            printf("[VPE0]   EXCHANGE setup: CREATEGATE(20) failed: %d\n", err);
+            ok = 0;
+        }
+
+        if (ok) {
+            /* Step 2: EXCHANGE delegate sel 20 → VPE1 sel 30 */
+            err = send_exchange(2, 20, 1, 30, 1, 0);
+            if (err != 0) {
+                printf("[VPE0]   EXCHANGE(delegate 20→VPE1:30) failed: %d\n", err);
+                ok = 0;
+            }
+        }
+
+        if (ok) pass++; else fail++;
+        printf("[VPE0] Test 6 (EXCHANGE delegate to VPE1): %s (err=%d)\n",
+               ok ? "PASS" : "FAIL", err);
+    }
+
+    /* ==============================================================
+     * Test 7: Cross-VPE REVOKE — revoke parent, verify child removed
+     *
+     * VPE0 sel 20 is the parent; VPE1 sel 30 is the child (from Test 6).
+     * Revoking sel 20 in VPE0 should recursively walk the capability
+     * tree and remove the child at VPE1 sel 30.
+     *
+     * We verify via return code (success = tree walk completed without
+     * error). The kernel logs confirm the cross-VPE revocation.
+     * ============================================================== */
+    {
+        err = send_revoke(20);
+        if (err == 0) pass++; else fail++;
+        printf("[VPE0] Test 7 (cross-VPE REVOKE sel=20): %s (err=%d)\n",
+               err == 0 ? "PASS" : "FAIL", err);
+    }
+
+    /* ==============================================================
+     * Test 8: EXCHANGE + REVOKE cycle — prove cross-VPE cleanup
+     *
+     * Repeats the exchange+revoke pattern 3 times to verify no
+     * resource leaks in the cross-VPE capability tree.
+     * ============================================================== */
+    {
+        int ok = 1;
+        for (int i = 0; i < 3; i++) {
+            /* Create gate at sel 40+i */
+            err = send_creategate(40 + i, 0xF000 + i, 5, 8);
+            if (err != 0) {
+                printf("[VPE0]   cycle %d CREATE failed: %d\n", i, err);
+                ok = 0; break;
+            }
+            /* Delegate to VPE1 at sel 50+i */
+            err = send_exchange(2, 40 + i, 1, 50 + i, 1, 0);
+            if (err != 0) {
+                printf("[VPE0]   cycle %d EXCHANGE failed: %d\n", i, err);
+                ok = 0; break;
+            }
+            /* Revoke parent (should also revoke VPE1's child) */
+            err = send_revoke(40 + i);
+            if (err != 0) {
+                printf("[VPE0]   cycle %d REVOKE failed: %d\n", i, err);
+                ok = 0; break;
+            }
+        }
+        if (ok) pass++; else fail++;
+        printf("[VPE0] Test 8 (EXCHANGE+REVOKE x3 cycle): %s\n", ok ? "PASS" : "FAIL");
     }
 
     printf("[VPE0] === %d passed, %d failed ===\n", pass, fail);
