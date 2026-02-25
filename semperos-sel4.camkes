@@ -6,37 +6,31 @@
  *   - SemperKernel:   SemperOS kernel instance (kid=0)
  *   - VPE0:           Application VPE (test harness, PE 2)
  *   - VPE1:           Second VPE (passive, PE 3) — Task 06 EXCHANGE target
+ *   - DTUBridge:      E1000 + lwIP UDP bridge for inter-node DTU messages
  *
  * Connection types:
  *   1. seL4RPCCall:     Config RPC (SemperKernel -> VDTUService)
  *   2. seL4SharedData:  Message ring buffers (point-to-point: kernel <-> VPEs)
  *   3. seL4Notification: Doorbell signaling for message arrival
+ *   4. seL4RPCCall:     Net RPC (SemperKernel -> DTUBridge)
+ *   5. seL4HardwareMMIO/Interrupt/IOPort: E1000 NIC hardware
  *
- * Pre-allocation strategy:
- *   CAmkES requires static declaration of all connections. DTU endpoints
- *   are created dynamically at runtime. We pre-allocate a pool of shared
- *   memory channels and notifications, then have the vDTU assign them to
- *   DTU endpoints as they are configured.
- *
- *   For the multi-VPE prototype (1 kernel + 2 VPEs):
- *   - 8 message channels: SemperKernel <-> VPE0
- *     (6 for SYSC_GATES + 1 for DEF_RECVEP + 1 spare)
- *   - 4 memory dataports: SemperKernel <-> VPE0
- *     (for DTU READ/WRITE memory endpoint operations)
- *   - 1 RPC connection:   SemperKernel -> VDTUService (config calls)
- *   - VPE1 is passive (no dataports) — kernel manipulates its CapTable directly
- *
- * Data path separation:
- *   The vDTU is control plane only -- it manages an endpoint table and
- *   assigns channels, but NEVER touches the data path memory. All
- *   seL4SharedData connections are point-to-point between kernel and VPE0.
- *   Direct notifications between kernel and VPE0 avoid routing signals
- *   through the vDTU.
+ * Inter-node transport:
+ *   DTUBridge owns the Intel 82540EM (e1000) NIC via MMIO + PCI config
+ *   I/O ports. It runs lwIP (UDP-only) and exposes a DTUNetIPC RPC
+ *   interface to SemperKernel. Remote PE messages (PE >= 4) are routed
+ *   via this bridge as raw DTU messages in UDP datagrams on port 7654.
  */
 
 import <std_connector.camkes>;
 
-/* Import the vDTU config interface */
+/*
+ * =========================================================================
+ *  Procedure Interfaces
+ * =========================================================================
+ */
+
+/* vDTU config interface */
 procedure VDTUConfig {
     int config_send(in int target_pe, in int ep_id,
                     in int dest_pe, in int dest_ep, in int dest_vpe,
@@ -53,6 +47,28 @@ procedure VDTUConfig {
     int wakeup_pe(in int target_pe);
     int get_ep_count();
 };
+
+/* DTU network bridge interface: SemperKernel -> DTUBridge */
+procedure DTUNetIPC {
+    int net_send(in int dest_node, in int msg_len);
+};
+
+/*
+ * =========================================================================
+ *  Hardware Component Definitions (E1000 NIC)
+ * =========================================================================
+ */
+
+component HWEthDriver {
+    hardware;
+    dataport Buf(0x20000) mmio;
+    emits IRQ irq;
+}
+
+component HWPCIConfig {
+    hardware;
+    provides IOPort pci_config;
+}
 
 /*
  * =========================================================================
@@ -114,6 +130,16 @@ component SemperKernel {
 
     /* Data path: VPE0 signals kernel that a reply is available */
     consumes Signal signal_from_vpe0;
+
+    /* Network bridge: kernel sends remote DTU messages via RPC */
+    uses DTUNetIPC net;
+
+    /* Network bridge dataports: kernel <-> DTUBridge */
+    dataport Buf(8192) dtu_out;       /* kernel writes outgoing DTU msg */
+    dataport Buf(8192) dtu_in;        /* bridge writes incoming DTU msg */
+
+    /* Network bridge: incoming message notification */
+    consumes Signal net_msg_arrived;
 }
 
 component VPE0 {
@@ -155,6 +181,31 @@ component VPE1 {
 }
 
 /*
+ * DTUBridge: E1000 + lwIP UDP bridge for inter-node DTU messages.
+ * Owns the Intel 82540EM NIC hardware and runs lwIP (UDP-only).
+ * SemperKernel calls net_send() RPC to transmit DTU messages to remote node.
+ * Incoming UDP packets are deposited in dtu_in dataport + notification.
+ */
+component DTUBridge {
+    control;
+
+    /* E1000 hardware interfaces */
+    dataport Buf(0x20000) eth_mmio;
+    consumes IRQ eth_irq;
+    uses IOPort pci_config;
+
+    /* RPC from SemperKernel: outgoing DTU messages */
+    provides DTUNetIPC net;
+
+    /* Shared dataports for DTU message buffers */
+    dataport Buf(8192) dtu_out;       /* kernel writes here before net_send() */
+    dataport Buf(8192) dtu_in;        /* bridge writes incoming msg here */
+
+    /* Notification: bridge -> kernel ("DTU message arrived from network") */
+    emits Signal net_msg_ready;
+}
+
+/*
  * =========================================================================
  *  Assembly: wire everything together
  * =========================================================================
@@ -166,6 +217,9 @@ assembly {
         component SemperKernel  kernel0;
         component VPE0          vpe0;
         component VPE1          vpe1;
+        component HWEthDriver   eth_hardware;
+        component HWPCIConfig   pci_hardware;
+        component DTUBridge     dtu_bridge;
 
         /*
          * Config RPC: kernel0 -> vdtu
@@ -223,6 +277,29 @@ assembly {
                                                   to vpe0.signal_from_kernel);
         connection seL4Notification vpe0_to_kern(from vpe0.signal_kernel,
                                                   to kernel0.signal_from_vpe0);
+
+        /*
+         * DTUBridge: E1000 hardware + network transport
+         */
+        connection seL4HardwareMMIO eth_mmio_conn(from dtu_bridge.eth_mmio,
+                                                   to eth_hardware.mmio);
+        connection seL4HardwareInterrupt eth_irq_conn(from eth_hardware.irq,
+                                                       to dtu_bridge.eth_irq);
+        connection seL4HardwareIOPort pci_config_conn(from dtu_bridge.pci_config,
+                                                       to pci_hardware.pci_config);
+
+        /* RPC: kernel sends outgoing DTU messages to bridge */
+        connection seL4RPCCall net_rpc(from kernel0.net, to dtu_bridge.net);
+
+        /* Shared dataports for DTU message buffers */
+        connection seL4SharedData dtu_out_dp(from kernel0.dtu_out,
+                                              to dtu_bridge.dtu_out);
+        connection seL4SharedData dtu_in_dp(from dtu_bridge.dtu_in,
+                                             to kernel0.dtu_in);
+
+        /* Notification: bridge wakes kernel on incoming network message */
+        connection seL4Notification net_to_kern(from dtu_bridge.net_msg_ready,
+                                                 to kernel0.net_msg_arrived);
     }
 
     configuration {
@@ -237,5 +314,18 @@ assembly {
         vpe1.priority = 200;
         /* VPE1 is passive — minimal heap (default 4 MiB would exhaust untyped memory) */
         vpe1._heap_size = 4096;
+
+        /* DTUBridge: E1000 + lwIP UDP bridge */
+        dtu_bridge.priority = 200;
+        dtu_bridge._stack_size = 65536;  /* 64 KiB */
+
+        /* E1000 hardware config (Intel 82540EM on QEMU q35) */
+        eth_hardware.mmio_paddr = 0xfeb80000;
+        eth_hardware.mmio_size = 0x20000;
+        eth_hardware.irq_irq_type = "pci";
+        eth_hardware.irq_irq_ioapic = 0;
+        eth_hardware.irq_irq_ioapic_pin = 11;
+        eth_hardware.irq_irq_vector = 11;
+        pci_hardware.pci_config_attributes = "0xCF8:0xCFF";
     }
 }

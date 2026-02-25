@@ -91,3 +91,12 @@ include(${GLOBAL_COMPONENTS_PATH})
 # libsel4camkes/CMakeLists.txt. The SemperKernel component supplements
 # the heap with a 4 MiB static BSS allocation in camkes_entry.c.
 set(CAmkESDefaultHeapSize 4194304 CACHE STRING "" FORCE)
+
+# lwIP (for DTUBridge E1000 + UDP transport)
+set(LibLwip ON CACHE BOOL "" FORCE)
+
+# Node identity for dual-QEMU builds (0 or 1)
+if(NOT DEFINED NODE_ID)
+    set(NODE_ID 0)
+endif()
+set(NODE_ID ${NODE_ID} CACHE STRING "Node identity for dual-QEMU (0 or 1)" FORCE)

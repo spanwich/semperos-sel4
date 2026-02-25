@@ -11,6 +11,7 @@ timeout "$TIMEOUT" qemu-system-x86_64 \
     -serial mon:stdio \
     -kernel "$KERNEL" \
     -initrd "$INITRD" \
+    $QEMU_EXTRA \
     "$@"
 
 EXIT_CODE=$?

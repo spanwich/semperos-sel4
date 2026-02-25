@@ -1,0 +1,49 @@
+#
+# docker-compose.yml — Dual-QEMU SemperOS DTU ping-pong demo
+#
+# Launches two QEMU instances connected via QEMU socket networking.
+# Node A (listener) starts first; Node B (connector) starts after 3s.
+#
+# Prerequisites:
+#   1. Build two images:
+#      cmake ... -DNODE_ID=0 ...  (build-node0/)
+#      cmake ... -DNODE_ID=1 ...  (build-node1/)
+#   2. Docker image: semperos-qemu:latest
+#
+# Usage:
+#   cd docker/
+#   docker compose up
+#
+# Expected output:
+#   Node A: [DTUBridge] lwIP UP: 10.0.0.1/24
+#   Node B: [DTUBridge] lwIP UP: 10.0.0.2/24
+#   Both: [VPE0] === 9 passed, 0 failed ===
+#
+
+services:
+  node-a:
+    image: semperos-qemu:latest
+    container_name: semperos-node-a
+    volumes:
+      - ../../build-node0/images:/sel4-image:ro
+    network_mode: host
+    environment:
+      TIMEOUT: "60"
+      QEMU_EXTRA: >-
+        -device e1000,netdev=eth0,mac=52:54:00:00:00:01
+        -netdev socket,id=eth0,listen=:10001
+
+  node-b:
+    image: semperos-qemu:latest
+    container_name: semperos-node-b
+    volumes:
+      - ../../build-node1/images:/sel4-image:ro
+    network_mode: host
+    environment:
+      TIMEOUT: "60"
+      QEMU_EXTRA: >-
+        -device e1000,netdev=eth0,mac=52:54:00:00:00:02
+        -netdev socket,id=eth0,connect=127.0.0.1:10001
+    depends_on:
+      - node-a
+    entrypoint: ["sh", "-c", "sleep 3 && /run-qemu.sh"]

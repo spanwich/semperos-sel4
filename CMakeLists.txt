@@ -130,6 +130,62 @@ DeclareCAmkESComponent(VPE1
 )
 
 # =========================================================================
+#  DTUBridge Component — E1000 + lwIP UDP inter-node bridge
+# =========================================================================
+
+set(projects_dir "${CMAKE_CURRENT_LIST_DIR}/../")
+
+# Locate lwIP
+find_file(LWIP_PATH lwip PATHS ${projects_dir} CMAKE_FIND_ROOT_PATH_BOTH)
+if("${LWIP_PATH}" STREQUAL "LWIP_PATH-NOTFOUND")
+    message(FATAL_ERROR "Failed to find lwIP in ${projects_dir}")
+endif()
+mark_as_advanced(FORCE LWIP_PATH)
+
+# Configure lwIP with DTUBridge's lwipopts.h
+include(${projects_dir}/util_libs/liblwip/lwip_helpers.cmake)
+AddLWIPConfiguration(${CMAKE_CURRENT_LIST_DIR}/components/DTUBridge)
+
+# Minimal lwIP sources (UDP-only, no TCP)
+set(LWIP_UDP_SOURCES
+    ${LWIP_PATH}/src/core/def.c
+    ${LWIP_PATH}/src/core/inet_chksum.c
+    ${LWIP_PATH}/src/core/init.c
+    ${LWIP_PATH}/src/core/ip.c
+    ${LWIP_PATH}/src/core/mem.c
+    ${LWIP_PATH}/src/core/memp.c
+    ${LWIP_PATH}/src/core/netif.c
+    ${LWIP_PATH}/src/core/pbuf.c
+    ${LWIP_PATH}/src/core/raw.c
+    ${LWIP_PATH}/src/core/stats.c
+    ${LWIP_PATH}/src/core/sys.c
+    ${LWIP_PATH}/src/core/timeouts.c
+    ${LWIP_PATH}/src/core/udp.c
+    ${LWIP_PATH}/src/core/ipv4/etharp.c
+    ${LWIP_PATH}/src/core/ipv4/icmp.c
+    ${LWIP_PATH}/src/core/ipv4/ip4.c
+    ${LWIP_PATH}/src/core/ipv4/ip4_addr.c
+    ${LWIP_PATH}/src/core/ipv4/ip4_frag.c
+    ${LWIP_PATH}/src/netif/ethernet.c
+    ${LWIP_PATH}/src/api/err.c
+)
+
+DeclareCAmkESComponent(DTUBridge
+    SOURCES
+        components/DTUBridge/DTUBridge.c
+        ${LWIP_UDP_SOURCES}
+    INCLUDES
+        components/DTUBridge
+        ${VDTU_INCLUDE_DIR}
+        ${LWIP_PATH}/src/include
+        ${projects_dir}/util_libs/liblwip/include
+    C_FLAGS
+        -DNODE_ID=${NODE_ID}
+    LIBS
+        lwip
+)
+
+# =========================================================================
 #  CAmkES Assembly
 # =========================================================================
 DeclareCAmkESRootserver(semperos-sel4.camkes)

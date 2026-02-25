@@ -52,6 +52,68 @@ void sel4_yield_wrapper(void)
     seL4_Yield();
 }
 
+/*
+ * Incoming network DTU message buffer.
+ * DTUBridge deposits a message in the dtu_in dataport and signals us.
+ * We copy it to this static buffer so the WorkLoop can poll it.
+ *
+ * Simple single-slot buffer for Tier 1 prototype.
+ * The net_msg_arrived notification handler sets net_msg_pending=1.
+ * The WorkLoop (or kernel polling loop) checks this flag.
+ */
+#include <string.h>
+#include "vdtu_ring.h"
+
+static volatile int net_msg_pending = 0;
+static uint8_t net_msg_buf[2048];
+static uint16_t net_msg_len = 0;
+
+/* CAmkES notification handler: DTUBridge -> SemperKernel */
+void net_msg_arrived_handle(void)
+{
+    volatile uint8_t *src = (volatile uint8_t *)dtu_in;
+
+    /* Read length header (first 2 bytes of dtu_in) */
+    uint16_t len = (uint16_t)(src[0] | ((uint16_t)src[1] << 8));
+
+    if (len > 0 && len <= sizeof(net_msg_buf)) {
+        memcpy(net_msg_buf, (const void *)(src + 2), len);
+        net_msg_len = len;
+        __sync_synchronize();
+        net_msg_pending = 1;
+
+        /* Parse and log the DTU header */
+        if (len >= VDTU_HEADER_SIZE) {
+            const struct vdtu_msg_header *hdr = (const struct vdtu_msg_header *)net_msg_buf;
+            printf("[SemperKernel] NET RX: from PE %u EP %u, label=0x%lx, payload=%u bytes\n",
+                   hdr->sender_core_id, hdr->sender_ep_id,
+                   (unsigned long)hdr->label, hdr->length);
+        }
+    }
+}
+
+/* Accessors for C++ code */
+int net_msg_is_pending(void)
+{
+    return net_msg_pending;
+}
+
+const uint8_t *net_msg_get_buf(void)
+{
+    return net_msg_buf;
+}
+
+uint16_t net_msg_get_len(void)
+{
+    return net_msg_len;
+}
+
+void net_msg_clear(void)
+{
+    net_msg_pending = 0;
+    net_msg_len = 0;
+}
+
 int run(void)
 {
     printf("=== SemperOS Kernel on seL4/CAmkES ===\n");
