@@ -182,8 +182,6 @@ DeclareCAmkESComponent(DTUBridge
         ${projects_dir}/util_libs/liblwip/include/lwip
     C_FLAGS
         -DNODE_ID=${NODE_ID}
-    LIBS
-        lwip
 )
 
 # =========================================================================

@@ -317,7 +317,17 @@ assembly {
 
         /* DTUBridge: E1000 + lwIP UDP bridge */
         dtu_bridge.priority = 200;
-        dtu_bridge._stack_size = 65536;  /* 64 KiB */
+        dtu_bridge._stack_size = 0x100000;  /* 1 MiB (e1000 init + lwIP) */
+        dtu_bridge.heap_size = 0x100000;    /* 1 MiB */
+
+        /* DMA pool for e1000 descriptor rings + buffers */
+        dtu_bridge.dma_pool = 0x200000;         /* 2 MiB */
+        dtu_bridge.dma_pool_paddr = 0x4000000;  /* 64 MiB offset */
+        dtu_bridge.simple_untyped21_pool = 4;
+        dtu_bridge.cnode_size_bits = 18;
+
+        /* MMIO must be uncached for device register access */
+        dtu_bridge.eth_mmio_hardware_cached = false;
 
         /* E1000 hardware config (Intel 82540EM on QEMU q35) */
         eth_hardware.mmio_paddr = 0xfeb80000;

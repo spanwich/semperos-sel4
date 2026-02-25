@@ -1,0 +1,231 @@
+Attaching to semperos-node-a, semperos-node-b
+ Container semperos-node-a Starting 
+ Container semperos-node-a Started 
+ Container semperos-node-b Starting 
+ Container semperos-node-b Started 
+semperos-node-a  | c[?7l[2J[0mSeaBIOS (version 1.15.0-1)
+semperos-node-a  | 
+semperos-node-a  | 
+semperos-node-a  | iPXE (https://ipxe.org) 00:02.0 CA00 PCI2.10 PnP PMM+1FF8B0D0+1FECB0D0 CA00
+semperos-node-a  | Press Ctrl-B to configure iPXE (PCI 00:02.0)...                                                                               
+semperos-node-a  | 
+semperos-node-a  | 
+semperos-node-a  | Booting from ROM..Boot config: debug_port = 0x3f8
+semperos-node-a  | Boot config: disable_iommu = false
+semperos-node-a  | Detected 1 boot module(s):
+semperos-node-a  |   module #0: start=0xc13000 end=0x1219ff8 size=0x606ff8 name='/sel4-image/capdl-loader-image-x86_64-pc99'
+semperos-node-a  | Parsing GRUB physical memory map
+semperos-node-a  | 	Physical Memory Region from 0 size 9fc00 type 1
+semperos-node-a  | 	Physical Memory Region from 9fc00 size 400 type 2
+semperos-node-a  | 	Physical Memory Region from f0000 size 10000 type 2
+semperos-node-a  | 	Physical Memory Region from 100000 size 1fedf000 type 1
+semperos-node-a  | Adding physical memory region 0x100000-0x1ffdf000
+semperos-node-a  | 	Physical Memory Region from 1ffdf000 size 21000 type 2
+semperos-node-a  | 	Physical Memory Region from b0000000 size 10000000 type 2
+semperos-node-a  | 	Physical Memory Region from fed1c000 size 4000 type 2
+semperos-node-a  | 	Physical Memory Region from fffc0000 size 40000 type 2
+semperos-node-a  | Multiboot gave us no video information
+semperos-node-a  | ACPI: RSDP paddr=0xf59f0
+semperos-node-a  | ACPI: RSDP vaddr=0xf59f0
+semperos-node-a  | ACPI: RSDT paddr=0x1ffe22ba
+semperos-node-a  | ACPI: RSDT vaddr=0x1ffe22ba
+semperos-node-a  | SKIM window for mitigating Meltdown (https://www.meltdownattack.com) not necessary for AMD and performance is being needlessly affected, consider disabling
+semperos-node-a  | Kernel loaded to: start=0x100000 end=0xc12000 size=0xb12000 entry=0x100300
+semperos-node-a  | ACPI: RSDT paddr=0x1ffe22ba
+semperos-node-a  | ACPI: RSDT vaddr=0x1ffe22ba
+semperos-node-a  | ACPI: FADT paddr=0x1ffe20b2
+semperos-node-a  | ACPI: FADT vaddr=0x1ffe20b2
+semperos-node-a  | ACPI: FADT flags=0x84a5
+semperos-node-a  | ACPI: 0 IOMMUs detected
+semperos-node-a  | ACPI: MADT paddr=0x1ffe21a6
+semperos-node-a  | ACPI: MADT vaddr=0x1ffe21a6
+semperos-node-a  | ACPI: MADT apic_addr=0xfee00000
+semperos-node-a  | ACPI: MADT flags=0x1
+semperos-node-a  | ACPI: MADT_APIC apic_id=0x0
+semperos-node-a  | ACPI: MADT_IOAPIC ioapic_id=0 ioapic_addr=0xfec00000 gsib=0
+semperos-node-a  | ACPI: MADT_ISO bus=0 source=0 gsi=2 flags=0x0
+semperos-node-a  | ACPI: MADT_ISO bus=0 source=5 gsi=5 flags=0xd
+semperos-node-a  | ACPI: MADT_ISO bus=0 source=9 gsi=9 flags=0xd
+semperos-node-a  | ACPI: MADT_ISO bus=0 source=10 gsi=10 flags=0xd
+semperos-node-a  | ACPI: MADT_ISO bus=0 source=11 gsi=11 flags=0xd
+semperos-node-a  | ACPI: 1 CPU(s) detected
+semperos-node-a  | ELF-loading userland images from boot modules:
+semperos-node-a  | size=0x80c000 v_entry=0x4088d9 v_start=0x400000 v_end=0xc0c000 p_start=0x121a000 p_end=0x1a26000
+semperos-node-a  | Moving loaded userland images to final location: from=0x121a000 to=0xc12000 size=0x80c000
+semperos-node-a  | Starting node #0 with APIC ID 0
+semperos-node-a  | Mapping kernel window is done
+semperos-node-a  | available phys memory regions: 1
+semperos-node-a  |   [100000..1ffdf000)
+semperos-node-a  | reserved virt address space regions: 1
+semperos-node-a  |   [ffffff8000100000..ffffff800141e000)
+semperos-node-a  | Booting all finished, dropped to user space
+semperos-node-a  | [vDTU] Initializing endpoint table (4 PEs x 16 EPs)
+semperos-node-a  | [vDTU] Initialized (8 msg channels, 4 mem channels available)
+semperos-node-a  | [vDTU] Ready for configuration requests
+semperos-node-a  | [VPE1] Starting (PE 3, VPE ID 1) — passive mode for EXCHANGE tests
+semperos-node-a  | [DTUBridge] pre_init (node_id=0)
+semperos-node-a  | [VPE0] Starting (PE 2, VPE ID 0)
+semperos-node-a  | [VPE0] Waiting for channels...
+semperos-node-a  | === SemperOS Kernel on seL4/CAmkES ===
+semperos-node-a  | [CXX] Testing new/delete/virtual dispatch...
+semperos-node-a  | [CXX] OK: new/delete/virtual dispatch all working (got 42)
+semperos-node-a  | [SemperKernel] Starting SemperOS kernel on seL4/CAmkES
+semperos-node-a  | [SemperKernel] Platform: 4 PEs, kernel PE=0, kernel ID=0
+semperos-node-a  | [vDTU] config_recv(pe=0, ep=0, buf_order=14, msg_order=9) -> channel 0 (4 slots x 512B)
+semperos-node-a  | [SemperKernel] Configured SYSC_GATE recv endpoint (ep 0)
+semperos-node-a  | [vDTU] config_recv(pe=0, ep=15, buf_order=13, msg_order=8) -> channel 1 (8 slots x 256B)
+semperos-node-a  | [SemperKernel] Configured service recv endpoint (ep 15)
+semperos-node-a  | [vDTU] config_recv(pe=0, ep=6, buf_order=16, msg_order=11) -> channel 2 (2 slots x 2048B)
+semperos-node-a  | [SemperKernel] Configured 1 KRNLC_GATE recv endpoint
+semperos-node-a  | [SemperKernel] RecvBufs initialized
+semperos-node-a  | [DTUBridge] Node 0 — E1000 + lwIP UDP bridge
+semperos-node-a  | [DTUBridge] Initializing PCI for e1000...
+semperos-node-a  | [SemperKernel] PEManager created
+semperos-node-a  | [vDTU] config_recv(pe=2, ep=1, buf_order=11, msg_order=9) -> channel 3 (4 slots x 512B)
+semperos-node-a  | [vDTU] config_send(pe=2, ep=0, dest=0:0, label=0x755650) -> channel 0
+semperos-node-a  | [SemperKernel] Created VPE0 on PE 2 (id=2)
+semperos-node-a  | [SemperKernel] VPE0 started
+semperos-node-a  | [vDTU] config_recv(pe=3, ep=1, buf_order=11, msg_order=9) -> channel 4 (4 slots x 512B)
+semperos-node-a  | [vDTU] config_send(pe=3, ep=0, dest=0:0, label=0x755450) -> channel 0
+semperos-node-a  | [SemperKernel] Created VPE1 on PE 3 (id=3)
+semperos-node-a  | [SemperKernel] Installed VPE1 cap at VPE0 selector 2
+semperos-node-a  | [SemperKernel] VPE1 started (passive mode)
+semperos-node-a  | [SemperKernel] Entering WorkLoop (polling 6 SYSC + 8 KRNLC gates)
+semperos-node-a  | [DTUBridge] PCI 0:2.0: vendor=0x8086 device=0x100e
+semperos-node-a  | [DTUBridge] PCI initialized
+semperos-node-a  | [DTUBridge] DMA allocated: 64 RX + 64 TX buffers
+semperos-node-a  | [DTUBridge] MAC: 52:54:00:00:00:01
+semperos-node-a  | [DTUBridge] E1000 init complete (link=UP)
+semperos-node-a  | [DTUBridge] lwIP UP: 10.0.0.1/24
+semperos-node-a  | [DTUBridge] UDP bound to port 7654
+semperos-node-a  | [DTUBridge] Ready
+semperos-node-a  | [DTUBridge] Entering ma[VPE0] Send channel: 0
+semperos-node-a  | [vDTU] config_send(pe=0, ep=14, dest=2:1, label=0x0) -> channel 3
+semperos-node-a  | in loop
+semperos-node-a  | [VPE0] Test 1 (NOOP x3): PASS
+semperos-node-a  | [VPE0] Test 2 (CREATEGATE sel=5): PASS (err=0)
+semperos-node-a  | [VPE0] Test 3 (REVOKE sel=5): PASS (err=0)
+semperos-node-a  | [VPE0] Test 4 (REVOKE non-existent sel=99): PASS (err=0, no crash)
+semperos-node-a  | [VPE0] Test 5 (CREATE+REVOKE x3): PASS
+semperos-node-a  | [VPE0] Test 6 (EXCHANGE delegate to VPE1): PASS (err=0)
+semperos-node-a  | [VPE0] Test 7 (cross-VPE REVOKE sel=20): PASS (err=0)
+semperos-node-a  | [VPE0] Test 8 (EXCHANGE+REVOKE x3 cycle): PASS
+semperos-node-a  | [VPE0] Test 9 (Remote DTU ping to PE 4): PASS (local NOOP ok, remote routing via kernel)
+semperos-node-a  | [VPE0] === 9 passed, 0 failed ===
+semperos-node-b  | c[?7l[2J[0mSeaBIOS (version 1.15.0-1)
+semperos-node-b  | 
+semperos-node-b  | 
+semperos-node-b  | iPXE (https://ipxe.org) 00:02.0 CA00 PCI2.10 PnP PMM+1FF8B0D0+1FECB0D0 CA00
+semperos-node-b  | Press Ctrl-B to configure iPXE (PCI 00:02.0)...                                                                               
+semperos-node-b  | 
+semperos-node-b  | 
+semperos-node-b  | Booting from ROM..Boot config: debug_port = 0x3f8
+semperos-node-b  | Boot config: disable_iommu = false
+semperos-node-b  | Detected 1 boot module(s):
+semperos-node-b  |   module #0: start=0xc13000 end=0x1219ff8 size=0x606ff8 name='/sel4-image/capdl-loader-image-x86_64-pc99'
+semperos-node-b  | Parsing GRUB physical memory map
+semperos-node-b  | 	Physical Memory Region from 0 size 9fc00 type 1
+semperos-node-b  | 	Physical Memory Region from 9fc00 size 400 type 2
+semperos-node-b  | 	Physical Memory Region from f0000 size 10000 type 2
+semperos-node-b  | 	Physical Memory Region from 100000 size 1fedf000 type 1
+semperos-node-b  | Adding physical memory region 0x100000-0x1ffdf000
+semperos-node-b  | 	Physical Memory Region from 1ffdf000 size 21000 type 2
+semperos-node-b  | 	Physical Memory Region from b0000000 size 10000000 type 2
+semperos-node-b  | 	Physical Memory Region from fed1c000 size 4000 type 2
+semperos-node-b  | 	Physical Memory Region from fffc0000 size 40000 type 2
+semperos-node-b  | Multiboot gave us no video information
+semperos-node-b  | ACPI: RSDP paddr=0xf59f0
+semperos-node-b  | ACPI: RSDP vaddr=0xf59f0
+semperos-node-b  | ACPI: RSDT paddr=0x1ffe22ba
+semperos-node-b  | ACPI: RSDT vaddr=0x1ffe22ba
+semperos-node-b  | SKIM window for mitigating Meltdown (https://www.meltdownattack.com) not necessary for AMD and performance is being needlessly affected, consider disabling
+semperos-node-b  | Kernel loaded to: start=0x100000 end=0xc12000 size=0xb12000 entry=0x100300
+semperos-node-b  | ACPI: RSDT paddr=0x1ffe22ba
+semperos-node-b  | ACPI: RSDT vaddr=0x1ffe22ba
+semperos-node-b  | ACPI: FADT paddr=0x1ffe20b2
+semperos-node-b  | ACPI: FADT vaddr=0x1ffe20b2
+semperos-node-b  | ACPI: FADT flags=0x84a5
+semperos-node-b  | ACPI: 0 IOMMUs detected
+semperos-node-b  | ACPI: MADT paddr=0x1ffe21a6
+semperos-node-b  | ACPI: MADT vaddr=0x1ffe21a6
+semperos-node-b  | ACPI: MADT apic_addr=0xfee00000
+semperos-node-b  | ACPI: MADT flags=0x1
+semperos-node-b  | ACPI: MADT_APIC apic_id=0x0
+semperos-node-b  | ACPI: MADT_IOAPIC ioapic_id=0 ioapic_addr=0xfec00000 gsib=0
+semperos-node-b  | ACPI: MADT_ISO bus=0 source=0 gsi=2 flags=0x0
+semperos-node-b  | ACPI: MADT_ISO bus=0 source=5 gsi=5 flags=0xd
+semperos-node-b  | ACPI: MADT_ISO bus=0 source=9 gsi=9 flags=0xd
+semperos-node-b  | ACPI: MADT_ISO bus=0 source=10 gsi=10 flags=0xd
+semperos-node-b  | ACPI: MADT_ISO bus=0 source=11 gsi=11 flags=0xd
+semperos-node-b  | ACPI: 1 CPU(s) detected
+semperos-node-b  | ELF-loading userland images from boot modules:
+semperos-node-b  | size=0x80c000 v_entry=0x4088d9 v_start=0x400000 v_end=0xc0c000 p_start=0x121a000 p_end=0x1a26000
+semperos-node-b  | Moving loaded userland images to final location: from=0x121a000 to=0xc12000 size=0x80c000
+semperos-node-b  | Starting node #0 with APIC ID 0
+semperos-node-b  | Mapping kernel window is done
+semperos-node-b  | available phys memory regions: 1
+semperos-node-b  |   [100000..1ffdf000)
+semperos-node-b  | reserved virt address space regions: 1
+semperos-node-b  |   [ffffff8000100000..ffffff800141e000)
+semperos-node-b  | Booting all finished, dropped to user space
+semperos-node-b  | [vDTU] Initializing endpoint table (4 PEs x 16 EPs)
+semperos-node-b  | [vDTU] Initialized (8 msg channels, 4 mem channels available)
+semperos-node-b  | [vDTU] Ready for configuration requests
+semperos-node-b  | [VPE1] Starting (PE 3, VPE ID 1) — passive mode for EXCHANGE tests
+semperos-node-b  | [DTUBridge] pre_init (node_id=0)
+semperos-node-b  | [VPE0] Starting (PE 2, VPE ID 0)
+semperos-node-b  | [VPE0] Waiting for channels...
+semperos-node-b  | === SemperOS Kernel on seL4/CAmkES ===
+semperos-node-b  | [CXX] Testing new/delete/virtual dispatch...
+semperos-node-b  | [CXX] OK: new/delete/virtual dispatch all working (got 42)
+semperos-node-b  | [SemperKernel] Starting SemperOS kernel on seL4/CAmkES
+semperos-node-b  | [SemperKernel] Platform: 4 PEs, kernel PE=0, kernel ID=0
+semperos-node-b  | [vDTU] config_recv(pe=0, ep=0, buf_order=14, msg_order=9) -> channel 0 (4 slots x 512B)
+semperos-node-b  | [DTUBridge] Node 0 — E1000 + lwIP UDP bridge
+semperos-node-b  | [DTUBridge] Initializing PCI for e1000...
+semperos-node-b  | [DTUBridge] PCI 0:2.0: vendor=0x8086 d[SemperKernel] Configured SYSC_GATE recv endpoint (ep 0)
+semperos-node-b  | [vDTU] config_recv(pe=0, ep=15, buf_order=13, msg_order=8) -> channel 1 (8 slots x 256B)
+semperos-node-b  | [SemperKernel] Configured service recv endpoint (ep 15)
+semperos-node-b  | [vDTU] config_recv(pe=0, ep=6, buf_order=16, msg_order=11) -> channel 2 (2 slots x 2048B)
+semperos-node-b  | [SemperKernel] Configured 1 KRNLC_GATE recv endpoint
+semperos-node-b  | [SemperKernel] RecvBufs initialized
+semperos-node-b  | [SemperKernel] PEManager created
+semperos-node-b  | [vDTU] config_recv(pe=2, ep=1, buf_order=11, msg_order=9) -> channel 3 (4 slots x 512B)
+semperos-node-b  | [vDTU] config_send(pe=2, ep=0, dest=0:0, label=0x755650) -> channel 0
+semperos-node-b  | [SemperKernel] Created VPE0 on PE 2 (id=2)
+semperos-node-b  | [SemperKernel] VPE0 started
+semperos-node-b  | [vDTU] config_recv(pe=3, ep=1, buf_order=11, msg_order=9) -> channel 4 (4 slots x 512B)
+semperos-node-b  | [vDTU] config_send(pe=3, ep=0, dest=0:0, label=0x755450) -> channel 0
+semperos-node-b  | [SemperKernel] Created VPE1 on PE 3 (id=3)
+semperos-node-b  | [SemperKernel] Installed VPE1 cap at VPE0 selector 2
+semperos-node-b  | [SemperKernel] VPE1 sevice=0x100e
+semperos-node-b  | [DTUBridge] PCI initialized
+semperos-node-b  | [DTUBridge] DMA allocated: 64 RX + 64 TX buffers
+semperos-node-b  | [DTUBridge] MAC: 52:54:00:00:00:02
+semperos-node-b  | [DTUBridge] E1000 init complete (link=UP)
+semperos-node-b  | [DTUBridge] lwIP UP: 10.0.0.1/24
+semperos-node-b  | [DTUBridge] UDP bound to port 7654
+semperos-node-b  | [DTUBridge] Ready
+semperos-node-b  | [DTUBridge] Entering main loop
+semperos-node-b  | [VPE0] Send channel: 0
+semperos-node-b  | tarted (passive mode)
+semperos-node-b  | [SemperKernel] Entering WorkLoop (polling 6 SYSC + 8 KRNLC gates)
+semperos-node-b  | [vDTU] config_send(pe=0, ep=14, dest=2:1, label=0x0) -> channel 3
+semperos-node-b  | [VPE0] Test 1 (NOOP x3): PASS
+semperos-node-b  | [VPE0] Test 2 (CREATEGATE sel=5): PASS (err=0)
+semperos-node-b  | [VPE0] Test 3 (REVOKE sel=5): PASS (err=0)
+semperos-node-b  | [VPE0] Test 4 (REVOKE non-existent sel=99): PASS (err=0, no crash)
+semperos-node-b  | [VPE0] Test 5 (CREATE+REVOKE x3): PASS
+semperos-node-b  | [VPE0] Test 6 (EXCHANGE delegate to VPE1): PASS (err=0)
+semperos-node-b  | [VPE0] Test 7 (cross-VPE REVOKE sel=20): PASS (err=0)
+semperos-node-b  | [VPE0] Test 8 (EXCHANGE+REVOKE x3 cycle): PASS
+semperos-node-b  | [VPE0] Test 9 (Remote DTU ping to PE 4): PASS (local NOOP ok, remote routing via kernel)
+semperos-node-b  | [VPE0] === 9 passed, 0 failed ===
+semperos-node-a  | [DTUBridge] irq=1 rx=1 tx=2 drop=0
+semperos-node-b  | [DTUBridge] irq=1 rx=1 tx=1 drop=0
+semperos-node-a  | qemu-system-x86_64: terminating on signal 15 from pid 7 (timeout)
+semperos-node-a  | QEMU_TIMEOUT: Exited after 45s
+[Ksemperos-node-a exited with code 124
+semperos-node-b  | qemu-system-x86_64: terminating on signal 15 from pid 9 (timeout)
+semperos-node-b  | QEMU_TIMEOUT: Exited after 45s
+[Ksemperos-node-b exited with code 124
