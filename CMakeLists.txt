@@ -179,6 +179,7 @@ DeclareCAmkESComponent(DTUBridge
         ${VDTU_INCLUDE_DIR}
         ${LWIP_PATH}/src/include
         ${projects_dir}/util_libs/liblwip/include
+        ${projects_dir}/util_libs/liblwip/include/lwip
     C_FLAGS
         -DNODE_ID=${NODE_ID}
     LIBS
