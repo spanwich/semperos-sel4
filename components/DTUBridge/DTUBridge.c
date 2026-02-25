@@ -41,30 +41,21 @@
 
 #define COMPONENT_NAME "DTUBridge"
 
-/* Node identity — set at build time via -DNODE_ID=N */
-#ifndef NODE_ID
-#define NODE_ID 0
-#endif
-
 /* DTU transport UDP port */
 #define DTU_UDP_PORT   7654
 
-/* Network configuration */
-#if NODE_ID == 0
-#define MY_IP_ADDR     "10.0.0.1"
-#define MY_IP_A 10
-#define MY_IP_B 0
-#define MY_IP_C 0
-#define MY_IP_D 1
-#define PEER_IP_D 2
-#else
-#define MY_IP_ADDR     "10.0.0.2"
-#define MY_IP_A 10
-#define MY_IP_B 0
-#define MY_IP_C 0
-#define MY_IP_D 2
-#define PEER_IP_D 1
-#endif
+/* Hello exchange UDP port */
+#define HELLO_UDP_PORT 5000
+
+/* Network: IP derived from MAC at runtime (last octet of MAC = last octet of IP) */
+#define IP_PREFIX_A 10
+#define IP_PREFIX_B 0
+#define IP_PREFIX_C 0
+
+/* Runtime node identity — derived from MAC address after e1000 init */
+static uint8_t my_node_id = 0;    /* 0 or 1 */
+static uint8_t my_ip_last = 1;    /* last octet: 1 or 2 */
+static uint8_t peer_ip_last = 2;  /* peer's last octet */
 
 /* Frame MTU */
 #define FRAME_MTU 1536
@@ -186,7 +177,9 @@ static volatile bool driver_ready = false;
 
 /* lwIP state */
 static struct netif g_netif;
-static struct udp_pcb *g_udp_pcb;
+static struct udp_pcb *g_udp_pcb;       /* DTU transport on port 7654 */
+static struct udp_pcb *g_hello_pcb;     /* Hello exchange on port 5000 */
+static volatile bool hello_received = false;
 
 /* lwIP time tracking */
 static volatile uint32_t lwip_time_ms = 0;
@@ -442,6 +435,56 @@ static void e1000_poll_rx_lwip(struct e1000_driver *drv)
  */
 
 /*
+ * Hello exchange — UDP port 5000
+ * Both nodes send "HELLO FROM NODE X" and print received hellos.
+ */
+static void hello_udp_recv_cb(void *arg, struct udp_pcb *pcb,
+                               struct pbuf *p, const ip_addr_t *addr, u16_t port)
+{
+    (void)arg; (void)pcb; (void)port;
+    if (!p) return;
+
+    /* Extract text from UDP payload */
+    char msg[128];
+    uint16_t len = p->tot_len;
+    if (len >= sizeof(msg)) len = sizeof(msg) - 1;
+    pbuf_copy_partial(p, msg, len, 0);
+    msg[len] = '\0';
+    pbuf_free(p);
+
+    printf("[%s] HELLO RX from %d.%d.%d.%d:%u: \"%s\"\n",
+           COMPONENT_NAME,
+           ip4_addr1(ip_2_ip4(addr)), ip4_addr2(ip_2_ip4(addr)),
+           ip4_addr3(ip_2_ip4(addr)), ip4_addr4(ip_2_ip4(addr)),
+           port, msg);
+
+    hello_received = true;
+}
+
+static void send_hello(void)
+{
+    char msg[64];
+    int len = snprintf(msg, sizeof(msg), "HELLO FROM NODE %u (10.0.0.%u)",
+                       my_node_id, my_ip_last);
+
+    struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (uint16_t)len, PBUF_RAM);
+    if (!p) {
+        printf("[%s] Failed to alloc hello pbuf\n", COMPONENT_NAME);
+        return;
+    }
+    memcpy(p->payload, msg, len);
+
+    ip_addr_t dest;
+    IP4_ADDR(ip_2_ip4(&dest), IP_PREFIX_A, IP_PREFIX_B, IP_PREFIX_C, peer_ip_last);
+
+    err_t err = udp_sendto(g_hello_pcb, p, &dest, HELLO_UDP_PORT);
+    pbuf_free(p);
+
+    printf("[%s] HELLO TX to 10.0.0.%u:%u: \"%s\" (err=%d)\n",
+           COMPONENT_NAME, peer_ip_last, HELLO_UDP_PORT, msg, err);
+}
+
+/*
  * UDP receive callback — a DTU message arrived from the remote node.
  * Copy it to the dtu_in dataport and signal SemperKernel.
  */
@@ -495,7 +538,7 @@ int net_net_send(int dest_node, int msg_len)
     memcpy(p->payload, msg_bytes, msg_len);
 
     ip_addr_t dest_ip;
-    IP4_ADDR(ip_2_ip4(&dest_ip), MY_IP_A, MY_IP_B, MY_IP_C,
+    IP4_ADDR(ip_2_ip4(&dest_ip), IP_PREFIX_A, IP_PREFIX_B, IP_PREFIX_C,
              (dest_node == 0) ? 1 : 2);
 
     err_t err = udp_sendto(g_udp_pcb, p, &dest_ip, DTU_UDP_PORT);
@@ -537,7 +580,7 @@ void eth_irq_handle(void)
 
 void pre_init(void)
 {
-    printf("[%s] pre_init (node_id=%d)\n", COMPONENT_NAME, NODE_ID);
+    printf("[%s] pre_init\n", COMPONENT_NAME);
 }
 
 void post_init(void)
@@ -545,7 +588,7 @@ void post_init(void)
     int error;
     ps_io_ops_t io_ops;
 
-    printf("[%s] Node %d — E1000 + lwIP UDP bridge\n", COMPONENT_NAME, NODE_ID);
+    printf("[%s] E1000 + lwIP UDP bridge\n", COMPONENT_NAME);
 
     /* PCI init */
     error = e1000_pci_init();
@@ -574,11 +617,23 @@ void post_init(void)
         return;
     }
 
+    /* Derive node identity from MAC address.
+     * QEMU sets MAC via -device e1000,...,mac=52:54:00:00:00:XX
+     * Node A: mac[5]=0x01 → IP 10.0.0.1, node_id=0
+     * Node B: mac[5]=0x02 → IP 10.0.0.2, node_id=1 */
+    my_ip_last = g_drv.mac_addr[5];        /* 1 or 2 */
+    my_node_id = my_ip_last - 1;           /* 0 or 1 */
+    peer_ip_last = (my_ip_last == 1) ? 2 : 1;
+
+    printf("[%s] Node %u (MAC ...:%02x → IP 10.0.0.%u, peer 10.0.0.%u)\n",
+           COMPONENT_NAME, my_node_id, g_drv.mac_addr[5],
+           my_ip_last, peer_ip_last);
+
     /* lwIP init */
     lwip_init();
 
     ip4_addr_t ipaddr, netmask, gw;
-    IP4_ADDR(&ipaddr, MY_IP_A, MY_IP_B, MY_IP_C, MY_IP_D);
+    IP4_ADDR(&ipaddr, IP_PREFIX_A, IP_PREFIX_B, IP_PREFIX_C, my_ip_last);
     IP4_ADDR(&netmask, 255, 255, 255, 0);
     IP4_ADDR(&gw, 0, 0, 0, 0);
 
@@ -586,18 +641,28 @@ void post_init(void)
     netif_set_default(&g_netif);
     netif_set_up(&g_netif);
 
-    printf("[%s] lwIP UP: %s/24\n", COMPONENT_NAME, MY_IP_ADDR);
+    printf("[%s] lwIP UP: 10.0.0.%u/24\n", COMPONENT_NAME, my_ip_last);
 
-    /* UDP PCB for DTU transport */
+    /* UDP PCB for DTU transport (port 7654) */
     g_udp_pcb = udp_new();
     if (!g_udp_pcb) {
-        printf("[%s] Failed to create UDP PCB\n", COMPONENT_NAME);
+        printf("[%s] Failed to create DTU UDP PCB\n", COMPONENT_NAME);
         return;
     }
     udp_bind(g_udp_pcb, IP_ANY_TYPE, DTU_UDP_PORT);
     udp_recv(g_udp_pcb, dtu_udp_recv_cb, NULL);
 
-    printf("[%s] UDP bound to port %d\n", COMPONENT_NAME, DTU_UDP_PORT);
+    /* UDP PCB for hello exchange (port 5000) */
+    g_hello_pcb = udp_new();
+    if (!g_hello_pcb) {
+        printf("[%s] Failed to create hello UDP PCB\n", COMPONENT_NAME);
+        return;
+    }
+    udp_bind(g_hello_pcb, IP_ANY_TYPE, HELLO_UDP_PORT);
+    udp_recv(g_hello_pcb, hello_udp_recv_cb, NULL);
+
+    printf("[%s] UDP: DTU port %d, Hello port %d\n",
+           COMPONENT_NAME, DTU_UDP_PORT, HELLO_UDP_PORT);
 
     driver_ready = true;
     printf("[%s] Ready\n", COMPONENT_NAME);
@@ -608,6 +673,8 @@ int run(void)
     printf("[%s] Entering main loop\n", COMPONENT_NAME);
 
     uint32_t loop_count = 0;
+    int hello_sent = 0;
+    int hello_send_attempts = 0;
 
     while (1) {
         bool did_work = false;
@@ -622,13 +689,34 @@ int run(void)
         /* Pump lwIP timers (ARP, etc.) */
         sys_check_timeouts();
 
+        /* Hello exchange: send a few times with spacing to ensure ARP resolves.
+         * Send at loop_count 200000, 400000, 600000 (gives ARP time to complete). */
+        if (driver_ready && hello_send_attempts < 3) {
+            if (loop_count == 200000 || loop_count == 400000 || loop_count == 600000) {
+                send_hello();
+                hello_send_attempts++;
+                hello_sent = 1;
+            }
+        }
+
+        /* Report hello exchange result once */
+        if (hello_sent && loop_count == 800000) {
+            if (hello_received) {
+                printf("[%s] === HELLO EXCHANGE: SUCCESS ===\n", COMPONENT_NAME);
+            } else {
+                printf("[%s] === HELLO EXCHANGE: no reply yet (peer may be slower) ===\n",
+                       COMPONENT_NAME);
+            }
+        }
+
         /* Periodic status */
         loop_count++;
         if ((loop_count % 1000000) == 0) {
-            printf("[%s] irq=%u rx=%u tx=%u drop=%u\n",
+            printf("[%s] irq=%u rx=%u tx=%u drop=%u hello=%s\n",
                    COMPONENT_NAME,
                    g_drv.irq_count, g_drv.rx_pkts,
-                   g_drv.tx_pkts, g_drv.rx_dropped);
+                   g_drv.tx_pkts, g_drv.rx_dropped,
+                   hello_received ? "YES" : "no");
         }
 
         if (!did_work) seL4_Yield();
