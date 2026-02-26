@@ -1,0 +1,10 @@
+# Build artifacts
+build*/
+*.o
+*.d
+
+# Compiled test binaries
+tests/test_ring
+
+# QEMU log files
+*.log
