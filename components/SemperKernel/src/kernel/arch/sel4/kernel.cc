@@ -131,6 +131,9 @@ static VPE *create_vpe1(VPE *vpe0)
     return vpe1;
 }
 
+/* Network ring buffer init (07e) — defined in camkes_entry.c */
+extern "C" void net_init_rings(void);
+
 extern "C" void kernel_start(void) {
     printf("[SemperKernel] Starting SemperOS kernel on seL4/CAmkES\n");
     printf("[SemperKernel] Platform: %zu PEs, kernel PE=%zu, kernel ID=%u\n",
@@ -158,6 +161,9 @@ extern "C" void kernel_start(void) {
     if (!vpe1) {
         printf("[SemperKernel] WARNING: Failed to create VPE1 (EXCHANGE tests unavailable)\n");
     }
+
+    /* Attach to network ring buffers (DTUBridge initialized them in post_init) */
+    net_init_rings();
 
     printf("[SemperKernel] Entering WorkLoop (polling %d SYSC + %d KRNLC gates)\n",
            DTU::SYSC_GATES, DTU::KRNLC_GATES);

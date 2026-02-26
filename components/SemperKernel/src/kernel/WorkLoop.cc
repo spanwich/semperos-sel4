@@ -26,6 +26,10 @@
 #include "pes/PEManager.h"
 #include "thread/ThreadManager.h"
 
+#if defined(__sel4__)
+extern "C" void net_poll(void);
+#endif
+
 #if defined(__host__)
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -116,6 +120,9 @@ void WorkLoop::run() {
         }
 
         tmng.yield();
+#if defined(__sel4__)
+        net_poll();
+#endif
 #if defined(__host__)
         check_childs();
 #endif

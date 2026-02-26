@@ -334,11 +334,12 @@ void DTU::config_mem_remote(const VPEDesc &vpe, int ep, int dstcore,
  */
 #define NUM_LOCAL_PES 4
 
-/* DTUBridge RPC + dataports (CAmkES symbols, accessed from C) */
+/* Network ring buffer send (07e) — defined in camkes_entry.c */
 extern "C" {
-    int net_net_send(int dest_node, int msg_len);
-    extern volatile void *dtu_out;  /* kernel → bridge outgoing msg buffer */
-    extern volatile void *dtu_in;   /* bridge → kernel incoming msg buffer */
+    int net_ring_send(uint16_t sender_pe, uint8_t sender_ep,
+                      uint16_t sender_vpe, uint8_t reply_ep,
+                      uint64_t label, uint64_t replylabel, uint8_t flags,
+                      const void *payload, uint16_t payload_len);
 }
 
 void DTU::send_to(const VPEDesc &vpe, int ep, label_t label,
@@ -346,32 +347,20 @@ void DTU::send_to(const VPEDesc &vpe, int ep, label_t label,
 {
     ensure_channels_init();
 
-    /* Route remote PEs via DTUBridge (E1000 + lwIP UDP) */
+    /* Route remote PEs via DTUBridge ring buffer → UDP (07e) */
     if (vpe.core >= NUM_LOCAL_PES) {
-        /* Build DTU message header + payload in the dtu_out dataport */
-        volatile uint8_t *out = (volatile uint8_t *)dtu_out;
-        struct vdtu_msg_header hdr;
-        memset(&hdr, 0, sizeof(hdr));
-        hdr.flags = 0;
-        hdr.sender_core_id = MY_PE;
-        hdr.sender_ep_id = (uint8_t)ep;
-        hdr.reply_ep_id = (uint8_t)replyep;
-        hdr.length = (uint16_t)size;
-        hdr.sender_vpe_id = Platform::kernelId();
-        hdr.label = label;
-        hdr.replylabel = replylbl;
-
-        memcpy((void *)out, &hdr, VDTU_HEADER_SIZE);
-        if (size > 0 && msg)
-            memcpy((void *)(out + VDTU_HEADER_SIZE), msg, size);
-
         int dest_node = (vpe.core - NUM_LOCAL_PES) / NUM_LOCAL_PES;
-        int total_len = VDTU_HEADER_SIZE + (int)size;
 
-        printf("[SemperKernel] Routing to remote node %d (%d bytes)\n",
-               dest_node, total_len);
+        printf("[SemperKernel] Routing to remote node %d via ring (%zu bytes payload)\n",
+               dest_node, size);
 
-        net_net_send(dest_node, total_len);
+        int rc = net_ring_send(MY_PE, (uint8_t)ep,
+                               Platform::kernelId(), (uint8_t)replyep,
+                               label, replylbl, 0,
+                               msg, (uint16_t)size);
+        if (rc != 0) {
+            KLOG(ERR, "net_ring_send failed: " << rc);
+        }
         return;
     }
 

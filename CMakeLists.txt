@@ -173,6 +173,7 @@ set(LWIP_UDP_SOURCES
 DeclareCAmkESComponent(DTUBridge
     SOURCES
         components/DTUBridge/DTUBridge.c
+        ${VDTU_RING_SRC}
         ${LWIP_UDP_SOURCES}
     INCLUDES
         components/DTUBridge

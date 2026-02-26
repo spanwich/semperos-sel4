@@ -181,6 +181,11 @@ static struct udp_pcb *g_udp_pcb;       /* DTU transport on port 7654 */
 static struct udp_pcb *g_hello_pcb;     /* Hello exchange on port 5000 */
 static volatile bool hello_received = false;
 
+/* Network ring buffers for kernel <-> DTUBridge transport (07e) */
+static struct vdtu_ring g_net_out_ring;  /* consumer: bridge reads kernel's outbound */
+static struct vdtu_ring g_net_in_ring;   /* producer: bridge writes incoming network msgs */
+static volatile bool net_rings_ready = false;
+
 /* lwIP time tracking */
 static volatile uint32_t lwip_time_ms = 0;
 
@@ -486,7 +491,7 @@ static void send_hello(void)
 
 /*
  * UDP receive callback — a DTU message arrived from the remote node.
- * Copy it to the dtu_in dataport and signal SemperKernel.
+ * Write it to the net_inbound ring buffer for kernel consumption.
  */
 static void dtu_udp_recv_cb(void *arg, struct udp_pcb *pcb,
                              struct pbuf *p, const ip_addr_t *addr, u16_t port)
@@ -498,27 +503,37 @@ static void dtu_udp_recv_cb(void *arg, struct udp_pcb *pcb,
         return;
     }
 
-    /* Copy UDP payload (raw DTU message) to dtu_in dataport.
-     * First 2 bytes: message length (uint16_t), then message body. */
-    volatile uint8_t *dst = (volatile uint8_t *)dtu_in;
-    uint16_t msg_len = (uint16_t)p->tot_len;
+    /* Extract DTU header from UDP payload */
+    struct vdtu_msg_header hdr;
+    pbuf_copy_partial(p, &hdr, VDTU_HEADER_SIZE, 0);
 
-    /* Write length header */
-    dst[0] = (uint8_t)(msg_len & 0xFF);
-    dst[1] = (uint8_t)((msg_len >> 8) & 0xFF);
+    /* Extract payload */
+    uint16_t payload_len = hdr.length;
+    uint8_t payload_buf[487];  /* 512 - VDTU_HEADER_SIZE */
+    if (payload_len > sizeof(payload_buf))
+        payload_len = sizeof(payload_buf);
+    if (payload_len > 0)
+        pbuf_copy_partial(p, payload_buf, payload_len, VDTU_HEADER_SIZE);
 
-    /* Write message body */
-    pbuf_copy_partial(p, (void *)(dst + 2), msg_len, 0);
-    pbuf_free(p);
-
-    printf("[%s] RX DTU msg from %d.%d.%d.%d:%u (%u bytes)\n",
-           COMPONENT_NAME,
+    printf("[%s] NET RX: %u bytes from %d.%d.%d.%d:%u (label=0x%lx)\n",
+           COMPONENT_NAME, (unsigned)p->tot_len,
            ip4_addr1(ip_2_ip4(addr)), ip4_addr2(ip_2_ip4(addr)),
            ip4_addr3(ip_2_ip4(addr)), ip4_addr4(ip_2_ip4(addr)),
-           port, msg_len);
+           port, (unsigned long)hdr.label);
 
-    /* Signal SemperKernel that a DTU message arrived */
-    net_msg_ready_emit();
+    pbuf_free(p);
+
+    /* Write to inbound ring buffer for kernel to consume */
+    if (net_rings_ready) {
+        int rc = vdtu_ring_send(&g_net_in_ring,
+                                hdr.sender_core_id, hdr.sender_ep_id,
+                                hdr.sender_vpe_id, hdr.reply_ep_id,
+                                hdr.label, hdr.replylabel, hdr.flags,
+                                payload_buf, payload_len);
+        if (rc != 0) {
+            printf("[%s] NET RX: inbound ring full!\n", COMPONENT_NAME);
+        }
+    }
 }
 
 /*
@@ -665,6 +680,15 @@ void post_init(void)
            COMPONENT_NAME, DTU_UDP_PORT, HELLO_UDP_PORT);
 
     driver_ready = true;
+
+    /* Initialize network ring buffers (07e).
+     * DTUBridge inits both rings; kernel attaches later in kernel_start().
+     * post_init runs before any run(), so kernel_start() sees initialized rings. */
+    vdtu_ring_init(&g_net_out_ring, (void *)net_outbound, 4, 512);
+    vdtu_ring_init(&g_net_in_ring, (void *)net_inbound, 4, 512);
+    net_rings_ready = true;
+    printf("[%s] Net rings initialized (4 slots x 512B)\n", COMPONENT_NAME);
+
     printf("[%s] Ready\n", COMPONENT_NAME);
 }
 
@@ -706,6 +730,27 @@ int run(void)
             } else {
                 printf("[%s] === HELLO EXCHANGE: no reply yet (peer may be slower) ===\n",
                        COMPONENT_NAME);
+            }
+        }
+
+        /* Poll outbound ring: kernel → network (07e) */
+        if (net_rings_ready && !vdtu_ring_is_empty(&g_net_out_ring)) {
+            const struct vdtu_message *outmsg = vdtu_ring_fetch(&g_net_out_ring);
+            if (outmsg) {
+                uint16_t total_len = VDTU_HEADER_SIZE + outmsg->hdr.length;
+                struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, total_len, PBUF_RAM);
+                if (p) {
+                    memcpy(p->payload, outmsg, total_len);
+                    ip_addr_t dest_ip;
+                    IP4_ADDR(ip_2_ip4(&dest_ip), IP_PREFIX_A, IP_PREFIX_B, IP_PREFIX_C, peer_ip_last);
+                    err_t err = udp_sendto(g_udp_pcb, p, &dest_ip, DTU_UDP_PORT);
+                    pbuf_free(p);
+                    printf("[%s] NET TX ring: %u bytes to peer (label=0x%lx, err=%d)\n",
+                           COMPONENT_NAME, total_len,
+                           (unsigned long)outmsg->hdr.label, err);
+                }
+                vdtu_ring_ack(&g_net_out_ring);
+                did_work = true;
             }
         }
 

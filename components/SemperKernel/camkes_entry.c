@@ -114,6 +114,113 @@ void net_msg_clear(void)
     net_msg_len = 0;
 }
 
+/*
+ * ================================================================
+ *  Network ring buffer transport (07e)
+ *
+ *  net_outbound: kernel (producer) → DTUBridge (consumer) → UDP
+ *  net_inbound:  UDP → DTUBridge (producer) → kernel (consumer)
+ *
+ *  DTUBridge initializes both rings in post_init().
+ *  Kernel attaches in net_init_rings() called from kernel_start().
+ *  WorkLoop calls net_poll() every iteration for PING/PONG demo.
+ * ================================================================
+ */
+
+static struct vdtu_ring g_net_out_ring;  /* producer: kernel writes outbound msgs */
+static struct vdtu_ring g_net_in_ring;   /* consumer: kernel reads inbound msgs */
+static volatile int net_rings_attached = 0;
+
+#define NET_LABEL_PING  0x50494E47ULL  /* "PING" in ASCII */
+#define NET_LABEL_PONG  0x504F4E47ULL  /* "PONG" in ASCII */
+
+static volatile int net_ping_sent = 0;
+static volatile int net_pong_sent = 0;
+static volatile int net_pong_received = 0;
+static uint32_t net_poll_count = 0;
+
+/* Called from kernel_start() to attach to ring buffers */
+void net_init_rings(void)
+{
+    vdtu_ring_attach(&g_net_out_ring, (void *)net_outbound);
+    vdtu_ring_attach(&g_net_in_ring, (void *)net_inbound);
+    net_rings_attached = 1;
+    printf("[SemperKernel] Net rings attached (outbound + inbound)\n");
+}
+
+/* C wrapper for DTU.cc to write to outbound ring */
+int net_ring_send(uint16_t sender_pe, uint8_t sender_ep,
+                  uint16_t sender_vpe, uint8_t reply_ep,
+                  uint64_t label, uint64_t replylabel, uint8_t flags,
+                  const void *payload, uint16_t payload_len)
+{
+    if (!net_rings_attached) return -1;
+    return vdtu_ring_send(&g_net_out_ring,
+                          sender_pe, sender_ep, sender_vpe, reply_ep,
+                          label, replylabel, flags,
+                          payload, payload_len);
+}
+
+/* Called from WorkLoop every iteration to handle network I/O */
+void net_poll(void)
+{
+    if (!net_rings_attached) return;
+
+    net_poll_count++;
+
+    /* Send PING after delay (let both nodes boot + hello exchange complete) */
+    if (!net_ping_sent && net_poll_count == 1000000) {
+        const char *payload = "PING from kernel";
+        int rc = vdtu_ring_send(&g_net_out_ring,
+                                0, 0, 0, 0,
+                                NET_LABEL_PING, 0, 0,
+                                payload, (uint16_t)strlen(payload));
+        if (rc == 0) {
+            net_ping_sent = 1;
+            printf("[SemperKernel] NET: Sent PING to outbound ring\n");
+        }
+    }
+
+    /* Poll inbound ring for messages from remote node */
+    const struct vdtu_message *msg = vdtu_ring_fetch(&g_net_in_ring);
+    if (msg) {
+        /* Extract payload as string */
+        char payload_str[128];
+        uint16_t plen = msg->hdr.length;
+        if (plen >= sizeof(payload_str)) plen = sizeof(payload_str) - 1;
+        memcpy(payload_str, msg->data, plen);
+        payload_str[plen] = '\0';
+
+        printf("[SemperKernel] NET RX: label=0x%lx len=%u \"%s\"\n",
+               (unsigned long)msg->hdr.label, msg->hdr.length, payload_str);
+
+        if (msg->hdr.label == NET_LABEL_PING && !net_pong_sent) {
+            /* Received PING → send PONG back */
+            const char *pong = "PONG from kernel";
+            vdtu_ring_send(&g_net_out_ring,
+                           0, 0, 0, 0,
+                           NET_LABEL_PONG, 0, 0,
+                           pong, (uint16_t)strlen(pong));
+            net_pong_sent = 1;
+            printf("[SemperKernel] NET: Sent PONG reply\n");
+        } else if (msg->hdr.label == NET_LABEL_PONG) {
+            net_pong_received = 1;
+            printf("[SemperKernel] NET: === PONG RECEIVED — round trip complete! ===\n");
+        }
+
+        vdtu_ring_ack(&g_net_in_ring);
+    }
+
+    /* Status report */
+    if (net_poll_count == 3000000) {
+        if (net_pong_received) {
+            printf("[SemperKernel] NET: === PING-PONG SUCCESS ===\n");
+        } else if (net_ping_sent) {
+            printf("[SemperKernel] NET: PING sent, PONG not yet received\n");
+        }
+    }
+}
+
 int run(void)
 {
     printf("=== SemperOS Kernel on seL4/CAmkES ===\n");

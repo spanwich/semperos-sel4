@@ -140,6 +140,10 @@ component SemperKernel {
 
     /* Network bridge: incoming message notification */
     consumes Signal net_msg_arrived;
+
+    /* Network ring buffers: kernel <-> DTUBridge (07e) */
+    dataport Buf(4096) net_outbound;    /* kernel writes, bridge reads */
+    dataport Buf(4096) net_inbound;     /* bridge writes, kernel reads */
 }
 
 component VPE0 {
@@ -203,6 +207,10 @@ component DTUBridge {
 
     /* Notification: bridge -> kernel ("DTU message arrived from network") */
     emits Signal net_msg_ready;
+
+    /* Network ring buffers: kernel <-> DTUBridge (07e) */
+    dataport Buf(4096) net_outbound;    /* kernel writes, bridge reads */
+    dataport Buf(4096) net_inbound;     /* bridge writes, kernel reads */
 }
 
 /*
@@ -300,6 +308,12 @@ assembly {
         /* Notification: bridge wakes kernel on incoming network message */
         connection seL4Notification net_to_kern(from dtu_bridge.net_msg_ready,
                                                  to kernel0.net_msg_arrived);
+
+        /* Ring buffer dataports for network message transport (07e) */
+        connection seL4SharedData net_outbound_dp(from kernel0.net_outbound,
+                                                    to dtu_bridge.net_outbound);
+        connection seL4SharedData net_inbound_dp(from dtu_bridge.net_inbound,
+                                                   to kernel0.net_inbound);
     }
 
     configuration {
