@@ -33,6 +33,13 @@ set(VDTU_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/components/include")
 set(VDTU_RING_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/vdtu_ring.c")
 set(VDTU_CHANNELS_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/vdtu_channels.c")
 
+# Bench mode: disable verbose hot-path kernel logging for clean measurements
+option(SEMPER_BENCH_MODE "Disable verbose hot-path kernel logging for benchmarking" OFF)
+set(SEMPER_BENCH_FLAG "")
+if(SEMPER_BENCH_MODE)
+    set(SEMPER_BENCH_FLAG "-DSEMPER_BENCH_MODE")
+endif()
+
 # =========================================================================
 #  VDTUService Component
 # =========================================================================
@@ -105,6 +112,7 @@ DeclareCAmkESComponent(SemperKernel
     CXX_FLAGS
         -std=c++11 -fno-exceptions -fno-rtti -fno-threadsafe-statics
         -D__sel4__
+        ${SEMPER_BENCH_FLAG}
     LINKER_LANGUAGE
         CXX
 )

@@ -44,10 +44,10 @@ INIT_PRIO_USER(3) SyscallHandler SyscallHandler::_inst;
 
 #if defined(SIMPLE_SYSC_LOG)
 #   define LOG_SYS(vpe, sysname, expr) \
-        KLOG(SYSC, (vpe)->name() << (sysname))
+        KLOG_V(SYSC, (vpe)->name() << (sysname))
 #else
 #   define LOG_SYS(vpe, sysname, expr) \
-        KLOG(SYSC, (vpe)->name() << "@" << m3::fmt((vpe)->core(), "X") << (sysname) << expr)
+        KLOG_V(SYSC, (vpe)->name() << "@" << m3::fmt((vpe)->core(), "X") << (sysname) << expr)
 #endif
 
 #define SYS_ERROR(vpe, is, error, msg) { \

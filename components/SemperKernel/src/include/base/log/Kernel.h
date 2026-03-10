@@ -21,6 +21,15 @@
 #include <thread/ThreadManager.h>
 #define KLOG(lvl, msg)  LOG(KernelLog, lvl, m3::ThreadManager::get().current()->id() << ": " << msg)
 
+/* KLOG_V: verbose hot-path logging, disabled in bench mode.
+ * Use KLOG_V for per-iteration success-path logs on syscall/capability
+ * hot paths. KLOG remains for errors, init, and one-time events. */
+#ifdef SEMPER_BENCH_MODE
+#define KLOG_V(lvl, msg) ((void)0)
+#else
+#define KLOG_V(lvl, msg) KLOG(lvl, msg)
+#endif
+
 namespace m3 {
 
 class KernelLog {

@@ -186,7 +186,7 @@ void DTU::invalidate_ep(const VPEDesc &vpe, int ep) {
     int target_pe = vpe.core;
     int rc = vdtu_invalidate_ep(target_pe, ep);
     if (rc != 0) {
-        KLOG(EPS, "invalidate_ep(pe=" << target_pe << " ep=" << ep << ") failed: " << rc);
+        KLOG_V(EPS, "invalidate_ep(pe=" << target_pe << " ep=" << ep << ") failed: " << rc);
     }
     /* Clear local mapping if this is our own EP */
     if (target_pe == MY_PE && ep >= 0 && ep < EP_COUNT) {
@@ -233,7 +233,7 @@ void DTU::config_recv_local(int ep, uintptr_t buf, uint order, uint msgorder, in
     ep_channel[ep] = ch;
     ep_type[ep] = EP_RECV;
 
-    KLOG(EPS, "config_recv_local(ep=" << ep << " order=" << order
+    KLOG_V(EPS, "config_recv_local(ep=" << ep << " order=" << order
          << " msgorder=" << msgorder << ") -> channel " << ch
          << " (" << slot_count << " slots x " << slot_size << "B)");
 }
@@ -261,7 +261,7 @@ void DTU::config_recv_remote(const VPEDesc &vpe, int ep, uintptr_t buf,
 
     vdtu_channels_init_ring(&channels, ch, slot_count, slot_size);
 
-    KLOG(EPS, "config_recv_remote(pe=" << target_pe << " ep=" << ep << ") -> channel " << ch);
+    KLOG_V(EPS, "config_recv_remote(pe=" << target_pe << " ep=" << ep << ") -> channel " << ch);
 }
 
 void DTU::config_send_local(int ep, label_t label, int dstcore, int dstvpe,
@@ -288,7 +288,7 @@ void DTU::config_send_local(int ep, label_t label, int dstcore, int dstvpe,
     ep_send_config[ep].dest_vpe = dstvpe;
     ep_send_config[ep].label = label;
 
-    KLOG(EPS, "config_send_local(ep=" << ep << " -> pe=" << dstcore
+    KLOG_V(EPS, "config_send_local(ep=" << ep << " -> pe=" << dstcore
          << " ep=" << dstep << ") -> channel " << ch);
 }
 
@@ -308,7 +308,7 @@ void DTU::config_send_remote(const VPEDesc &vpe, int ep, label_t label,
     /* Attach to ring */
     vdtu_channels_attach_ring(&channels, ch);
 
-    KLOG(EPS, "config_send_remote(pe=" << target_pe << " ep=" << ep << ") -> channel " << ch);
+    KLOG_V(EPS, "config_send_remote(pe=" << target_pe << " ep=" << ep << ") -> channel " << ch);
 }
 
 void DTU::config_mem_local(int ep, int dstcore, int dstvpe, uintptr_t addr, size_t size) {

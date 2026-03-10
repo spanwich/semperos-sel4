@@ -36,7 +36,7 @@ m3::Errors::Code Kernelcalls::finish(GateIStream &&reply) {
 }
 
 void Kernelcalls::sigvital(KPE* kernel, int creatorThread, m3::Errors::Code err) {
-    KLOG(KRNLC, "sigvital(kernel=" << kernel->core() << ", creatorThread=" << creatorThread <<
+    KLOG_V(KRNLC, "sigvital(kernel=" << kernel->core() << ", creatorThread=" << creatorThread <<
         ", err=" << (int)err << ")");
     StaticGateOStream<m3::ostreamsize<Kernelcalls::Operation, int, m3::Errors::Code>()> msg;
     msg << SIGVITAL << creatorThread << err;
@@ -44,7 +44,7 @@ void Kernelcalls::sigvital(KPE* kernel, int creatorThread, m3::Errors::Code err)
     }
 
 m3::Errors::Code Kernelcalls::kcreatevpe(KPE* kernel, OpStage stage, m3::String&& name, const char* core, int tid) {
-    KLOG(KRNLC, "kcreatevpe(kernel=" << kernel->core() << ", stage=" << stage << ", name=" << name << ", core=" << core << ")");
+    KLOG_V(KRNLC, "kcreatevpe(kernel=" << kernel->core() << ", stage=" << stage << ", name=" << name << ", core=" << core << ")");
     AutoGateOStream msg(m3::vostreamsize(
             m3::ostreamsize<Kernelcalls::Operation, Kernelcalls::OpStage, int, size_t, size_t>(),
             name.length(), strlen(core)));
@@ -58,7 +58,7 @@ m3::Errors::Code Kernelcalls::kcreatevpe(KPE* kernel, OpStage stage, m3::String&
 }
 
 void Kernelcalls::kexit(KPE* kernel, int exitcode) {
-    KLOG(KRNLC, "kexit(code=" << exitcode << ")");
+    KLOG_V(KRNLC, "kexit(code=" << exitcode << ")");
     StaticGateOStream<m3::ostreamsize<Kernelcalls::Operation, int>()> msg;
     msg << KEXIT << exitcode;
     kernel->sendTo(msg.bytes(), msg.total());
@@ -67,7 +67,7 @@ void Kernelcalls::kexit(KPE* kernel, int exitcode) {
 
 void Kernelcalls::mhtRequest(KPE* kernel, mht_key_t mht_key, Operation op) {
     int tid = m3::ThreadManager::get().current()->id();
-    KLOG(KRNLC, "mhtrequest(kernelcore=" << kernel->core() << ", tid=" << tid <<
+    KLOG_V(KRNLC, "mhtrequest(kernelcore=" << kernel->core() << ", tid=" << tid <<
             ", mht_key=" << PRINT_HASH(mht_key) << ", op=" << op << ")");
     StaticGateOStream<m3::ostreamsize<Kernelcalls::Operation, Kernelcalls::OpStage, mht_key_t, int>()> msg;
     msg << op << KREQUEST << tid << mht_key;
@@ -75,7 +75,7 @@ void Kernelcalls::mhtRequest(KPE* kernel, mht_key_t mht_key, Operation op) {
 }
 
 void Kernelcalls::mhtForward(KPE* kernel, int tid, membership_entry::krnl_id_t dest, mht_key_t mht_key, Operation op) {
-    KLOG(KRNLC, "mhtforward(kernelcore=" << kernel->core() << ", tid=" << tid <<
+    KLOG_V(KRNLC, "mhtforward(kernelcore=" << kernel->core() << ", tid=" << tid <<
             ", dest=" << dest << ", mht_key=" << PRINT_HASH(mht_key) << ", op=" << op << ")");
     // Send KFORWARD to the requestor so it can update its membership table
     // and re-send the request to the correct kernel. This avoids the race
@@ -89,14 +89,14 @@ void Kernelcalls::mhtForward(KPE* kernel, int tid, membership_entry::krnl_id_t d
 
 void Kernelcalls::mhtgetLocking(KPE* kernel, mht_key_t mht_key) {
     int tid = m3::ThreadManager::get().current()->id();
-    KLOG(KRNLC, "mhtgetLocking(kernelcore=" << kernel->core() << ", tid=" << tid << ", mht_key=" << PRINT_HASH(mht_key) << ")");
+    KLOG_V(KRNLC, "mhtgetLocking(kernelcore=" << kernel->core() << ", tid=" << tid << ", mht_key=" << PRINT_HASH(mht_key) << ")");
     StaticGateOStream<m3::ostreamsize<Kernelcalls::Operation, Kernelcalls::OpStage, mht_key_t, int>()> msg;
     msg << MHTGETLOCKING << KREQUEST << tid << mht_key;
     kernel->sendTo(msg.bytes(), msg.total());
 }
 
 void Kernelcalls::mhtgetReply(KPE* kernel, int tid, const MHTItem& result) {
-    KLOG(KRNLC, "mhtgetReply(kernelcore=" << kernel->core() << ", tid=" << tid << ", "
+    KLOG_V(KRNLC, "mhtgetReply(kernelcore=" << kernel->core() << ", tid=" << tid << ", "
             "result.key=" << PRINT_HASH(result.getKey()) << ", result.length=" << result.getLength() << ")");
     AutoGateOStream msg(m3::vostreamsize(
             m3::ostreamsize<Kernelcalls::Operation, Kernelcalls::OpStage, int>(),
@@ -107,7 +107,7 @@ void Kernelcalls::mhtgetReply(KPE* kernel, int tid, const MHTItem& result) {
 }
 
 void Kernelcalls::mhtput(KPE* kernel, MHTItem&& input) {
-    KLOG(KRNLC, "mhtput(kernelcore=" << kernel->core() << ", "
+    KLOG_V(KRNLC, "mhtput(kernelcore=" << kernel->core() << ", "
             "input.key=" << PRINT_HASH(input.getKey()) << ", input.length=" << input.getLength() << ")");
     AutoGateOStream msg(m3::vostreamsize(
             m3::ostreamsize<Kernelcalls::Operation>(),
@@ -118,7 +118,7 @@ void Kernelcalls::mhtput(KPE* kernel, MHTItem&& input) {
 }
 
 void Kernelcalls::mhtputUnlocking(KPE* kernel, MHTItem&& input, uint lockHandle) {
-    KLOG(KRNLC, "mhtputUnlocking(kernelcore=" << kernel->core() << ", "
+    KLOG_V(KRNLC, "mhtputUnlocking(kernelcore=" << kernel->core() << ", "
         "input.key=" << PRINT_HASH(input.getKey()) << ", input.length=" << input.getLength() <<
         ", lockHandle=" << lockHandle << ")");
     AutoGateOStream msg(m3::vostreamsize(
@@ -130,14 +130,14 @@ void Kernelcalls::mhtputUnlocking(KPE* kernel, MHTItem&& input, uint lockHandle)
 }
 
 void Kernelcalls::mhtlockReply(KPE* kernel, int tid, uint lockHndl) {
-    KLOG(KRNLC, "mhtlockReply(kernelcore=" << kernel->core() << ", tid=" << tid << ", lockHndl=" << lockHndl << ")");
+    KLOG_V(KRNLC, "mhtlockReply(kernelcore=" << kernel->core() << ", tid=" << tid << ", lockHndl=" << lockHndl << ")");
     StaticGateOStream<m3::ostreamsize<Kernelcalls::Operation, Kernelcalls::OpStage, int, uint>()> msg;
     msg << MHTLOCK << KREPLY << tid << lockHndl;
     kernel->reply(msg.bytes(), msg.total());
 }
 
 void Kernelcalls::mhtunlock(KPE* kernel, mht_key_t mht_key, uint lockHandle) {
-    KLOG(KRNLC, "mhtunlock(kernelcore=" << kernel->core() << ", mht_key="
+    KLOG_V(KRNLC, "mhtunlock(kernelcore=" << kernel->core() << ", mht_key="
             << PRINT_HASH(mht_key) << ", lockHndl=" << lockHandle << ")");
     StaticGateOStream<m3::ostreamsize<Kernelcalls::Operation, mht_key_t, uint>()> msg;
     msg << MHTUNLOCK << mht_key << lockHandle;
@@ -145,7 +145,7 @@ void Kernelcalls::mhtunlock(KPE* kernel, mht_key_t mht_key, uint lockHandle) {
 }
 
 void Kernelcalls::mhtReserveReply(KPE* kernel, int tid, uint reservationNr) {
-    KLOG(KRNLC, "mhtReserveReply(kernelcore=" << kernel->core() << ", tid=" << tid <<
+    KLOG_V(KRNLC, "mhtReserveReply(kernelcore=" << kernel->core() << ", tid=" << tid <<
             ", reservationNr=" << reservationNr << ")");
     StaticGateOStream<m3::ostreamsize<Kernelcalls::Operation, Kernelcalls::OpStage, int, uint>()> msg;
     msg << MHTRESERVE << KREPLY << tid << reservationNr;
@@ -153,7 +153,7 @@ void Kernelcalls::mhtReserveReply(KPE* kernel, int tid, uint reservationNr) {
 }
 
 void Kernelcalls::mhtRelease(KPE* kernel, mht_key_t mht_key, uint reservation) {
-    KLOG(KRNLC, "mhtrelease(kernelcore=" << kernel->core() << ", mht_key="
+    KLOG_V(KRNLC, "mhtrelease(kernelcore=" << kernel->core() << ", mht_key="
             << PRINT_HASH(mht_key) << ", reservation=" << reservation << ")");
     StaticGateOStream<m3::ostreamsize<Kernelcalls::Operation, mht_key_t, uint>()> msg;
     msg << MHTRELEASE << mht_key << reservation;
@@ -162,7 +162,7 @@ void Kernelcalls::mhtRelease(KPE* kernel, mht_key_t mht_key, uint reservation) {
 
 void Kernelcalls::membershipUpdate(KPE *kernel, m3::PEDesc releasedPEs[], uint numPEs,
     membership_entry::krnl_id_t krnl, membership_entry::pe_id_t krnlCore, MembershipFlags flags) {
-    KLOG(KRNLC, "membershipUpdate(kernelcore=" << kernel->core() << ", pes=[...], numPEs="
+    KLOG_V(KRNLC, "membershipUpdate(kernelcore=" << kernel->core() << ", pes=[...], numPEs="
         << numPEs << ", kernel=" << krnl << ", kernelCore=" << krnlCore << ", flags=" << (int)flags << ")");
     AutoGateOStream msg(m3::vostreamsize(
         m3::ostreamsize<Kernelcalls::Operation, uint, size_t, membership_entry::krnl_id_t, MembershipFlags>(),
@@ -175,7 +175,7 @@ void Kernelcalls::membershipUpdate(KPE *kernel, m3::PEDesc releasedPEs[], uint n
 }
 
 void Kernelcalls::migratePartition(KPE *kernel, AutoGateOStream &payload) {
-    KLOG(KRNLC, "migratePartition(kernelcore=" << kernel->core() << ", size=" << payload.total() << ")");
+    KLOG_V(KRNLC, "migratePartition(kernelcore=" << kernel->core() << ", size=" << payload.total() << ")");
     AutoGateOStream msg(m3::vostreamsize(
         m3::ostreamsize<Kernelcalls::Operation>(),
         payload.total()));
@@ -185,7 +185,7 @@ void Kernelcalls::migratePartition(KPE *kernel, AutoGateOStream &payload) {
 }
 
 void Kernelcalls::createSessFwd(KPE *kernel, int vpeID, m3::String &srvname, mht_key_t cap, GateOStream args) {
-    KLOG(KRNLC, "createSessFwd(kernelcore=" << kernel->core() << ", vpeID=" << vpeID << ", srvname=" <<
+    KLOG_V(KRNLC, "createSessFwd(kernelcore=" << kernel->core() << ", vpeID=" << vpeID << ", srvname=" <<
         srvname << ", cap=" << PRINT_HASH(cap) << ", argsSize=" << args.total() << ")");
     AutoGateOStream msg(m3::vostreamsize(
         m3::ostreamsize<Kernelcalls::Operation, int, size_t, mht_key_t, int>(),
@@ -198,7 +198,7 @@ void Kernelcalls::createSessFwd(KPE *kernel, int vpeID, m3::String &srvname, mht
 
 void Kernelcalls::createSessResp(KPE *kernel, int vpeID, int tid, m3::Errors::Code res, word_t sess,
     mht_key_t srvCap) {
-    KLOG(KRNLC, "createSessResp(kernelcore=" << kernel->core() << ", vpeID=" << vpeID << ", tid=" <<
+    KLOG_V(KRNLC, "createSessResp(kernelcore=" << kernel->core() << ", vpeID=" << vpeID << ", tid=" <<
         tid << ", res=" << res << ", sess=" << sess << ", srvCap=" << PRINT_HASH(srvCap) << ")");
     if(res == m3::Errors::NO_ERROR){
         StaticGateOStream<m3::ostreamsize<Kernelcalls::Operation, int, int, m3::Errors::Code,
@@ -214,7 +214,7 @@ void Kernelcalls::createSessResp(KPE *kernel, int vpeID, int tid, m3::Errors::Co
 }
 
 void Kernelcalls::createSessFail(KPE *kernel, mht_key_t cap, mht_key_t srvCap) {
-    KLOG(KRNLC, "createSessFail(kernelcore=" << kernel->core() << ", cap=" << PRINT_HASH(cap) <<
+    KLOG_V(KRNLC, "createSessFail(kernelcore=" << kernel->core() << ", cap=" << PRINT_HASH(cap) <<
         ", srvCap=" << PRINT_HASH(srvCap) << ")");
     StaticGateOStream<m3::ostreamsize<mht_key_t, mht_key_t>()> msg;
     msg << cap << srvCap;
@@ -223,7 +223,7 @@ void Kernelcalls::createSessFail(KPE *kernel, mht_key_t cap, mht_key_t srvCap) {
 
 void Kernelcalls::exchangeOverSession(KPE *kernel, bool obtain, mht_key_t vpe, mht_key_t srvID,
     word_t sessID, m3::CapRngDesc caps, GateOStream &args) {
-    KLOG(KRNLC, "exchangeOverSession(kernelcore=" << kernel->core() << ", obtain=" <<
+    KLOG_V(KRNLC, "exchangeOverSession(kernelcore=" << kernel->core() << ", obtain=" <<
         (obtain ? "yes" : "no") << ", vpe=" << PRINT_HASH(vpe) << ", srvID=" <<
         PRINT_HASH(srvID) << ", sessID=" << sessID << ", caps=" << caps << ")");
     CAP_BENCH_TRACE_X_S(KERNEL_OBT_TO_RKERNEL);
@@ -240,7 +240,7 @@ void Kernelcalls::exchangeOverSession(KPE *kernel, bool obtain, mht_key_t vpe, m
 
 void Kernelcalls::exchangeOverSessionReply(KPE *kernel, int tid, m3::Errors::Code res,
     m3::CapRngDesc srvcaps, GateOStream &args) {
-    KLOG(KRNLC, "exchangeOverSessionReply(kernelcore=" << kernel->core() << ", tid=" << tid <<
+    KLOG_V(KRNLC, "exchangeOverSessionReply(kernelcore=" << kernel->core() << ", tid=" << tid <<
         ", res=" << res << ", srvcaps=" << srvcaps << ")");
     CAP_BENCH_TRACE_X_F(KERNEL_OBT_FROM_RKERNEL);
     if(res == m3::Errors::NO_ERROR){
@@ -261,7 +261,7 @@ void Kernelcalls::exchangeOverSessionReply(KPE *kernel, int tid, m3::Errors::Cod
 }
 
 void Kernelcalls::exchangeOverSessionAck(KPE *kernel, int tid, m3::Errors::Code res) {
-    KLOG(KRNLC, "exchangeOverSessionAck(kernelcore=" << kernel->core() << ", tid=" << tid <<
+    KLOG_V(KRNLC, "exchangeOverSessionAck(kernelcore=" << kernel->core() << ", tid=" << tid <<
         ", res=" << res << ")");
     StaticGateOStream<m3::ostreamsize<Kernelcalls::Operation, int, m3::Errors::Code>()> msg;
     msg << EXCHANGEOSESSACK << tid << res;
@@ -270,7 +270,7 @@ void Kernelcalls::exchangeOverSessionAck(KPE *kernel, int tid, m3::Errors::Code 
 
 void Kernelcalls::exchangeOverSessionAck(KPE *kernel, int tid, m3::Errors::Code res,
     GateOStream &capData) {
-    KLOG(KRNLC, "exchangeOverSessionAck(kernelcore=" << kernel->core() << ", tid=" << tid <<
+    KLOG_V(KRNLC, "exchangeOverSessionAck(kernelcore=" << kernel->core() << ", tid=" << tid <<
         ", res=" << res << ", capDataSize=" << capData.total() << ")");
     AutoGateOStream msg(m3::vostreamsize(
         m3::ostreamsize<Kernelcalls::Operation, int, m3::Errors::Code>(),
@@ -282,7 +282,7 @@ void Kernelcalls::exchangeOverSessionAck(KPE *kernel, int tid, m3::Errors::Code 
 }
 
 void Kernelcalls::removeChildCapPtr(KPE *kernel, DDLCapRngDesc parents, DDLCapRngDesc caps) {
-    KLOG(KRNLC, "removeChildCaps(kernelcore=" << kernel->core() << ", parentstart=" <<
+    KLOG_V(KRNLC, "removeChildCaps(kernelcore=" << kernel->core() << ", parentstart=" <<
         PRINT_HASH(parents.start) << ", count=" << parents.count << ", capsstart=" <<
         PRINT_HASH(caps.start) << ", count=" << caps.count << ")");
     StaticGateOStream<m3::ostreamsize<Kernelcalls::Operation, mht_key_t, uint, mht_key_t,
@@ -292,7 +292,7 @@ void Kernelcalls::removeChildCapPtr(KPE *kernel, DDLCapRngDesc parents, DDLCapRn
 }
 
 void Kernelcalls::recvBufisAttached(KPE *kernel, int core, int epid) {
-    KLOG(KRNLC, "recvBufAttached(kernelcore=" << kernel->core() << ", core=" <<
+    KLOG_V(KRNLC, "recvBufAttached(kernelcore=" << kernel->core() << ", core=" <<
         core << ", epid=" << epid << ")");
     StaticGateOStream<m3::ostreamsize<Kernelcalls::Operation, int, int, int>()> msg;
     int mytid = m3::ThreadManager::get().current()->id();
@@ -301,7 +301,7 @@ void Kernelcalls::recvBufisAttached(KPE *kernel, int core, int epid) {
 }
 
 void Kernelcalls::recvBufAttached(KPE *kernel, int tid, m3::Errors::Code res) {
-    KLOG(KRNLC, "recvBufAttached(kernelcore=" << kernel->core() << ", tid=" << tid <<
+    KLOG_V(KRNLC, "recvBufAttached(kernelcore=" << kernel->core() << ", tid=" << tid <<
         ", res=" << res << ")");
     StaticGateOStream<m3::ostreamsize<Kernelcalls::Operation, int, m3::Errors::Code>()> msg;
     msg << RECVBUFATTACHED<< tid << res;
@@ -309,7 +309,7 @@ void Kernelcalls::recvBufAttached(KPE *kernel, int tid, m3::Errors::Code res) {
 }
 
 void Kernelcalls::announceSrv(KPE *kernel, mht_key_t id, const m3::String &name) {
-    KLOG(KRNLC, "announceSrv(kernelcore=" << kernel->core() << ", id=" << PRINT_HASH(id) <<
+    KLOG_V(KRNLC, "announceSrv(kernelcore=" << kernel->core() << ", id=" << PRINT_HASH(id) <<
         ", name=" << name << ")");
     AutoGateOStream msg(m3::vostreamsize(
         m3::ostreamsize<Kernelcalls::Operation, size_t, mht_key_t>(),
@@ -319,7 +319,7 @@ void Kernelcalls::announceSrv(KPE *kernel, mht_key_t id, const m3::String &name)
 }
 
 void Kernelcalls::revoke(KPE *kernel, mht_key_t capID, mht_key_t parent, mht_key_t originCap) {
-    KLOG(KRNLC, "revoke(kernelcore=" << kernel->core() << ", capID=" << PRINT_HASH(capID) <<
+    KLOG_V(KRNLC, "revoke(kernelcore=" << kernel->core() << ", capID=" << PRINT_HASH(capID) <<
         ", parent=" << PRINT_HASH(parent) << ", originCap=" << PRINT_HASH(capID) << ")");
     CAP_BENCH_TRACE_X_S(KERNEL_REV_TO_RKERNEL);
     StaticGateOStream<m3::ostreamsize<Kernelcalls::Operation, mht_key_t, mht_key_t, mht_key_t>()> msg;
@@ -329,7 +329,7 @@ void Kernelcalls::revoke(KPE *kernel, mht_key_t capID, mht_key_t parent, mht_key
 
 void Kernelcalls::revokeBatch(KPE *kernel, mht_key_t parent, mht_key_t originCap,
     const mht_key_t *capIDs, uint count) {
-    KLOG(KRNLC, "revokeBatch(kernelcore=" << kernel->core() << ", parent=" << PRINT_HASH(parent) <<
+    KLOG_V(KRNLC, "revokeBatch(kernelcore=" << kernel->core() << ", parent=" << PRINT_HASH(parent) <<
         ", originCap=" << PRINT_HASH(originCap) << ", count=" << count << ")");
     CAP_BENCH_TRACE_X_S(KERNEL_REV_TO_RKERNEL);
     AutoGateOStream msg(m3::vostreamsize(
@@ -342,7 +342,7 @@ void Kernelcalls::revokeBatch(KPE *kernel, mht_key_t parent, mht_key_t originCap
 }
 
 void Kernelcalls::revokeFinish(KPE *kernel, mht_key_t initiator, int awaits, bool includeReply) {
-    KLOG(KRNLC, "revokeFinish(kernelcore=" << kernel->core() << ", initiator=" << PRINT_HASH(initiator) <<
+    KLOG_V(KRNLC, "revokeFinish(kernelcore=" << kernel->core() << ", initiator=" << PRINT_HASH(initiator) <<
         ", addedAwaits=" << awaits << ", includeReply=" << (includeReply ? "y" : "n") << ")");
     StaticGateOStream<m3::ostreamsize<Kernelcalls::Operation, mht_key_t, int, bool>()> msg;
     msg << REVOKEFINISH << initiator << awaits << includeReply;
@@ -350,7 +350,7 @@ void Kernelcalls::revokeFinish(KPE *kernel, mht_key_t initiator, int awaits, boo
 }
 
 void Kernelcalls::requestShutdown(KPE *kernel, OpStage stage) {
-    KLOG(KRNLC, "requestShutdown(kernelcore=" << kernel->core() << ", stage=" <<
+    KLOG_V(KRNLC, "requestShutdown(kernelcore=" << kernel->core() << ", stage=" <<
         (stage == OpStage::KREQUEST ? "reque" : "reply") << ")");
     StaticGateOStream<m3::ostreamsize<Kernelcalls::Operation, OpStage>()> msg;
     msg << SHUTDOWNREQUEST << stage;
@@ -363,7 +363,7 @@ void Kernelcalls::requestShutdown(KPE *kernel, OpStage stage) {
 }
 
 void Kernelcalls::shutdown(KPE *kernel, OpStage stage) {
-    KLOG(KRNLC, "shutdown(kernelcore=" << kernel->core() << ", stage=" <<
+    KLOG_V(KRNLC, "shutdown(kernelcore=" << kernel->core() << ", stage=" <<
         (stage == OpStage::KREQUEST ? "reque" : "reply") << ")");
     StaticGateOStream<m3::ostreamsize<Kernelcalls::Operation, OpStage>()> msg;
     msg << SHUTDOWN << stage;
@@ -374,7 +374,7 @@ void Kernelcalls::shutdown(KPE *kernel, OpStage stage) {
 }
 
 void Kernelcalls::announceKrnls(KPE* kernel, membership_entry::krnl_id_t exception) {
-    KLOG(KRNLC, "announceKrnls(kernelcore=" << kernel->core() << ", exception=" << exception << ")");
+    KLOG_V(KRNLC, "announceKrnls(kernelcore=" << kernel->core() << ", exception=" << exception << ")");
     Coordinator &coord = Coordinator::get();
     uint amount = coord._kpes.size();
     AutoGateOStream msg(m3::vostreamsize(
@@ -392,7 +392,7 @@ void Kernelcalls::announceKrnls(KPE* kernel, membership_entry::krnl_id_t excepti
 void Kernelcalls::connect(membership_entry::krnl_id_t kid, membership_entry::pe_id_t core,
     OpStage stage, membership_entry::krnl_id_t myKid, membership_entry::pe_id_t myCore, int epid,
     uint numPEs, MembershipFlags flags, m3::PEDesc releasedPEs[]) {
-    KLOG(KRNLC, "connect(kernelcore=" << core << ", stage=" <<
+    KLOG_V(KRNLC, "connect(kernelcore=" << core << ", stage=" <<
         (stage == OpStage::KREQUEST ? "reque" : "reply") << ", epid=" << epid <<
         ", numPEs=" << numPEs << ")");
 
@@ -416,7 +416,7 @@ void Kernelcalls::connect(membership_entry::krnl_id_t kid, membership_entry::pe_
 
 void Kernelcalls::connect(KPE *kernel, OpStage stage, membership_entry::krnl_id_t myKid,
     membership_entry::pe_id_t myCore, int epid) {
-    KLOG(KRNLC, "connect(kernelcore=" << kernel->core() << ", stage=" <<
+    KLOG_V(KRNLC, "connect(kernelcore=" << kernel->core() << ", stage=" <<
         (stage == OpStage::KREQUEST ? "reque" : "reply") << ", epid=" << epid << ")");
 
     StaticGateOStream<m3::ostreamsize<Kernelcalls::Operation, OpStage, membership_entry::krnl_id_t,
@@ -427,14 +427,14 @@ void Kernelcalls::connect(KPE *kernel, OpStage stage, membership_entry::krnl_id_
 }
 
 void Kernelcalls::reply(KPE* kernel) {
-    KLOG(KRNLC, "reply(kernel=" << kernel->core() << ")");
+    KLOG_V(KRNLC, "reply(kernel=" << kernel->core() << ")");
     StaticGateOStream<m3::ostreamsize<Kernelcalls::Operation>()> msg;
     msg << REPLYKRNLC;
     kernel->reply(msg.bytes(), msg.total());
 }
 
 void Kernelcalls::startApps(KPE* kernel) {
-    KLOG(KRNLC, "startApps(kernel=" << kernel->core() << ")");
+    KLOG_V(KRNLC, "startApps(kernel=" << kernel->core() << ")");
     StaticGateOStream<m3::ostreamsize<Kernelcalls::Operation>()> msg;
     msg << STARTAPPS;
     kernel->sendTo(msg.bytes(), msg.total());

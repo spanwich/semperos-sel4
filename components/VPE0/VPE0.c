@@ -254,6 +254,14 @@ static int send_exchange(uint64_t tcap, uint32_t own_start, uint32_t own_count,
 #define BENCH_ITERS     10000
 #define BENCH_GHZ       2.0   /* QEMU qemu64 default — note in output */
 
+/* Reduced iteration counts for expensive capability benchmarks.
+ * Each iteration involves multiple seL4 IPC round-trips (~15ms each).
+ * chain_revoke_50/100 use further-reduced counts to avoid QEMU timeout. */
+#define BENCH_CAP_WARMUP   100
+#define BENCH_CAP_ITERS    1000
+#define BENCH_CHAIN_WARMUP 50
+#define BENCH_CHAIN_ITERS  200
+
 static inline uint64_t rdtsc(void)
 {
     uint32_t lo, hi;
@@ -292,6 +300,24 @@ static void bench_report(const char *name)
            name,
            (unsigned long)min, (unsigned long)med,
            (unsigned long)mean, (unsigned long)max, med_us);
+}
+
+static void bench_report_n(const char *name, int n)
+{
+    shell_sort_u64(bench_samples, n);
+    uint64_t min = bench_samples[0];
+    uint64_t max = bench_samples[n - 1];
+    uint64_t med = bench_samples[n / 2];
+    uint64_t sum = 0;
+    for (int i = 0; i < n; i++)
+        sum += bench_samples[i];
+    uint64_t mean = sum / (uint64_t)n;
+    double med_us = (double)med / (BENCH_GHZ * 1000.0);
+
+    printf("[BENCH] %-18s min=%-6lu  med=%-6lu  mean=%-6lu  max=%-6lu  cycles  (%.1fus median) [n=%d]\n",
+           name,
+           (unsigned long)min, (unsigned long)med,
+           (unsigned long)mean, (unsigned long)max, med_us, n);
 }
 
 /* --- Benchmark 1: ring_write --- */
@@ -834,8 +860,10 @@ int run(void)
      *   Chain d=100:     ~200K cycles / ~100us
      * ============================================================== */
     printf("\n[VPE0] === Experiment 2A: Capability Ops (Local, Unverified) ===\n");
-    printf("[VPE0] Warmup: %d iterations, Measured: %d iterations\n",
-           BENCH_WARMUP, BENCH_ITERS);
+    printf("[VPE0] Cap ops: %d warmup + %d measured\n",
+           BENCH_CAP_WARMUP, BENCH_CAP_ITERS);
+    printf("[VPE0] Chain ops: %d warmup + %d measured\n",
+           BENCH_CHAIN_WARMUP, BENCH_CHAIN_ITERS);
     printf("[VPE0] NOTE: us values assume %.1f GHz clock (QEMU qemu64 default)\n\n",
            BENCH_GHZ);
 
@@ -852,12 +880,12 @@ int run(void)
                 printf("[BENCH-2A-LOCAL-UNVERIFIED] local_exchange: DELEGATE FAILED (err=%d)\n", err);
             } else {
                 /* Warmup: obtain + revoke cycle */
-                for (int i = 0; i < BENCH_WARMUP; i++) {
+                for (int i = 0; i < BENCH_CAP_WARMUP; i++) {
                     send_exchange(2, 220 + (i % 10), 1, 210, 1, 1);
                     send_revoke(220 + (i % 10));
                 }
                 /* Measure: obtain from VPE1:210 into VPE0 at rotating selectors */
-                for (int i = 0; i < BENCH_ITERS; i++) {
+                for (int i = 0; i < BENCH_CAP_ITERS; i++) {
                     uint32_t sel = (uint32_t)(300 + (i % 100));
                     uint64_t t0 = rdtsc();
                     send_exchange(2, sel, 1, 210, 1, 1);
@@ -865,7 +893,7 @@ int run(void)
                     bench_samples[i] = t1 - t0;
                     send_revoke(sel);
                 }
-                bench_report("local_exchange");
+                bench_report_n("local_exchange", BENCH_CAP_ITERS);
                 printf("[BENCH-2A-LOCAL-UNVERIFIED] local_exchange: collected\n");
             }
             send_revoke(200);
@@ -876,13 +904,13 @@ int run(void)
     {
         /* Measure: create a gate, delegate to VPE1, then revoke */
         /* Warmup */
-        for (int i = 0; i < BENCH_WARMUP; i++) {
+        for (int i = 0; i < BENCH_CAP_WARMUP; i++) {
             send_creategate(200, 0xBE00, 8, 32);
             send_exchange(2, 200, 1, 210, 1, 0);
             send_revoke(200);
         }
         /* Measure */
-        for (int i = 0; i < BENCH_ITERS; i++) {
+        for (int i = 0; i < BENCH_CAP_ITERS; i++) {
             send_creategate(200, 0xBE00, 8, 32);
             send_exchange(2, 200, 1, 210, 1, 0);
             uint64_t t0 = rdtsc();
@@ -890,7 +918,7 @@ int run(void)
             uint64_t t1 = rdtsc();
             bench_samples[i] = t1 - t0;
         }
-        bench_report("local_revoke");
+        bench_report_n("local_revoke", BENCH_CAP_ITERS);
         printf("[BENCH-2A-LOCAL-UNVERIFIED] local_revoke: collected\n");
     }
 
@@ -898,7 +926,7 @@ int run(void)
     {
         /* Build a chain of depth 10 (alternate delegate/obtain) and revoke root */
         /* Warmup */
-        for (int w = 0; w < 100; w++) {
+        for (int w = 0; w < BENCH_CHAIN_WARMUP; w++) {
             send_creategate(200, 0xBE00, 8, 32);
             for (int d = 0; d < 10; d++) {
                 uint32_t s = (uint32_t)(200 + d * 10);
@@ -911,7 +939,7 @@ int run(void)
             send_revoke(200);
         }
         /* Measure */
-        for (int i = 0; i < BENCH_ITERS; i++) {
+        for (int i = 0; i < BENCH_CHAIN_ITERS; i++) {
             send_creategate(200, 0xBE00, 8, 32);
             for (int d = 0; d < 10; d++) {
                 uint32_t s = (uint32_t)(200 + d * 10);
@@ -926,14 +954,14 @@ int run(void)
             uint64_t t1 = rdtsc();
             bench_samples[i] = t1 - t0;
         }
-        bench_report("chain_revoke_10");
+        bench_report_n("chain_revoke_10", BENCH_CHAIN_ITERS);
         printf("[BENCH-2A-LOCAL-UNVERIFIED] chain_revoke_10: collected\n");
     }
 
     /* --- Bench 2A-4: chain_revoke_50 --- */
     {
-        /* Warmup (fewer iterations for deep chains) */
-        for (int w = 0; w < 10; w++) {
+        /* Warmup */
+        for (int w = 0; w < BENCH_CHAIN_WARMUP; w++) {
             send_creategate(200, 0xBE00, 8, 32);
             for (int d = 0; d < 50; d++) {
                 uint32_t s = (uint32_t)(200 + d * 2);
@@ -945,8 +973,8 @@ int run(void)
             }
             send_revoke(200);
         }
-        /* Measure (fewer iters for deep chains) */
-        int iters_50 = BENCH_ITERS < 1000 ? BENCH_ITERS : 1000;
+        /* Measure */
+        int iters_50 = BENCH_CHAIN_ITERS;
         for (int i = 0; i < iters_50; i++) {
             send_creategate(200, 0xBE00, 8, 32);
             for (int d = 0; d < 50; d++) {
@@ -982,8 +1010,8 @@ int run(void)
 
     /* --- Bench 2A-5: chain_revoke_100 --- */
     {
-        /* Warmup (very few for depth 100) */
-        for (int w = 0; w < 5; w++) {
+        /* Warmup */
+        for (int w = 0; w < BENCH_CHAIN_WARMUP; w++) {
             send_creategate(200, 0xBE00, 8, 32);
             for (int d = 0; d < 100; d++) {
                 uint32_t s = (uint32_t)(200 + d);
@@ -996,7 +1024,7 @@ int run(void)
             send_revoke(200);
         }
         /* Measure */
-        int iters_100 = BENCH_ITERS < 500 ? BENCH_ITERS : 500;
+        int iters_100 = BENCH_CHAIN_ITERS;
         for (int i = 0; i < iters_100; i++) {
             send_creategate(200, 0xBE00, 8, 32);
             for (int d = 0; d < 100; d++) {

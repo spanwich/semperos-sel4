@@ -245,7 +245,7 @@ int CapTable::revoke_rec(Capability *c, mht_key_t origin, m3::CapRngDesc::Type t
                 m3::ThreadManager::get().wait_for(reinterpret_cast<void*>(mytid));
                 CAP_BENCH_TRACE_X_F(KERNEL_REV_THRD_WAKEUP);
                 // this thread will be notified once all responses arrived
-                KLOG(KRNLC, "Continued revoke for cap " << PRINT_HASH(id) << ". Finishing revoke");
+                KLOG_V(KRNLC, "Continued revoke for cap " << PRINT_HASH(id) << ". Finishing revoke");
             }
         // remove ongoing entry
             ongoing->notifySubscribers();
@@ -306,7 +306,7 @@ int CapTable::revoke(Capability *c, mht_key_t capID, mht_key_t origin) {
                 // once the revocation finished. This way we don't waste a thread.
                 int mytid = m3::ThreadManager::get().current()->id();
                 m3::ThreadManager::get().wait_for(reinterpret_cast<void*>(mytid));
-                KLOG(KRNLC, "Continued revoke for cap " << PRINT_HASH(capID));
+                KLOG_V(KRNLC, "Continued revoke for cap " << PRINT_HASH(capID));
                 // delete the finished revocation
                 RevocationList::get().remove(capID);
             }

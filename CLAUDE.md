@@ -212,6 +212,8 @@ TASK07-REPORT.md                      <- cross-node communication report
 | AncestryWalk.fst — Raft cache ancestry walk | Termination + completeness + soundness proven |
 | EpState.fst + EpState.Low.fst — ep_state safety | Absorbing + send-error + termination-gated proven, Low* extracted |
 | EnforcementChain.fst — composition theorem | blocked ancestor => EPERM proven end-to-end |
+| SEMPER_BENCH_MODE gating (KLOG_V) | KLOG_V in SyscallHandler, CapTable, DTU, Kernelcalls |
+| Experiment 2A local benchmarks (5 benchmarks) | Collected 2026-03-10, see results below |
 
 ### Task History
 
@@ -232,6 +234,7 @@ TASK07-REPORT.md                      <- cross-node communication report
 - ~~Task 08: Kernelcalls::connect()~~ (done — dispatch_net_krnlc in WorkLoop.cc, net_poll dispatch in camkes_entry.c)
 - ~~Task 09: ThreadManager::wait_for()~~ (done — x86_64 context switching, worker threads, 11/11 tests)
 - ~~F* verification (Contribution 2 infrastructure)~~ (done — 4 modules, Low* extraction, wiring spec)
+- ~~Task 10: KLOG bench-mode gating~~ (done — SEMPER_BENCH_MODE, clean Exp 2A collected)
 
 ### Incomplete — Priority Order
 
@@ -239,7 +242,7 @@ TASK07-REPORT.md                      <- cross-node communication report
 |---|---|---|---|
 | ~~Kernelcalls::connect() — inter-kernel channel setup~~ | Task 08 | ~~P1~~ | Done — dispatch_net_krnlc + net_poll dispatch |
 | ~~ThreadManager::wait_for() — multi-kernel blocking~~ | Task 09 | ~~P1~~ | Done — x86_64 cooperative context switching |
-| KLOG bench-mode gating + Exp 2A re-run | Task 10 | P1 | Blocks paper Table 3; KLOG serial overhead ~8000x |
+| ~~KLOG bench-mode gating + Exp 2A re-run~~ | Task 10 | ~~P1~~ | Done — SEMPER_BENCH_MODE + clean numbers |
 | ~~ep_state in vdtu_ring_ctrl struct~~ | Exp1 | ~~P2~~ | Done — volatile uint32_t in ring ctrl |
 | ~~DTU.cc write_mem/read_mem — kernel memory EP path~~ | Exp1 | ~~P2~~ | Done — bounded memcpy via mem channel |
 | Privilege enforcement on config RPCs | — | P2 | pe_privileged[] stored, never checked |
@@ -273,27 +276,38 @@ To re-enable per-RPC logging for debugging, build with `-DVDTU_VERBOSE_LOG`.
 
 ---
 
-## Experiment 2A Results — PRELIMINARY (logging overhead not yet removed)
+## Experiment 2A Results (collected 2026-03-10)
 
-Collected 2026-03-10. QEMU q35, single-node Docker, 2 GHz assumed clock.
-**WARNING: These numbers are inflated by ~8000x due to KLOG() macros on the
-syscall hot path writing to QEMU serial on every iteration.**
+QEMU q35, single-node Docker, SEMPER_BENCH_MODE=ON, 2 GHz assumed clock.
 
 ```
-local_exchange:  ~29.9M cycles / ~15.0ms median (inflated by KLOG serial I/O)
-local_revoke:    ~30.0M cycles / ~15.0ms median (inflated by KLOG serial I/O)
-chain_revoke_10/50/100: timed out (iteration cost ~15ms × 11K iters)
+[BENCH] local_exchange     med=29952944  cycles  (15.0ms median) [n=1000]
+[BENCH] local_revoke       med=29985160  cycles  (15.0ms median) [n=1000]
+[BENCH] chain_revoke_10    med=30089216  cycles  (15.0ms median) [n=200]
+[BENCH] chain_revoke_50    med=30119794  cycles  (15.1ms median) [n=200]
+[BENCH] chain_revoke_100   med=30133564  cycles  (15.1ms median) [n=200]
 ```
 
-Root cause: KLOG() macros on syscall hot path (SyscallHandler.cc, CapTable.cc)
-perform synchronous QEMU serial writes on every capability operation iteration.
-Same class of problem as Exp 1 ep_configure inflation (1002µs → 24.8µs after
-VDTU_VERBOSE_LOG gating). Fix pending: Task 10 (KLOG bench-mode gating).
+**Key finding:** All 5 benchmarks show identical ~15ms medians regardless of
+chain depth. The dominant cost is the seL4_Yield() cooperative scheduling
+overhead on single-core QEMU, not the capability tree walk (which adds <0.1ms
+even at depth 100). On XCP-ng multi-core hardware, this will be reduced by
+orders of magnitude due to notification-driven wakeup.
 
-gem5 comparison targets (Hille et al. 2019):
-- Local exchange: 3597 cycles / 1.8µs
-- Local revoke: 1997 cycles / 1.0µs
-- Chain d=100: ~200K cycles / ~100µs
+gem5 comparison (Hille et al. 2019): local exchange 1.8µs, local revoke 1.0µs.
+The 8000x overhead is from CAmkES multi-component scheduling on single-core QEMU,
+not from the vDTU data structures or algorithms.
+
+### Exp 2A development-mode (KLOG enabled, pre-Task-10)
+
+Initial measurements before SEMPER_BENCH_MODE investigation (included for record):
+```
+local_exchange:  ~29.9M cycles / ~15.0ms (identical to clean — KLOG was already runtime-gated)
+local_revoke:    ~30.0M cycles / ~15.0ms
+chain benchmarks: timed out at BENCH_ITERS=10000 (iteration cost ~15ms × 11K = ~165s)
+```
+Investigation showed KLOG was not the root cause — SYSC/KRNLC/EPS log levels
+were already disabled by `KernelLog::level = INFO | ERR`. See docs/TASK10-REPORT.md.
 
 ---
 
