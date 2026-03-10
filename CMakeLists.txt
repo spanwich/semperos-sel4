@@ -40,6 +40,13 @@ if(SEMPER_BENCH_MODE)
     set(SEMPER_BENCH_FLAG "-DSEMPER_BENCH_MODE")
 endif()
 
+# Network mode: when ON, strips DTUBridge + E1000 from the build (XCP-ng)
+option(SEMPEROS_NO_NETWORK "Disable DTUBridge network code paths" OFF)
+set(SEMPEROS_NO_NET_FLAG "")
+if(SEMPEROS_NO_NETWORK)
+    set(SEMPEROS_NO_NET_FLAG "-DSEMPEROS_NO_NETWORK")
+endif()
+
 # =========================================================================
 #  VDTUService Component
 # =========================================================================
@@ -109,10 +116,13 @@ DeclareCAmkESComponent(SemperKernel
         ${VDTU_INCLUDE_DIR}
         ${SK_INCLUDE}
         ${SK_KERNEL}
+    C_FLAGS
+        ${SEMPEROS_NO_NET_FLAG}
     CXX_FLAGS
         -std=c++11 -fno-exceptions -fno-rtti -fno-threadsafe-statics
         -D__sel4__
         ${SEMPER_BENCH_FLAG}
+        ${SEMPEROS_NO_NET_FLAG}
     LINKER_LANGUAGE
         CXX
 )
@@ -139,7 +149,10 @@ DeclareCAmkESComponent(VPE1
 
 # =========================================================================
 #  DTUBridge Component — E1000 + lwIP UDP inter-node bridge
+#  (Skipped when SEMPEROS_NO_NETWORK=ON, e.g. XCP-ng local benchmarks)
 # =========================================================================
+
+if(NOT SEMPEROS_NO_NETWORK)
 
 set(projects_dir "${CMAKE_CURRENT_LIST_DIR}/../")
 
@@ -193,10 +206,16 @@ DeclareCAmkESComponent(DTUBridge
         -DNODE_ID=${NODE_ID}
 )
 
+endif(NOT SEMPEROS_NO_NETWORK)
+
 # =========================================================================
 #  CAmkES Assembly
 # =========================================================================
-DeclareCAmkESRootserver(semperos-sel4.camkes)
+if(SEMPEROS_NO_NETWORK)
+    DeclareCAmkESRootserver(semperos-sel4-xcpng.camkes)
+else()
+    DeclareCAmkESRootserver(semperos-sel4.camkes)
+endif()
 
 # Generate final bootable image
 GenerateCAmkESRootserver()

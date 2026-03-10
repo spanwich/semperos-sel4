@@ -1,0 +1,228 @@
+/*
+ * semperos-sel4-xcpng.camkes -- CAmkES assembly for XCP-ng deployment
+ *
+ * Stripped variant of semperos-sel4.camkes for XCP-ng bare-metal benchmarks.
+ * Removes DTUBridge + E1000 hardware (not present / not needed on XCP-ng).
+ * All local benchmarks (Exp 2A) work without cross-node transport.
+ *
+ * Components retained:
+ *   - VDTUService:    Virtual DTU control plane (endpoint configuration)
+ *   - SemperKernel:   SemperOS kernel instance (kid=0)
+ *   - VPE0:           Application VPE (test harness + benchmarks, PE 2)
+ *   - VPE1:           Second VPE (passive, PE 3) -- EXCHANGE target
+ *
+ * Removed (vs semperos-sel4.camkes):
+ *   - DTUBridge:      E1000 + lwIP UDP bridge (no NIC on XCP-ng)
+ *   - HWEthDriver:    E1000 MMIO hardware
+ *   - HWPCIConfig:    PCI config I/O ports
+ *   - All net_* connections and dataports
+ *
+ * Log transport: seL4 printf -> serial -> Xen hvm_serial=tcp: -> host socat
+ *
+ * SPDX-License-Identifier: BSD-2-Clause
+ */
+
+import <std_connector.camkes>;
+
+/*
+ * =========================================================================
+ *  Procedure Interfaces
+ * =========================================================================
+ */
+
+/* vDTU config interface */
+procedure VDTUConfig {
+    int config_send(in int target_pe, in int ep_id,
+                    in int dest_pe, in int dest_ep, in int dest_vpe,
+                    in int msg_size, in uint64_t label, in int credits);
+    int config_recv(in int target_pe, in int ep_id,
+                    in int buf_order, in int msg_order, in int flags);
+    int config_mem(in int target_pe, in int ep_id,
+                   in int dest_pe, in uint64_t addr, in uint64_t size,
+                   in int dest_vpe, in int perm);
+    int invalidate_ep(in int target_pe, in int ep_id);
+    int invalidate_eps(in int target_pe, in int first_ep);
+    int terminate_ep(in int target_pe, in int ep_id);
+    int set_vpe_id(in int target_pe, in int vpe_id);
+    int set_privilege(in int target_pe, in int priv);
+    int wakeup_pe(in int target_pe);
+    int get_ep_count();
+};
+
+/*
+ * =========================================================================
+ *  Component Definitions
+ * =========================================================================
+ */
+
+component VDTUService {
+    control;
+
+    /* Config RPC: served to SemperKernel */
+    provides VDTUConfig config;
+
+    /* Control plane notifications: vDTU can wake kernel or VPE0 (wakeup_pe) */
+    emits    Signal notify_kernel;
+    emits    Signal notify_vpe0;
+
+    /* Kernel signals vDTU when done (for coordination) */
+    consumes Signal kernel_done;
+}
+
+component SemperKernel {
+    control;
+
+    /* Config RPC: calls vDTU to set up endpoints */
+    uses VDTUConfig vdtu;
+
+    /* Pre-allocated message channel dataports (shared with VPE0) */
+    dataport Buf(4096) msgchan_kv_0;
+    dataport Buf(4096) msgchan_kv_1;
+    dataport Buf(4096) msgchan_kv_2;
+    dataport Buf(4096) msgchan_kv_3;
+    dataport Buf(4096) msgchan_kv_4;
+    dataport Buf(4096) msgchan_kv_5;
+    dataport Buf(4096) msgchan_kv_6;
+    dataport Buf(4096) msgchan_kv_7;
+
+    /* Pre-allocated memory endpoint dataports */
+    dataport Buf(4096) memep_kv_0;
+    dataport Buf(4096) memep_kv_1;
+    dataport Buf(4096) memep_kv_2;
+    dataport Buf(4096) memep_kv_3;
+
+    /* Control plane: vDTU can wake kernel (for wakeup_pe) */
+    consumes Signal vdtu_wakeup;
+
+    /* Control plane: kernel signals vDTU when done */
+    emits    Signal kernel_done;
+
+    /* Data path: kernel signals VPE0 that a message is available */
+    emits    Signal signal_vpe0;
+
+    /* Data path: VPE0 signals kernel that a reply is available */
+    consumes Signal signal_from_vpe0;
+}
+
+component VPE0 {
+    control;
+
+    /* Config RPC: VPE0 -> vDTU (for benchmarks: ep_configure, ep_terminate) */
+    uses VDTUConfig vdtu;
+
+    /* Pre-allocated message channel dataports (shared with SemperKernel) */
+    dataport Buf(4096) msgchan_kv_0;
+    dataport Buf(4096) msgchan_kv_1;
+    dataport Buf(4096) msgchan_kv_2;
+    dataport Buf(4096) msgchan_kv_3;
+    dataport Buf(4096) msgchan_kv_4;
+    dataport Buf(4096) msgchan_kv_5;
+    dataport Buf(4096) msgchan_kv_6;
+    dataport Buf(4096) msgchan_kv_7;
+
+    /* Pre-allocated memory endpoint dataports */
+    dataport Buf(4096) memep_kv_0;
+    dataport Buf(4096) memep_kv_1;
+    dataport Buf(4096) memep_kv_2;
+    dataport Buf(4096) memep_kv_3;
+
+    /* Control plane: vDTU can wake VPE0 (for wakeup_pe) */
+    consumes Signal vdtu_wakeup;
+
+    /* Data path: kernel signals VPE0 that a message is available */
+    consumes Signal signal_from_kernel;
+
+    /* Data path: VPE0 signals kernel that a reply is available */
+    emits    Signal signal_kernel;
+}
+
+/*
+ * VPE1: Passive VPE for EXCHANGE syscall testing.
+ * VPE1's CapTable is manipulated directly by the kernel during EXCHANGE.
+ * No shared data channels needed -- VPE1 doesn't send/receive messages.
+ */
+component VPE1 {
+    control;
+}
+
+/*
+ * =========================================================================
+ *  Assembly: wire everything together (no DTUBridge)
+ * =========================================================================
+ */
+
+assembly {
+    composition {
+        component VDTUService   vdtu;
+        component SemperKernel  kernel0;
+        component VPE0          vpe0;
+        component VPE1          vpe1;
+
+        /*
+         * Config RPC: kernel0 -> vdtu, vpe0 -> vdtu (benchmark access)
+         */
+        connection seL4RPCCall config_rpc(from kernel0.vdtu, to vdtu.config);
+        connection seL4RPCCall vpe0_config_rpc(from vpe0.vdtu, to vdtu.config);
+
+        /*
+         * Message channel dataports: kernel0 <-> vpe0 (point-to-point).
+         */
+        connection seL4SharedData msgchan0(from kernel0.msgchan_kv_0,
+                                           to vpe0.msgchan_kv_0);
+        connection seL4SharedData msgchan1(from kernel0.msgchan_kv_1,
+                                           to vpe0.msgchan_kv_1);
+        connection seL4SharedData msgchan2(from kernel0.msgchan_kv_2,
+                                           to vpe0.msgchan_kv_2);
+        connection seL4SharedData msgchan3(from kernel0.msgchan_kv_3,
+                                           to vpe0.msgchan_kv_3);
+        connection seL4SharedData msgchan4(from kernel0.msgchan_kv_4,
+                                           to vpe0.msgchan_kv_4);
+        connection seL4SharedData msgchan5(from kernel0.msgchan_kv_5,
+                                           to vpe0.msgchan_kv_5);
+        connection seL4SharedData msgchan6(from kernel0.msgchan_kv_6,
+                                           to vpe0.msgchan_kv_6);
+        connection seL4SharedData msgchan7(from kernel0.msgchan_kv_7,
+                                           to vpe0.msgchan_kv_7);
+
+        /* Memory endpoint dataports: kernel0 <-> vpe0 */
+        connection seL4SharedData memep0(from kernel0.memep_kv_0,
+                                         to vpe0.memep_kv_0);
+        connection seL4SharedData memep1(from kernel0.memep_kv_1,
+                                         to vpe0.memep_kv_1);
+        connection seL4SharedData memep2(from kernel0.memep_kv_2,
+                                         to vpe0.memep_kv_2);
+        connection seL4SharedData memep3(from kernel0.memep_kv_3,
+                                         to vpe0.memep_kv_3);
+
+        /*
+         * Control plane notifications: vDTU -> kernel, vDTU -> VPE0
+         */
+        connection seL4Notification vdtu_wake_kern(from vdtu.notify_kernel,
+                                                    to kernel0.vdtu_wakeup);
+        connection seL4Notification vdtu_wake_vpe0(from vdtu.notify_vpe0,
+                                                    to vpe0.vdtu_wakeup);
+        connection seL4Notification kern_done(from kernel0.kernel_done,
+                                              to vdtu.kernel_done);
+
+        /*
+         * Data path notifications: kernel <-> VPE0 (direct, no vDTU)
+         */
+        connection seL4Notification kern_to_vpe0(from kernel0.signal_vpe0,
+                                                  to vpe0.signal_from_kernel);
+        connection seL4Notification vpe0_to_kern(from vpe0.signal_kernel,
+                                                  to kernel0.signal_from_vpe0);
+    }
+
+    configuration {
+        /* vDTU runs at highest priority */
+        vdtu.priority = 250;
+        /* SemperKernel: large stack for revocation */
+        kernel0.priority = 200;
+        kernel0._stack_size = 131072;
+        /* VPE0: test harness + benchmarks */
+        vpe0.priority = 200;
+        /* VPE1: passive EXCHANGE target */
+        vpe1.priority = 200;
+        vpe1._heap_size = 4096;
+    }
+}

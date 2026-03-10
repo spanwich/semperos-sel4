@@ -124,6 +124,26 @@ ninja
 
 Platform: pc99 (x86_64), simulation mode, debug build with kernel printing.
 
+### XCP-ng ISO Build
+
+```bash
+# From camkes-vm-examples root:
+rm -rf build-xcpng && mkdir build-xcpng && cd build-xcpng
+cmake -G Ninja \
+    -DPLATFORM=pc99 \
+    -DSEMPEROS_NO_NETWORK=ON \
+    -DSEMPER_BENCH_MODE=ON \
+    -C ../projects/semperos-sel4/settings.cmake \
+    ../projects/semperos-sel4
+ninja
+../projects/semperos-sel4/scripts/make-iso.sh .
+# Output: build-xcpng/semperos-sel4.iso
+```
+
+Strips DTUBridge + E1000 (not needed for local benchmarks on XCP-ng).
+Log transport uses Xen's `hvm_serial=tcp:` serial redirect — no in-guest NIC.
+See docs/XCPNG-RUNBOOK.md for full deployment instructions.
+
 ### Standalone Ring Buffer Tests
 
 ```bash
@@ -171,6 +191,13 @@ docker/run-qemu.sh                    <- QEMU launcher with $QEMU_EXTRA
 docs/                                 <- task reports and design docs
 DESIGN.md                             <- full architecture specification
 TASK07-REPORT.md                      <- cross-node communication report
+semperos-sel4-xcpng.camkes            <- stripped assembly for XCP-ng (no DTUBridge)
+settings-xcpng.cmake                  <- XCP-ng build preset (SEMPEROS_NO_NETWORK + BENCH_MODE)
+scripts/grub.cfg                      <- GRUB2 multiboot config for ISO boot
+scripts/make-iso.sh                   <- grub-mkrescue wrapper -> semperos-sel4.iso
+logserver/                            <- host-side TCP log receiver (socat + systemd)
+docs/XCPNG-AUDIT.md                   <- sel4_xcpng reference project analysis
+docs/XCPNG-RUNBOOK.md                 <- XCP-ng deployment + benchmark collection
 ```
 
 ---
@@ -214,6 +241,7 @@ TASK07-REPORT.md                      <- cross-node communication report
 | EnforcementChain.fst — composition theorem | blocked ancestor => EPERM proven end-to-end |
 | SEMPER_BENCH_MODE gating (KLOG_V) | KLOG_V in SyscallHandler, CapTable, DTU, Kernelcalls |
 | Experiment 2A local benchmarks (5 benchmarks) | Collected 2026-03-10, see results below |
+| XCP-ng ISO build + QEMU smoke test (Task 12) | ISO boots via GRUB, 11/11 tests, benchmarks output on serial |
 
 ### Task History
 
@@ -235,6 +263,7 @@ TASK07-REPORT.md                      <- cross-node communication report
 - ~~Task 09: ThreadManager::wait_for()~~ (done — x86_64 context switching, worker threads, 11/11 tests)
 - ~~F* verification (Contribution 2 infrastructure)~~ (done — 4 modules, Low* extraction, wiring spec)
 - ~~Task 10: KLOG bench-mode gating~~ (done — SEMPER_BENCH_MODE, clean Exp 2A collected)
+- ~~Task 12: XCP-ng ISO port~~ (done — stripped assembly, GRUB ISO, QEMU smoke verified)
 
 ### Incomplete — Priority Order
 
@@ -245,6 +274,7 @@ TASK07-REPORT.md                      <- cross-node communication report
 | ~~KLOG bench-mode gating + Exp 2A re-run~~ | Task 10 | ~~P1~~ | Done — SEMPER_BENCH_MODE + clean numbers |
 | ~~ep_state in vdtu_ring_ctrl struct~~ | Exp1 | ~~P2~~ | Done — volatile uint32_t in ring ctrl |
 | ~~DTU.cc write_mem/read_mem — kernel memory EP path~~ | Exp1 | ~~P2~~ | Done — bounded memcpy via mem channel |
+| XCP-ng physical boot + Exp 2A collection | Task 13 | P1 | Runbook: docs/XCPNG-RUNBOOK.md, ISO ready |
 | Privilege enforcement on config RPCs | — | P2 | pe_privileged[] stored, never checked |
 | m3fs as CAmkES VPE component | — | P2 | Needed for application benchmarks |
 | Application VPE components (tar, find, SQLite, PostMark) | — | P2 | One component each |
@@ -382,6 +412,25 @@ explicit e1000 (82540EM) takes PCI slot 2.
 - DMA pool: 2 MiB at paddr 0x4000000 (`dma_pool` + `simple_untyped21_pool=4`)
 - IRQ: IOAPIC pin 11 via `seL4HardwareInterrupt`
 - PCI config: I/O ports 0xCF8-0xCFF via `seL4HardwareIOPort`
+
+### ISO smoke test (XCP-ng build)
+
+```bash
+# Direct multiboot (fastest)
+timeout 60 qemu-system-x86_64 \
+    -machine q35 -cpu qemu64,+rdrand,+fsgsbase,+xsave,+xsaveopt \
+    -m 512 -nographic -serial mon:stdio -nic none -no-reboot \
+    -kernel build-xcpng/images/kernel-x86_64-pc99 \
+    -initrd build-xcpng/images/capdl-loader-image-x86_64-pc99
+
+# ISO boot (tests GRUB chain)
+timeout 120 qemu-system-x86_64 \
+    -machine q35 -cpu qemu64,+rdrand,+fsgsbase,+xsave,+xsaveopt \
+    -m 512 -nographic -serial mon:stdio -nic none -boot d -no-reboot \
+    -cdrom build-xcpng/semperos-sel4.iso
+```
+
+Note: requires `-machine q35` and `-serial mon:stdio`.
 
 ---
 

@@ -52,6 +52,7 @@ void sel4_yield_wrapper(void)
     seL4_Yield();
 }
 
+#ifndef SEMPEROS_NO_NETWORK
 /*
  * Incoming network DTU message buffer.
  * DTUBridge deposits a message in the dtu_in dataport and signals us.
@@ -229,6 +230,14 @@ void net_poll(void)
         }
     }
 }
+#else  /* SEMPEROS_NO_NETWORK */
+/* Stubs for builds without DTUBridge (e.g. XCP-ng local-only benchmarks) */
+void net_init_rings(void) {}
+void net_poll(void) {}
+int net_ring_send(uint16_t s_pe, uint8_t s_ep, uint16_t s_vpe, uint8_t r_ep,
+                  uint64_t label, uint64_t rlabel, uint8_t flags,
+                  const void *payload, uint16_t plen) { (void)s_pe; (void)s_ep; (void)s_vpe; (void)r_ep; (void)label; (void)rlabel; (void)flags; (void)payload; (void)plen; return -1; }
+#endif /* SEMPEROS_NO_NETWORK */
 
 int run(void)
 {
