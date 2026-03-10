@@ -43,6 +43,7 @@ int vdtu_config_mem(int target_pe, int ep_id, int dest_pe, uint64_t addr,
                     uint64_t size, int dest_vpe, int perm);
 int vdtu_invalidate_ep(int target_pe, int ep_id);
 int vdtu_invalidate_eps(int target_pe, int first_ep);
+int vdtu_terminate_ep(int target_pe, int ep_id);
 
 /* Notifications */
 void signal_vpe0_emit(void);
@@ -88,6 +89,14 @@ struct send_ep_config {
 };
 static struct send_ep_config ep_send_config[EP_COUNT];
 
+/* Memory endpoint config cache (for write_mem/read_mem bounds checking) */
+struct mem_ep_config {
+    int dest_pe;
+    uintptr_t base_addr;
+    size_t size;
+};
+static struct mem_ep_config ep_mem_config[EP_COUNT];
+
 /*
  * Initialize the channel table from CAmkES-generated dataport symbols.
  * Called once on first DTU operation.
@@ -118,6 +127,7 @@ static void ensure_channels_init(void)
         ep_channel[i] = -1;
         ep_type[i] = EP_NONE;
         memset(&ep_send_config[i], 0, sizeof(ep_send_config[i]));
+        memset(&ep_mem_config[i], 0, sizeof(ep_mem_config[i]));
     }
 
     channels_initialized = true;
@@ -311,6 +321,9 @@ void DTU::config_mem_local(int ep, int dstcore, int dstvpe, uintptr_t addr, size
     }
     ep_channel[ep] = ch;
     ep_type[ep] = EP_MEM;
+    ep_mem_config[ep].dest_pe = dstcore;
+    ep_mem_config[ep].base_addr = addr;
+    ep_mem_config[ep].size = size;
 }
 
 void DTU::config_mem_remote(const VPEDesc &vpe, int ep, int dstcore,
@@ -401,15 +414,45 @@ void DTU::reply_to(const VPEDesc &vpe, int ep, int crdep, word_t credits,
 }
 
 void DTU::write_mem(const VPEDesc &vpe, uintptr_t addr, const void *data, size_t size) {
-    /* stub — memory EP write via vDTU not implemented yet */
+    ensure_channels_init();
+
+    for (int i = 0; i < EP_COUNT; i++) {
+        if (ep_type[i] != EP_MEM || ep_mem_config[i].dest_pe != vpe.core)
+            continue;
+        uintptr_t base = ep_mem_config[i].base_addr;
+        size_t region = ep_mem_config[i].size;
+        if (addr < base || addr + size > base + region)
+            continue;
+
+        volatile void *mem = vdtu_channels_get_mem(&channels, ep_channel[i]);
+        if (!mem) continue;
+        memcpy((char *)mem + (addr - base), data, size);
+        return;
+    }
+    KLOG(ERR, "write_mem: no mem EP for pe=" << vpe.core << " addr=0x" << m3::fmt(addr, "x"));
 }
 
 void DTU::read_mem(const VPEDesc &vpe, uintptr_t addr, void *data, size_t size) {
-    /* stub — memory EP read via vDTU not implemented yet */
+    ensure_channels_init();
+
+    for (int i = 0; i < EP_COUNT; i++) {
+        if (ep_type[i] != EP_MEM || ep_mem_config[i].dest_pe != vpe.core)
+            continue;
+        uintptr_t base = ep_mem_config[i].base_addr;
+        size_t region = ep_mem_config[i].size;
+        if (addr < base || addr + size > base + region)
+            continue;
+
+        volatile void *mem = vdtu_channels_get_mem(&channels, ep_channel[i]);
+        if (!mem) continue;
+        memcpy(data, (const char *)mem + (addr - base), size);
+        return;
+    }
+    KLOG(ERR, "read_mem: no mem EP for pe=" << vpe.core << " addr=0x" << m3::fmt(addr, "x"));
 }
 
 void DTU::cmpxchg_mem(const VPEDesc &, uintptr_t, const void *, size_t, size_t, size_t) {
-    /* stub */
+    /* stub — not used in current prototype */
 }
 
 /* Private helpers — not needed on sel4 (gem5 register manipulation) */

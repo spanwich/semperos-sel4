@@ -42,6 +42,7 @@ procedure VDTUConfig {
                    in int dest_vpe, in int perm);
     int invalidate_ep(in int target_pe, in int ep_id);
     int invalidate_eps(in int target_pe, in int first_ep);
+    int terminate_ep(in int target_pe, in int ep_id);
     int set_vpe_id(in int target_pe, in int vpe_id);
     int set_privilege(in int target_pe, in int priv);
     int wakeup_pe(in int target_pe);
@@ -149,6 +150,9 @@ component SemperKernel {
 component VPE0 {
     control;
 
+    /* Config RPC: VPE0 -> vDTU (for benchmarks: ep_configure, ep_terminate) */
+    uses VDTUConfig vdtu;
+
     /* Pre-allocated message channel dataports (shared with SemperKernel) */
     dataport Buf(4096) msgchan_kv_0;
     dataport Buf(4096) msgchan_kv_1;
@@ -230,9 +234,10 @@ assembly {
         component DTUBridge     dtu_bridge;
 
         /*
-         * Config RPC: kernel0 -> vdtu
+         * Config RPC: kernel0 -> vdtu, vpe0 -> vdtu (benchmark access)
          */
         connection seL4RPCCall config_rpc(from kernel0.vdtu, to vdtu.config);
+        connection seL4RPCCall vpe0_config_rpc(from vpe0.vdtu, to vdtu.config);
 
         /*
          * Message channel dataports: kernel0 <-> vpe0 (point-to-point).

@@ -246,6 +246,248 @@ static int send_exchange(uint64_t tcap, uint32_t own_start, uint32_t own_count,
     return send_syscall(&payload, sizeof(payload));
 }
 
+/* ==============================================================
+ * Benchmark Infrastructure (Experiment 1)
+ * ============================================================== */
+
+#define BENCH_WARMUP    1000
+#define BENCH_ITERS     10000
+#define BENCH_GHZ       2.0   /* QEMU qemu64 default — note in output */
+
+static inline uint64_t rdtsc(void)
+{
+    uint32_t lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+static uint64_t bench_samples[BENCH_ITERS];
+
+static void shell_sort_u64(uint64_t *arr, int n)
+{
+    for (int gap = n / 2; gap > 0; gap /= 2) {
+        for (int i = gap; i < n; i++) {
+            uint64_t tmp = arr[i];
+            int j;
+            for (j = i; j >= gap && arr[j - gap] > tmp; j -= gap)
+                arr[j] = arr[j - gap];
+            arr[j] = tmp;
+        }
+    }
+}
+
+static void bench_report(const char *name)
+{
+    shell_sort_u64(bench_samples, BENCH_ITERS);
+    uint64_t min = bench_samples[0];
+    uint64_t max = bench_samples[BENCH_ITERS - 1];
+    uint64_t med = bench_samples[BENCH_ITERS / 2];
+    uint64_t sum = 0;
+    for (int i = 0; i < BENCH_ITERS; i++)
+        sum += bench_samples[i];
+    uint64_t mean = sum / BENCH_ITERS;
+    double med_us = (double)med / (BENCH_GHZ * 1000.0);
+
+    printf("[BENCH] %-18s min=%-6lu  med=%-6lu  mean=%-6lu  max=%-6lu  cycles  (%.1fus median)\n",
+           name,
+           (unsigned long)min, (unsigned long)med,
+           (unsigned long)mean, (unsigned long)max, med_us);
+}
+
+/* --- Benchmark 1: ring_write --- */
+static void bench_ring_write(void)
+{
+    /* Use a local buffer so benchmark is independent of CAmkES channels */
+    uint32_t slot_count = 4, slot_size = 2048;
+    size_t sz = vdtu_ring_total_size(slot_count, slot_size);
+    static char ring_mem[64 + 4 * 2048];  /* 8256 bytes */
+    struct vdtu_ring ring;
+    vdtu_ring_init(&ring, ring_mem, slot_count, slot_size);
+
+    char payload[2048 - VDTU_HEADER_SIZE];
+    memset(payload, 0xAA, sizeof(payload));
+    (void)sz;
+
+    /* Warmup */
+    for (int i = 0; i < BENCH_WARMUP; i++) {
+        vdtu_ring_send(&ring, 0, 0, 0, 0, 0, 0, 0,
+                        payload, (uint16_t)sizeof(payload));
+        vdtu_ring_ack(&ring);  /* drain so ring doesn't fill */
+    }
+
+    /* Measure */
+    for (int i = 0; i < BENCH_ITERS; i++) {
+        uint64_t t0 = rdtsc();
+        vdtu_ring_send(&ring, 0, 0, 0, 0, 0, 0, 0,
+                        payload, (uint16_t)sizeof(payload));
+        uint64_t t1 = rdtsc();
+        bench_samples[i] = t1 - t0;
+        vdtu_ring_ack(&ring);
+    }
+    bench_report("ring_write");
+}
+
+/* --- Benchmark 2: ring_read --- */
+static void bench_ring_read(void)
+{
+    uint32_t slot_count = 4, slot_size = 2048;
+    static char ring_mem[64 + 4 * 2048];
+    struct vdtu_ring ring;
+    vdtu_ring_init(&ring, ring_mem, slot_count, slot_size);
+
+    char payload[2048 - VDTU_HEADER_SIZE];
+    memset(payload, 0xBB, sizeof(payload));
+
+    /* Warmup */
+    for (int i = 0; i < BENCH_WARMUP; i++) {
+        vdtu_ring_send(&ring, 0, 0, 0, 0, 0, 0, 0,
+                        payload, (uint16_t)sizeof(payload));
+        vdtu_ring_fetch(&ring);
+        vdtu_ring_ack(&ring);
+    }
+
+    /* Measure: pre-write, then time fetch+ack */
+    for (int i = 0; i < BENCH_ITERS; i++) {
+        vdtu_ring_send(&ring, 0, 0, 0, 0, 0, 0, 0,
+                        payload, (uint16_t)sizeof(payload));
+        uint64_t t0 = rdtsc();
+        vdtu_ring_fetch(&ring);
+        vdtu_ring_ack(&ring);
+        uint64_t t1 = rdtsc();
+        bench_samples[i] = t1 - t0;
+    }
+    bench_report("ring_read");
+}
+
+/* --- Benchmark 3: ring_roundtrip --- */
+static void bench_ring_roundtrip(void)
+{
+    uint32_t slot_count = 4, slot_size = 2048;
+    static char ring_mem[64 + 4 * 2048];
+    struct vdtu_ring ring;
+    vdtu_ring_init(&ring, ring_mem, slot_count, slot_size);
+
+    char payload[2048 - VDTU_HEADER_SIZE];
+    memset(payload, 0xCC, sizeof(payload));
+
+    /* Warmup */
+    for (int i = 0; i < BENCH_WARMUP; i++) {
+        vdtu_ring_send(&ring, 0, 0, 0, 0, 0, 0, 0,
+                        payload, (uint16_t)sizeof(payload));
+        while (vdtu_ring_is_empty(&ring)) {}
+        vdtu_ring_fetch(&ring);
+        vdtu_ring_ack(&ring);
+    }
+
+    /* Measure: write + poll detect + read */
+    for (int i = 0; i < BENCH_ITERS; i++) {
+        uint64_t t0 = rdtsc();
+        vdtu_ring_send(&ring, 0, 0, 0, 0, 0, 0, 0,
+                        payload, (uint16_t)sizeof(payload));
+        while (vdtu_ring_is_empty(&ring)) {}
+        vdtu_ring_fetch(&ring);
+        vdtu_ring_ack(&ring);
+        uint64_t t1 = rdtsc();
+        bench_samples[i] = t1 - t0;
+    }
+    bench_report("ring_roundtrip");
+}
+
+/* --- Benchmark 4: ep_configure --- */
+static void bench_ep_configure(void)
+{
+    /* Measure CAmkES RPC: config_recv + invalidate_ep cycle.
+     * Uses PE 2 (our PE), EP 15 (unused slot) to avoid conflicts. */
+
+    /* Warmup */
+    for (int i = 0; i < BENCH_WARMUP; i++) {
+        int ch = vdtu_config_recv(MY_PE, 15, 12, 9, 0);
+        if (ch >= 0) vdtu_invalidate_ep(MY_PE, 15);
+    }
+
+    /* Measure: time just the config_recv call */
+    for (int i = 0; i < BENCH_ITERS; i++) {
+        uint64_t t0 = rdtsc();
+        int ch = vdtu_config_recv(MY_PE, 15, 12, 9, 0);
+        uint64_t t1 = rdtsc();
+        bench_samples[i] = t1 - t0;
+        if (ch >= 0) vdtu_invalidate_ep(MY_PE, 15);
+    }
+    bench_report("ep_configure");
+}
+
+/* --- Benchmark 5: ep_terminate --- */
+static void bench_ep_terminate(void)
+{
+    /* Measure CAmkES RPC: terminate_ep.
+     * Setup: configure a recv EP, then terminate it repeatedly. */
+
+    /* Warmup */
+    for (int i = 0; i < BENCH_WARMUP; i++) {
+        int ch = vdtu_config_recv(MY_PE, 15, 12, 9, 0);
+        if (ch >= 0) {
+            vdtu_terminate_ep(MY_PE, 15);
+            vdtu_invalidate_ep(MY_PE, 15);
+        }
+    }
+
+    /* Measure */
+    for (int i = 0; i < BENCH_ITERS; i++) {
+        int ch = vdtu_config_recv(MY_PE, 15, 12, 9, 0);
+        uint64_t t0 = rdtsc();
+        vdtu_terminate_ep(MY_PE, 15);
+        uint64_t t1 = rdtsc();
+        bench_samples[i] = t1 - t0;
+        if (ch >= 0) vdtu_invalidate_ep(MY_PE, 15);
+    }
+    bench_report("ep_terminate");
+}
+
+/* --- Benchmark 6: mem_access --- */
+static void bench_mem_access(void)
+{
+    /* Measure memcpy through a memory dataport (memep_kv_0).
+     * This bypasses the kernel — VPE0 directly reads/writes the dataport,
+     * simulating the DTU memory EP path. */
+
+    volatile void *mem = (volatile void *)memep_kv_0;
+    char buf[256];
+    memset(buf, 0xDD, sizeof(buf));
+
+    /* Warmup */
+    for (int i = 0; i < BENCH_WARMUP; i++) {
+        memcpy((void *)mem, buf, sizeof(buf));
+        memcpy(buf, (const void *)mem, sizeof(buf));
+    }
+
+    /* Measure: write 256 bytes + read 256 bytes */
+    for (int i = 0; i < BENCH_ITERS; i++) {
+        uint64_t t0 = rdtsc();
+        memcpy((void *)mem, buf, sizeof(buf));
+        memcpy(buf, (const void *)mem, sizeof(buf));
+        uint64_t t1 = rdtsc();
+        bench_samples[i] = t1 - t0;
+    }
+    bench_report("mem_access");
+}
+
+static void bench_all(void)
+{
+    printf("[VPE0] Warmup: %d iterations, Measured: %d iterations\n",
+           BENCH_WARMUP, BENCH_ITERS);
+    printf("[VPE0] NOTE: us values assume %.1f GHz clock (QEMU qemu64 default)\n\n",
+           BENCH_GHZ);
+
+    bench_ring_write();
+    bench_ring_read();
+    bench_ring_roundtrip();
+    bench_ep_configure();
+    bench_ep_terminate();
+    bench_mem_access();
+
+    printf("\n[VPE0] Benchmarks complete.\n");
+}
+
 int run(void)
 {
     printf("[VPE0] Starting (PE %d, VPE ID %d)\n", MY_PE, MY_VPE_ID);
@@ -460,6 +702,334 @@ int run(void)
         }
     }
 
+    /* ==============================================================
+     * Test 10: EXCHANGE obtain — VPE0 obtains capability from VPE1
+     *
+     * This verifies the obtain path (reverse of delegate).
+     * Setup:
+     *   1. Create gate at VPE0 sel 60
+     *   2. Delegate VPE0:60 -> VPE1:70
+     *   3. Obtain from VPE1:70 -> VPE0:80
+     *   4. Verify obtain succeeded
+     *   5. Cleanup: revoke sel 60 (cascades to VPE1:70 and VPE0:80)
+     * ============================================================== */
+    {
+        int ok = 1;
+        /* Create gate at sel 60 */
+        err = send_creategate(60, 0xAAAA, 6, 16);
+        if (err != 0) {
+            printf("[VPE0]   Test 10 setup: CREATEGATE(60) failed: %d\n", err);
+            ok = 0;
+        }
+        if (ok) {
+            /* Delegate VPE0:60 -> VPE1:70 */
+            err = send_exchange(2, 60, 1, 70, 1, 0);
+            if (err != 0) {
+                printf("[VPE0]   Test 10: delegate(60->VPE1:70) failed: %d\n", err);
+                ok = 0;
+            }
+        }
+        if (ok) {
+            /* Obtain from VPE1:70 -> VPE0:80 */
+            err = send_exchange(2, 80, 1, 70, 1, 1);
+            if (err != 0) {
+                printf("[VPE0]   Test 10: obtain(VPE1:70->80) failed: %d\n", err);
+                ok = 0;
+            }
+        }
+        /* Cleanup: revoke root (sel 60) */
+        send_revoke(60);
+        if (ok) pass++; else fail++;
+        printf("[VPE0] Test 10 (EXCHANGE obtain from VPE1): %s\n", ok ? "PASS" : "FAIL");
+    }
+
+    /* ==============================================================
+     * Test 11: Chain revoke depth 10
+     *
+     * Creates a chain of 10 delegate operations from VPE0 to VPE1
+     * and back, then revokes the root. This exercises recursive
+     * revocation with the cooperative ThreadManager.
+     *
+     * Chain: sel 100 -> VPE1:110 -> VPE0:120 -> VPE1:130 -> ...
+     * (alternating delegate between VPE0 and VPE1)
+     *
+     * With single-kernel local revocation, wait_for() is not called
+     * (all children are local). This test validates the recursive
+     * revocation path and ThreadManager yield() during deep stacks.
+     * ============================================================== */
+    {
+        int ok = 1;
+        int depth = 10;
+
+        /* Create the root gate */
+        err = send_creategate(100, 0xCCAA, 7, 32);
+        if (err != 0) {
+            printf("[VPE0]   Test 11 setup: CREATEGATE(100) failed: %d\n", err);
+            ok = 0;
+        }
+
+        /* Build chain: alternate delegate from VPE0->VPE1 and VPE1->VPE0
+         * Since VPE0 can only issue syscalls (VPE1 is passive), we use
+         * the EXCHANGE syscall to delegate in both directions.
+         *
+         * Step i=0: delegate VPE0:100 -> VPE1:110 (own=100, other=110, obtain=false)
+         * Step i=1: obtain  VPE1:110 -> VPE0:120 (own=120, other=110, obtain=true)
+         * Step i=2: delegate VPE0:120 -> VPE1:130 ...
+         * etc. */
+        for (int i = 0; i < depth && ok; i++) {
+            uint32_t src_sel = (uint32_t)(100 + i * 10);
+            uint32_t dst_sel = (uint32_t)(100 + (i + 1) * 10);
+
+            if (i % 2 == 0) {
+                /* Delegate from VPE0 to VPE1 */
+                err = send_exchange(2, src_sel, 1, dst_sel, 1, 0);
+            } else {
+                /* Obtain from VPE1 to VPE0 */
+                err = send_exchange(2, dst_sel, 1, src_sel, 1, 1);
+            }
+            if (err != 0) {
+                printf("[VPE0]   Test 11: chain step %d failed: %d\n", i, err);
+                ok = 0;
+            }
+        }
+
+        /* Revoke root */
+        if (ok) {
+            err = send_revoke(100);
+            if (err != 0) {
+                printf("[VPE0]   Test 11: revoke root failed: %d\n", err);
+                ok = 0;
+            }
+        } else {
+            /* Cleanup even on failure */
+            send_revoke(100);
+        }
+
+        if (ok) pass++; else fail++;
+        printf("[VPE0] Test 11 (chain revoke depth %d): %s\n", depth, ok ? "PASS" : "FAIL");
+    }
+
     printf("[VPE0] === %d passed, %d failed ===\n", pass, fail);
+
+    /* ==============================================================
+     * Experiment 1: vDTU Primitive Latency Benchmarks
+     *
+     * Measures the six core vDTU primitives using x86 rdtsc.
+     * Results are in CPU cycles. us conversion assumes 2 GHz
+     * (QEMU default for qemu64 CPU model).
+     * ============================================================== */
+
+    printf("\n[VPE0] === Experiment 1: vDTU Primitive Latency ===\n");
+    bench_all();
+
+    /* ==============================================================
+     * Experiment 2A: Capability Operation Benchmarks (Local)
+     *
+     * Measures local exchange and revocation performance.
+     * Label: [BENCH-2A-LOCAL-UNVERIFIED]
+     *
+     * Paper comparison: Hille et al. 2019, gem5 2GHz
+     *   Local exchange:  3597 cycles / 1.8us
+     *   Local revoke:    1997 cycles / 1.0us
+     *   Chain d=100:     ~200K cycles / ~100us
+     * ============================================================== */
+    printf("\n[VPE0] === Experiment 2A: Capability Ops (Local, Unverified) ===\n");
+    printf("[VPE0] Warmup: %d iterations, Measured: %d iterations\n",
+           BENCH_WARMUP, BENCH_ITERS);
+    printf("[VPE0] NOTE: us values assume %.1f GHz clock (QEMU qemu64 default)\n\n",
+           BENCH_GHZ);
+
+    /* --- Bench 2A-1: local_exchange --- */
+    {
+        /* Measure: VPE0 obtains a capability from VPE1 (both local) */
+        /* Setup: create a gate at sel 200, delegate to VPE1:210 */
+        err = send_creategate(200, 0xBE00, 8, 32);
+        if (err != 0) {
+            printf("[BENCH-2A-LOCAL-UNVERIFIED] local_exchange: SETUP FAILED (err=%d)\n", err);
+        } else {
+            err = send_exchange(2, 200, 1, 210, 1, 0);
+            if (err != 0) {
+                printf("[BENCH-2A-LOCAL-UNVERIFIED] local_exchange: DELEGATE FAILED (err=%d)\n", err);
+            } else {
+                /* Warmup: obtain + revoke cycle */
+                for (int i = 0; i < BENCH_WARMUP; i++) {
+                    send_exchange(2, 220 + (i % 10), 1, 210, 1, 1);
+                    send_revoke(220 + (i % 10));
+                }
+                /* Measure: obtain from VPE1:210 into VPE0 at rotating selectors */
+                for (int i = 0; i < BENCH_ITERS; i++) {
+                    uint32_t sel = (uint32_t)(300 + (i % 100));
+                    uint64_t t0 = rdtsc();
+                    send_exchange(2, sel, 1, 210, 1, 1);
+                    uint64_t t1 = rdtsc();
+                    bench_samples[i] = t1 - t0;
+                    send_revoke(sel);
+                }
+                bench_report("local_exchange");
+                printf("[BENCH-2A-LOCAL-UNVERIFIED] local_exchange: collected\n");
+            }
+            send_revoke(200);
+        }
+    }
+
+    /* --- Bench 2A-2: local_revoke --- */
+    {
+        /* Measure: create a gate, delegate to VPE1, then revoke */
+        /* Warmup */
+        for (int i = 0; i < BENCH_WARMUP; i++) {
+            send_creategate(200, 0xBE00, 8, 32);
+            send_exchange(2, 200, 1, 210, 1, 0);
+            send_revoke(200);
+        }
+        /* Measure */
+        for (int i = 0; i < BENCH_ITERS; i++) {
+            send_creategate(200, 0xBE00, 8, 32);
+            send_exchange(2, 200, 1, 210, 1, 0);
+            uint64_t t0 = rdtsc();
+            send_revoke(200);
+            uint64_t t1 = rdtsc();
+            bench_samples[i] = t1 - t0;
+        }
+        bench_report("local_revoke");
+        printf("[BENCH-2A-LOCAL-UNVERIFIED] local_revoke: collected\n");
+    }
+
+    /* --- Bench 2A-3: chain_revoke_10 --- */
+    {
+        /* Build a chain of depth 10 (alternate delegate/obtain) and revoke root */
+        /* Warmup */
+        for (int w = 0; w < 100; w++) {
+            send_creategate(200, 0xBE00, 8, 32);
+            for (int d = 0; d < 10; d++) {
+                uint32_t s = (uint32_t)(200 + d * 10);
+                uint32_t ds = (uint32_t)(200 + (d + 1) * 10);
+                if (d % 2 == 0)
+                    send_exchange(2, s, 1, ds, 1, 0);
+                else
+                    send_exchange(2, ds, 1, s, 1, 1);
+            }
+            send_revoke(200);
+        }
+        /* Measure */
+        for (int i = 0; i < BENCH_ITERS; i++) {
+            send_creategate(200, 0xBE00, 8, 32);
+            for (int d = 0; d < 10; d++) {
+                uint32_t s = (uint32_t)(200 + d * 10);
+                uint32_t ds = (uint32_t)(200 + (d + 1) * 10);
+                if (d % 2 == 0)
+                    send_exchange(2, s, 1, ds, 1, 0);
+                else
+                    send_exchange(2, ds, 1, s, 1, 1);
+            }
+            uint64_t t0 = rdtsc();
+            send_revoke(200);
+            uint64_t t1 = rdtsc();
+            bench_samples[i] = t1 - t0;
+        }
+        bench_report("chain_revoke_10");
+        printf("[BENCH-2A-LOCAL-UNVERIFIED] chain_revoke_10: collected\n");
+    }
+
+    /* --- Bench 2A-4: chain_revoke_50 --- */
+    {
+        /* Warmup (fewer iterations for deep chains) */
+        for (int w = 0; w < 10; w++) {
+            send_creategate(200, 0xBE00, 8, 32);
+            for (int d = 0; d < 50; d++) {
+                uint32_t s = (uint32_t)(200 + d * 2);
+                uint32_t ds = (uint32_t)(200 + (d + 1) * 2);
+                if (d % 2 == 0)
+                    send_exchange(2, s, 1, ds, 1, 0);
+                else
+                    send_exchange(2, ds, 1, s, 1, 1);
+            }
+            send_revoke(200);
+        }
+        /* Measure (fewer iters for deep chains) */
+        int iters_50 = BENCH_ITERS < 1000 ? BENCH_ITERS : 1000;
+        for (int i = 0; i < iters_50; i++) {
+            send_creategate(200, 0xBE00, 8, 32);
+            for (int d = 0; d < 50; d++) {
+                uint32_t s = (uint32_t)(200 + d * 2);
+                uint32_t ds = (uint32_t)(200 + (d + 1) * 2);
+                if (d % 2 == 0)
+                    send_exchange(2, s, 1, ds, 1, 0);
+                else
+                    send_exchange(2, ds, 1, s, 1, 1);
+            }
+            uint64_t t0 = rdtsc();
+            send_revoke(200);
+            uint64_t t1 = rdtsc();
+            bench_samples[i] = t1 - t0;
+        }
+        /* Report with potentially fewer samples */
+        shell_sort_u64(bench_samples, iters_50);
+        {
+            uint64_t min = bench_samples[0];
+            uint64_t max = bench_samples[iters_50 - 1];
+            uint64_t med = bench_samples[iters_50 / 2];
+            uint64_t sum = 0;
+            for (int i = 0; i < iters_50; i++) sum += bench_samples[i];
+            uint64_t mean = sum / iters_50;
+            double med_us = (double)med / (BENCH_GHZ * 1000.0);
+            printf("[BENCH] %-18s min=%-6lu  med=%-6lu  mean=%-6lu  max=%-6lu  cycles  (%.1fus median) [%d iters]\n",
+                   "chain_revoke_50",
+                   (unsigned long)min, (unsigned long)med,
+                   (unsigned long)mean, (unsigned long)max, med_us, iters_50);
+        }
+        printf("[BENCH-2A-LOCAL-UNVERIFIED] chain_revoke_50: collected\n");
+    }
+
+    /* --- Bench 2A-5: chain_revoke_100 --- */
+    {
+        /* Warmup (very few for depth 100) */
+        for (int w = 0; w < 5; w++) {
+            send_creategate(200, 0xBE00, 8, 32);
+            for (int d = 0; d < 100; d++) {
+                uint32_t s = (uint32_t)(200 + d);
+                uint32_t ds = (uint32_t)(200 + d + 1);
+                if (d % 2 == 0)
+                    send_exchange(2, s, 1, ds, 1, 0);
+                else
+                    send_exchange(2, ds, 1, s, 1, 1);
+            }
+            send_revoke(200);
+        }
+        /* Measure */
+        int iters_100 = BENCH_ITERS < 500 ? BENCH_ITERS : 500;
+        for (int i = 0; i < iters_100; i++) {
+            send_creategate(200, 0xBE00, 8, 32);
+            for (int d = 0; d < 100; d++) {
+                uint32_t s = (uint32_t)(200 + d);
+                uint32_t ds = (uint32_t)(200 + d + 1);
+                if (d % 2 == 0)
+                    send_exchange(2, s, 1, ds, 1, 0);
+                else
+                    send_exchange(2, ds, 1, s, 1, 1);
+            }
+            uint64_t t0 = rdtsc();
+            send_revoke(200);
+            uint64_t t1 = rdtsc();
+            bench_samples[i] = t1 - t0;
+        }
+        shell_sort_u64(bench_samples, iters_100);
+        {
+            uint64_t min = bench_samples[0];
+            uint64_t max = bench_samples[iters_100 - 1];
+            uint64_t med = bench_samples[iters_100 / 2];
+            uint64_t sum = 0;
+            for (int i = 0; i < iters_100; i++) sum += bench_samples[i];
+            uint64_t mean = sum / iters_100;
+            double med_us = (double)med / (BENCH_GHZ * 1000.0);
+            printf("[BENCH] %-18s min=%-6lu  med=%-6lu  mean=%-6lu  max=%-6lu  cycles  (%.1fus median) [%d iters]\n",
+                   "chain_revoke_100",
+                   (unsigned long)min, (unsigned long)med,
+                   (unsigned long)mean, (unsigned long)max, med_us, iters_100);
+        }
+        printf("[BENCH-2A-LOCAL-UNVERIFIED] chain_revoke_100: collected\n");
+    }
+
+    printf("\n[VPE0] === Experiment 2A complete ===\n");
+
     return 0;
 }

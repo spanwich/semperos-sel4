@@ -134,6 +134,10 @@ static volatile int net_rings_attached = 0;
 #define NET_LABEL_PING  0x50494E47ULL  /* "PING" in ASCII */
 #define NET_LABEL_PONG  0x504F4E47ULL  /* "PONG" in ASCII */
 
+/* Dispatch inbound KRNLC messages to C++ KernelcallHandler (Task 08).
+ * Defined in WorkLoop.cc. */
+extern void dispatch_net_krnlc(const void *raw_msg, uint16_t len);
+
 static volatile int net_ping_sent = 0;
 static volatile int net_pong_sent = 0;
 static volatile int net_pong_received = 0;
@@ -195,7 +199,7 @@ void net_poll(void)
                (unsigned long)msg->hdr.label, msg->hdr.length, payload_str);
 
         if (msg->hdr.label == NET_LABEL_PING && !net_pong_sent) {
-            /* Received PING → send PONG back */
+            /* Received PING -> send PONG back */
             const char *pong = "PONG from kernel";
             vdtu_ring_send(&g_net_out_ring,
                            0, 0, 0, 0,
@@ -205,7 +209,12 @@ void net_poll(void)
             printf("[SemperKernel] NET: Sent PONG reply\n");
         } else if (msg->hdr.label == NET_LABEL_PONG) {
             net_pong_received = 1;
-            printf("[SemperKernel] NET: === PONG RECEIVED — round trip complete! ===\n");
+            printf("[SemperKernel] NET: === PONG RECEIVED -- round trip complete! ===\n");
+        } else {
+            /* Inter-kernel message (Task 08): dispatch to KernelcallHandler.
+             * The raw vdtu_message has the same layout as m3::DTU::Message. */
+            uint16_t total = VDTU_HEADER_SIZE + msg->hdr.length;
+            dispatch_net_krnlc((const void *)msg, total);
         }
 
         vdtu_ring_ack(&g_net_in_ring);

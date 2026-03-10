@@ -27,6 +27,7 @@ int vdtu_ring_init(struct vdtu_ring *ring, void *mem,
     ctrl->slot_count = slot_count;
     ctrl->slot_size  = slot_size;
     ctrl->slot_mask  = slot_count - 1;
+    ctrl->ep_state   = VDTU_EP_ACTIVE;
 
     ring->ctrl = ctrl;
     ring->slots = (uint8_t *)mem + VDTU_RING_CTRL_SIZE;
@@ -53,6 +54,10 @@ int vdtu_ring_send(struct vdtu_ring *ring,
 {
     if (!ring || !ring->ctrl)
         return -1;
+
+    /* Reject sends to terminated endpoints (reads still permitted for drain) */
+    if (ring->ctrl->ep_state == VDTU_EP_TERMINATED)
+        return -3;
 
     /* Check if payload fits in slot (slot must hold header + payload) */
     if ((size_t)VDTU_HEADER_SIZE + payload_len > ring->ctrl->slot_size)

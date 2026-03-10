@@ -28,6 +28,27 @@
 
 #if defined(__sel4__)
 extern "C" void net_poll(void);
+
+/*
+ * Dispatch a raw DTU message received from the network to the
+ * KernelcallHandler (Task 08). Called from net_poll() in camkes_entry.c
+ * when an inbound message is not a PING/PONG.
+ *
+ * The vdtu_message and m3::DTU::Message have identical packed header
+ * layouts (25 bytes), so we cast the raw bytes directly.
+ */
+extern "C" void dispatch_net_krnlc(const void *raw_msg, uint16_t len) {
+    if(len < 25) return;  /* minimum DTU header size */
+    const m3::DTU::Message *msg =
+        reinterpret_cast<const m3::DTU::Message *>(raw_msg);
+    kernel::KernelcallHandler &krnlch = kernel::KernelcallHandler::get();
+    kernel::GateIStream is(krnlch.rcvgate(0), msg);
+    /* Disable auto-ack: the inbound ring is acked separately by
+     * net_poll() via vdtu_ring_ack(). Letting GateIStream's destructor
+     * call mark_read() would ack the wrong (KRNLC) ring. */
+    is.claim();  /* sets _ack = false */
+    krnlch.handle_message(is, nullptr);
+}
 #endif
 
 #if defined(__host__)

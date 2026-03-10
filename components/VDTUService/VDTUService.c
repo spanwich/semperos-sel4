@@ -21,6 +21,24 @@
 #include <camkes.h>
 #include "vdtu_ring.h"
 
+/* Per-RPC success logging. Disabled by default for clean benchmarks —
+ * QEMU serial output adds ~1ms per printf call. Build with
+ * -DVDTU_VERBOSE_LOG to enable. */
+#ifdef VDTU_VERBOSE_LOG
+#define VDTU_LOG(...) printf(__VA_ARGS__)
+#else
+#define VDTU_LOG(...) ((void)0)
+#endif
+
+/* Stub until RaftLogCache is implemented — returns false (no blocked ancestors).
+ * This is safe: it means the enforcement chain is permissive (allows all),
+ * which matches current behavior. See docs/VERIFICATION-WIRING-SPEC.md. */
+static inline bool raft_cache_check_ancestry(uint64_t cap_id)
+{
+    (void)cap_id;
+    return false;
+}
+
 /*
  * =========================================================================
  *  Constants
@@ -171,6 +189,13 @@ int config_config_recv(int target_pe, int ep_id,
         return -1;
     }
 
+    /* Enforcement chain: check Raft cache for blocked ancestors (Lemma 1) */
+    if (raft_cache_check_ancestry((uint64_t)target_pe << 32 | (uint64_t)ep_id)) {
+        printf("[vDTU] EPERM: blocked ancestor for pe=%d ep=%d\n",
+               target_pe, ep_id);
+        return -1;
+    }
+
     struct ep_desc *ep = &endpoints[target_pe][ep_id];
     if (ep->type != EP_INVALID) {
         printf("[vDTU] ERROR: config_recv pe=%d ep=%d already configured (type=%d)\n",
@@ -204,10 +229,10 @@ int config_config_recv(int target_pe, int ep_id,
     ep->slot_size   = (int)slot_size;
     ep->flags       = flags;
 
-    printf("[vDTU] config_recv(pe=%d, ep=%d, buf_order=%d, msg_order=%d) "
-           "-> channel %d (%d slots x %dB)\n",
-           target_pe, ep_id, buf_order, msg_order,
-           ch, (int)slot_count, (int)slot_size);
+    VDTU_LOG("[vDTU] config_recv(pe=%d, ep=%d, buf_order=%d, msg_order=%d) "
+             "-> channel %d (%d slots x %dB)\n",
+             target_pe, ep_id, buf_order, msg_order,
+             ch, (int)slot_count, (int)slot_size);
 
     return ch;
 }
@@ -227,6 +252,13 @@ int config_config_send(int target_pe, int ep_id,
         dest_ep < 0 || dest_ep >= EP_PER_PE) {
         printf("[vDTU] ERROR: config_send invalid dest (pe=%d, ep=%d)\n",
                dest_pe, dest_ep);
+        return -1;
+    }
+
+    /* Enforcement chain: check Raft cache for blocked ancestors (Lemma 1) */
+    if (raft_cache_check_ancestry((uint64_t)target_pe << 32 | (uint64_t)ep_id)) {
+        printf("[vDTU] EPERM: blocked ancestor for pe=%d ep=%d\n",
+               target_pe, ep_id);
         return -1;
     }
 
@@ -256,9 +288,9 @@ int config_config_send(int target_pe, int ep_id,
     ep->label       = label;
     ep->credits     = credits;
 
-    printf("[vDTU] config_send(pe=%d, ep=%d, dest=%d:%d, label=0x%lx) -> channel %d\n",
-           target_pe, ep_id, dest_pe, dest_ep,
-           (unsigned long)label, ep->channel_idx);
+    VDTU_LOG("[vDTU] config_send(pe=%d, ep=%d, dest=%d:%d, label=0x%lx) -> channel %d\n",
+             target_pe, ep_id, dest_pe, dest_ep,
+             (unsigned long)label, ep->channel_idx);
 
     return ep->channel_idx;
 }
@@ -270,6 +302,13 @@ int config_config_mem(int target_pe, int ep_id,
     if (target_pe < 0 || target_pe >= MAX_PES ||
         ep_id < 0 || ep_id >= EP_PER_PE) {
         printf("[vDTU] ERROR: config_mem invalid params (pe=%d, ep=%d)\n",
+               target_pe, ep_id);
+        return -1;
+    }
+
+    /* Enforcement chain: check Raft cache for blocked ancestors (Lemma 1) */
+    if (raft_cache_check_ancestry((uint64_t)target_pe << 32 | (uint64_t)ep_id)) {
+        printf("[vDTU] EPERM: blocked ancestor for pe=%d ep=%d\n",
                target_pe, ep_id);
         return -1;
     }
@@ -293,10 +332,10 @@ int config_config_mem(int target_pe, int ep_id,
     ep->dest_vpe    = dest_vpe;
     ep->mem_perm    = perm;
 
-    printf("[vDTU] config_mem(pe=%d, ep=%d, dest_pe=%d, addr=0x%lx, size=0x%lx, perm=%d) "
-           "-> mem channel %d\n",
-           target_pe, ep_id, dest_pe,
-           (unsigned long)addr, (unsigned long)size, perm, ch);
+    VDTU_LOG("[vDTU] config_mem(pe=%d, ep=%d, dest_pe=%d, addr=0x%lx, size=0x%lx, perm=%d) "
+             "-> mem channel %d\n",
+             target_pe, ep_id, dest_pe,
+             (unsigned long)addr, (unsigned long)size, perm, ch);
 
     return ch;
 }
@@ -311,20 +350,20 @@ int config_invalidate_ep(int target_pe, int ep_id)
     struct ep_desc *ep = &endpoints[target_pe][ep_id];
 
     if (ep->type == EP_RECEIVE) {
-        printf("[vDTU] invalidate_ep(pe=%d, ep=%d) -> freed msg channel %d\n",
-               target_pe, ep_id, ep->channel_idx);
+        VDTU_LOG("[vDTU] invalidate_ep(pe=%d, ep=%d) -> freed msg channel %d\n",
+                 target_pe, ep_id, ep->channel_idx);
         free_msg_channel(ep->channel_idx);
     } else if (ep->type == EP_MEMORY) {
-        printf("[vDTU] invalidate_ep(pe=%d, ep=%d) -> freed mem channel %d\n",
-               target_pe, ep_id, ep->channel_idx);
+        VDTU_LOG("[vDTU] invalidate_ep(pe=%d, ep=%d) -> freed mem channel %d\n",
+                 target_pe, ep_id, ep->channel_idx);
         free_mem_channel(ep->channel_idx);
     } else if (ep->type == EP_SEND) {
-        printf("[vDTU] invalidate_ep(pe=%d, ep=%d) -> cleared send EP\n",
-               target_pe, ep_id);
+        VDTU_LOG("[vDTU] invalidate_ep(pe=%d, ep=%d) -> cleared send EP\n",
+                 target_pe, ep_id);
         /* Send EP doesn't own the channel - just clear the entry */
     } else {
-        printf("[vDTU] invalidate_ep(pe=%d, ep=%d) -> already invalid\n",
-               target_pe, ep_id);
+        VDTU_LOG("[vDTU] invalidate_ep(pe=%d, ep=%d) -> already invalid\n",
+                 target_pe, ep_id);
     }
 
     memset(ep, 0, sizeof(*ep));
@@ -333,9 +372,32 @@ int config_invalidate_ep(int target_pe, int ep_id)
     return 0;
 }
 
+int config_terminate_ep(int target_pe, int ep_id)
+{
+    if (target_pe < 0 || target_pe >= MAX_PES ||
+        ep_id < 0 || ep_id >= EP_PER_PE) {
+        return -1;
+    }
+
+    struct ep_desc *ep = &endpoints[target_pe][ep_id];
+    if (ep->type == EP_INVALID) {
+        printf("[vDTU] ERROR: terminate_ep(pe=%d, ep=%d) not configured\n",
+               target_pe, ep_id);
+        return -1;
+    }
+
+    int ch = ep->channel_idx;
+    VDTU_LOG("[vDTU] terminate_ep(pe=%d, ep=%d, type=%d) -> channel %d\n",
+             target_pe, ep_id, ep->type, ch);
+
+    /* Return channel index so caller can set ep_state in ring ctrl.
+     * VDTUService is control-plane-only: no dataport access. */
+    return ch;
+}
+
 int config_invalidate_eps(int target_pe, int first_ep)
 {
-    printf("[vDTU] invalidate_eps(pe=%d, first_ep=%d)\n", target_pe, first_ep);
+    VDTU_LOG("[vDTU] invalidate_eps(pe=%d, first_ep=%d)\n", target_pe, first_ep);
 
     if (target_pe < 0 || target_pe >= MAX_PES ||
         first_ep < 0 || first_ep >= EP_PER_PE) {
@@ -350,7 +412,7 @@ int config_invalidate_eps(int target_pe, int first_ep)
 
 int config_set_vpe_id(int target_pe, int vpe_id)
 {
-    printf("[vDTU] set_vpe_id(pe=%d, vpe_id=%d)\n", target_pe, vpe_id);
+    VDTU_LOG("[vDTU] set_vpe_id(pe=%d, vpe_id=%d)\n", target_pe, vpe_id);
 
     if (target_pe < 0 || target_pe >= MAX_PES)
         return -1;
@@ -361,7 +423,7 @@ int config_set_vpe_id(int target_pe, int vpe_id)
 
 int config_set_privilege(int target_pe, int priv)
 {
-    printf("[vDTU] set_privilege(pe=%d, priv=%d)\n", target_pe, priv);
+    VDTU_LOG("[vDTU] set_privilege(pe=%d, priv=%d)\n", target_pe, priv);
 
     if (target_pe < 0 || target_pe >= MAX_PES)
         return -1;
@@ -372,7 +434,7 @@ int config_set_privilege(int target_pe, int priv)
 
 int config_wakeup_pe(int target_pe)
 {
-    printf("[vDTU] wakeup_pe(pe=%d)\n", target_pe);
+    VDTU_LOG("[vDTU] wakeup_pe(pe=%d)\n", target_pe);
 
     if (target_pe < 0 || target_pe >= MAX_PES)
         return -1;

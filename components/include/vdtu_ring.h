@@ -88,6 +88,9 @@ struct __attribute__((packed)) vdtu_message {
 /* Credits */
 #define VDTU_CREDITS_UNLIM      0xFFFF
 
+/* EP lifecycle states — verified implementation (from proofs/extracted/) */
+#include "vdtu_ep_state.h"
+
 /*
  * --------------------------------------------------------------------------
  *  Ring Buffer Control Structure
@@ -111,7 +114,10 @@ struct vdtu_ring_ctrl {
     uint32_t slot_size;             /* bytes per slot (power of 2)      */
     uint32_t slot_mask;             /* slot_count - 1 (for wrapping)    */
 
-    uint8_t  _pad[VDTU_RING_CTRL_SIZE - 5 * sizeof(uint32_t)];
+    /* EP lifecycle (set by control plane, checked by data plane) */
+    volatile uint32_t ep_state;     /* VDTU_EP_UNCONFIGURED .. TERMINATED */
+
+    uint8_t  _pad[VDTU_RING_CTRL_SIZE - 6 * sizeof(uint32_t)];
 };
 
 /* Compile-time check that control is exactly 64 bytes */

@@ -28,6 +28,7 @@ extern "C" {
 #include "Coordinator.h"
 #include "WorkLoop.h"
 #include "mem/MainMemory.h"
+#include <thread/ThreadManager.h>
 
 using namespace kernel;
 
@@ -134,6 +135,33 @@ static VPE *create_vpe1(VPE *vpe0)
 /* Network ring buffer init (07e) — defined in camkes_entry.c */
 extern "C" void net_init_rings(void);
 
+/*
+ * Worker thread for cooperative multithreading (Task 09).
+ *
+ * When the main kernel thread blocks in ThreadManager::wait_for()
+ * (e.g., waiting for remote revocation responses), control transfers
+ * to this worker thread. The worker runs the WorkLoop so incoming
+ * messages continue to be processed. When the blocking thread is
+ * notified (via ThreadManager::notify), the next yield() switches
+ * back to it.
+ *
+ * We create NUM_WORKER_THREADS workers at startup so that nested
+ * blocking (e.g., main blocks, worker handles a message that also
+ * blocks) has a sleeping thread to switch to. Two workers is
+ * sufficient for the current prototype (one active, one sleeping).
+ */
+#define NUM_WORKER_THREADS 2
+
+static kernel::WorkLoop *g_kworkloop = nullptr;
+
+static void worker_thread_func(void *) {
+    /* Run the WorkLoop. Each iteration polls SYSC + KRNLC endpoints,
+     * processes one message, runs net_poll, then yields. When the
+     * main thread is woken, yield() in the WorkLoop switches to it. */
+    if (g_kworkloop)
+        g_kworkloop->run();
+}
+
 extern "C" void kernel_start(void) {
     printf("[SemperKernel] Starting SemperOS kernel on seL4/CAmkES\n");
     printf("[SemperKernel] Platform: %zu PEs, kernel PE=%zu, kernel ID=%u\n",
@@ -148,6 +176,15 @@ extern "C" void kernel_start(void) {
 
     PEManager::create();
     printf("[SemperKernel] PEManager created\n");
+
+    /* Create worker threads for cooperative blocking (Task 09).
+     * Must be created BEFORE the WorkLoop starts so wait_for() has
+     * sleeping threads to switch to. */
+    for (int i = 0; i < NUM_WORKER_THREADS; i++) {
+        new m3::Thread(worker_thread_func, nullptr);
+    }
+    printf("[SemperKernel] Created %d worker threads (thread count: %zu)\n",
+           NUM_WORKER_THREADS, m3::ThreadManager::get().thread_count());
 
     /* Create and start VPE0 */
     VPE *vpe0 = create_vpe0();
@@ -170,6 +207,7 @@ extern "C" void kernel_start(void) {
 
     /* Enter the real kernel WorkLoop */
     static kernel::WorkLoop kworkloop;
+    g_kworkloop = &kworkloop;
     kworkloop.add(nullptr, false);
     kworkloop.run();
 

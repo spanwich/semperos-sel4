@@ -155,7 +155,15 @@ components/SemperKernel/
 components/DTUBridge/DTUBridge.c      <- E1000 + lwIP UDP (771 lines)
 components/DTUBridge/e1000_hw.h       <- Intel 82540EM register definitions
 components/DTUBridge/lwipopts.h       <- lwIP configuration (UDP-only, NO_SYS=1)
-components/VPE0/VPE0.c               <- 9-test harness
+components/VPE0/VPE0.c               <- 11-test harness + Exp 1 + Exp 2A benchmarks
+proofs/                               <- formal verification (F*/Low*)
+proofs/AncestryWalk.fst               <- Lemma 1: ancestry walk correctness
+proofs/EpState.fst                    <- Lemma 2: ep_state model
+proofs/EpState.Low.fst                <- Lemma 2: Low* extraction
+proofs/EnforcementChain.fst           <- Composition theorem
+proofs/extracted/vdtu_ep_state.h      <- Verified C header (from Low*)
+proofs/Makefile                       <- make verify / make extract
+docs/VERIFICATION-WIRING-SPEC.md      <- Wiring spec for C integration
 tests/                                <- standalone ring tests (host)
 docker/                               <- dual-QEMU orchestration
 docker/docker-compose.yml             <- dual-node services (node-a, node-b)
@@ -188,13 +196,22 @@ TASK07-REPORT.md                      <- cross-node communication report
 | Component | Evidence |
 |---|---|
 | SPSC ring buffer (vdtu_ring.c) | 10/10 standalone tests pass |
-| VDTUService: config_send/recv/mem, invalidate_ep, wakeup_pe | 9/9 on-target tests |
-| SemperOS arch/sel4/ DTU backend (DTU.cc, 591 lines) | All control plane ops |
+| VDTUService: config_send/recv/mem, invalidate_ep, terminate_ep, wakeup_pe | 9/9 on-target tests |
+| ep_state in vdtu_ring_ctrl (shared lifecycle field) | vdtu_ring_send returns -3 on TERMINATED |
+| DTU.cc write_mem/read_mem via memory channel dataports | Bounded memcpy through config_mem EP |
+| SemperOS arch/sel4/ DTU backend (DTU.cc, ~620 lines) | All control + data plane ops |
+| Experiment 1 benchmark harness (6 primitives, rdtsc) | Collected 2026-03-06, see results below |
 | WorkLoop + SyscallHandler (19 opcodes) | Fully dispatched |
 | CapTable: CREATEGATE, EXCHANGE, REVOKE | Cross-VPE tested |
 | Cross-node transport (DTUBridge: E1000 + lwIP UDP) | PING/PONG verified |
 | CAmkES build system (x86_64/pc99, Docker/QEMU) | Builds and runs |
 | ThreadManager (local ops, single-kernel) | Syscall roundtrips work |
+| Kernelcalls::connect() — inter-kernel channel setup | Network dispatch via dispatch_net_krnlc(), 11/11 on-target |
+| ThreadManager::wait_for() — cooperative multithreading | Real thread_save/resume/init with x86_64 asm, 2 worker threads |
+| Verified vDTU enforcement chain (proofs/) | 4/4 F* modules verified, C header extracted via KaRaMeL |
+| AncestryWalk.fst — Raft cache ancestry walk | Termination + completeness + soundness proven |
+| EpState.fst + EpState.Low.fst — ep_state safety | Absorbing + send-error + termination-gated proven, Low* extracted |
+| EnforcementChain.fst — composition theorem | blocked ancestor => EPERM proven end-to-end |
 
 ### Task History
 
@@ -211,22 +228,72 @@ TASK07-REPORT.md                      <- cross-node communication report
   - ~~07c: E1000 driver~~ — PCI detect, DMA, HW init, link up, TX/RX
   - ~~07d: lwIP UDP~~ — hello exchange between nodes
   - ~~07e: NetBridge~~ — SPSC ring buffers (net_outbound/net_inbound) + PING/PONG demo
+- ~~Experiment 1: vDTU Primitive Latency~~ (done — ep_state, write_mem/read_mem, 6 benchmarks in VPE0)
+- ~~Task 08: Kernelcalls::connect()~~ (done — dispatch_net_krnlc in WorkLoop.cc, net_poll dispatch in camkes_entry.c)
+- ~~Task 09: ThreadManager::wait_for()~~ (done — x86_64 context switching, worker threads, 11/11 tests)
+- ~~F* verification (Contribution 2 infrastructure)~~ (done — 4 modules, Low* extraction, wiring spec)
 
 ### Incomplete — Priority Order
 
 | Task | ID | Priority | Notes |
 |---|---|---|---|
-| Kernelcalls::connect() — inter-kernel channel setup | Task 08 | P1 | Stub at Kernelcalls.cc:321-328 |
-| ThreadManager::wait_for() — multi-kernel blocking | Task 09 | P1 | Stub; silent early-return bug |
-| ep_state in vdtu_ring_ctrl struct | — | P2 | Move from DTU.cc local to shared struct |
-| DTU.cc write_mem/read_mem — kernel memory EP path | — | P2 | Empty stubs at DTU.cc:403-413 |
+| ~~Kernelcalls::connect() — inter-kernel channel setup~~ | Task 08 | ~~P1~~ | Done — dispatch_net_krnlc + net_poll dispatch |
+| ~~ThreadManager::wait_for() — multi-kernel blocking~~ | Task 09 | ~~P1~~ | Done — x86_64 cooperative context switching |
+| KLOG bench-mode gating + Exp 2A re-run | Task 10 | P1 | Blocks paper Table 3; KLOG serial overhead ~8000x |
+| ~~ep_state in vdtu_ring_ctrl struct~~ | Exp1 | ~~P2~~ | Done — volatile uint32_t in ring ctrl |
+| ~~DTU.cc write_mem/read_mem — kernel memory EP path~~ | Exp1 | ~~P2~~ | Done — bounded memcpy via mem channel |
 | Privilege enforcement on config RPCs | — | P2 | pe_privileged[] stored, never checked |
 | m3fs as CAmkES VPE component | — | P2 | Needed for application benchmarks |
 | Application VPE components (tar, find, SQLite, PostMark) | — | P2 | One component each |
-| EverParse 3D spec extension (Contribution 2) | — | P3 | Extend HTTP gateway validator |
-| RaftLogCache (hash table, C-callable) | — | P3 | For vDTU enforcement point |
+| EverParse 3D spec extension (Contribution 2) | — | P3 | proofs/ infrastructure done; extend HTTP gateway validator to cover DTU message format |
+| RaftLogCache (hash table, C-callable) | — | P3 | For vDTU enforcement point; wiring spec at docs/VERIFICATION-WIRING-SPEC.md |
 | RaftPD CAmkES component | — | P4 | Leader election + log replication |
 | Two-tier revocation in SemperKernel (Contribution 3) | — | P4 | revoke_spanning(), TERMINATE/ACK |
+
+---
+
+## Experiment 1 Results (collected 2026-03-06)
+
+QEMU q35, single-node Docker, 2 GHz assumed clock. 1000 warmup + 10000 measured iterations.
+VDTUService success-path logging disabled (`VDTU_VERBOSE_LOG` not defined).
+
+```
+[BENCH] ring_write         min=2706     med=2814     mean=2919     max=64480    cycles  (1.4us median)
+[BENCH] ring_read          min=234      med=254      mean=266      max=30298    cycles  (0.1us median)
+[BENCH] ring_roundtrip     min=2900     med=3046     mean=3207     max=193798   cycles  (1.5us median)
+[BENCH] ep_configure       min=47146    med=49686    mean=51604    max=1153970  cycles  (24.8us median)
+[BENCH] ep_terminate       min=46146    med=48940    mean=50420    max=258398   cycles  (24.5us median)
+[BENCH] mem_access         min=326      med=346      mean=392      max=232290   cycles  (0.2us median)
+```
+
+Note: Ring benchmarks use malloc'd buffer (not CAmkES dataport) due to 4 KiB
+dataport size limitation (see open question 3 in TASK-EXP1-REPORT.md). RPC
+benchmarks (ep_configure, ep_terminate) use real CAmkES seL4RPCCall path.
+To re-enable per-RPC logging for debugging, build with `-DVDTU_VERBOSE_LOG`.
+
+---
+
+## Experiment 2A Results — PRELIMINARY (logging overhead not yet removed)
+
+Collected 2026-03-10. QEMU q35, single-node Docker, 2 GHz assumed clock.
+**WARNING: These numbers are inflated by ~8000x due to KLOG() macros on the
+syscall hot path writing to QEMU serial on every iteration.**
+
+```
+local_exchange:  ~29.9M cycles / ~15.0ms median (inflated by KLOG serial I/O)
+local_revoke:    ~30.0M cycles / ~15.0ms median (inflated by KLOG serial I/O)
+chain_revoke_10/50/100: timed out (iteration cost ~15ms × 11K iters)
+```
+
+Root cause: KLOG() macros on syscall hot path (SyscallHandler.cc, CapTable.cc)
+perform synchronous QEMU serial writes on every capability operation iteration.
+Same class of problem as Exp 1 ep_configure inflation (1002µs → 24.8µs after
+VDTU_VERBOSE_LOG gating). Fix pending: Task 10 (KLOG bench-mode gating).
+
+gem5 comparison targets (Hille et al. 2019):
+- Local exchange: 3597 cycles / 1.8µs
+- Local revoke: 1997 cycles / 1.0µs
+- Chain d=100: ~200K cycles / ~100µs
 
 ---
 
@@ -256,14 +323,14 @@ override does NOT propagate to the generated config header. Fix:
 
 ## Known Limitations
 
-- **No SemperOS inter-kernel protocol** — PING/PONG demo sends test messages. Kernelcalls::connect(), distributed revocation, and cross-kernel OBTAIN/DELEGATE are not implemented. These need ThreadManager (setjmp/longjmp blocking) and gate routing tables.
+- **Inter-kernel protocol partial** — Kernelcalls::connect() dispatch path is wired (Task 08), ThreadManager cooperative threading works (Task 09), but distributed revocation and cross-kernel OBTAIN/DELEGATE are not yet exercised end-to-end. Requires dual-node testing.
 - **Same binary, both nodes** — Node identity derived at runtime from MAC last octet. Both kernels have ID 0, same PE layout (0-3). True multi-kernel needs disjoint PE ranges.
 - **PING/PONG is kernel-level** — not VPE-initiated. Test 9 in VPE0 only verifies local NOOP + remote routing entry; actual cross-node traffic is in net_poll().
 - **Legacy dataports retained** — `dtu_out`/`dtu_in` (8 KiB each) and `DTUNetIPC` RPC still wired but unused by the ring buffer path. Could be removed to save 2 seL4SharedData + 1 seL4RPCCall.
 - **Polling, not interrupt-driven** — DTUBridge polls outbound ring, kernel polls inbound ring, both with seL4_Yield(). Fine for single-core QEMU; needs notification wakeup for multi-core.
 - **1 SYSC_GATE configured** (not 6) to save channel budget. Sufficient for dual-VPE prototype.
 - **128 KiB kernel stack** — cross-VPE revocation call depth exceeds 64 KiB. Set via `kernel0._stack_size = 131072`.
-- **No memory EPs** — `write_mem`/`read_mem` are stubs (DTU.cc:403-413).
+- **cmpxchg_mem stub** — `cmpxchg_mem()` is still unimplemented (not used in current prototype).
 - **VPE1 is passive** — no shared data channels, doesn't send/receive messages. Only its CapTable is used.
 
 ---

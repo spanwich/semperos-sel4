@@ -94,6 +94,18 @@ procedure VDTUConfig {
     int invalidate_eps(in int target_pe, in int first_ep);
 
     /*
+     * Terminate an endpoint (prevent further sends, allow drain).
+     *
+     * After termination, vdtu_ring_send() returns -3 for this endpoint.
+     * Reads are still permitted so the consumer can drain queued messages.
+     *
+     * @param target_pe   PE whose endpoint to terminate
+     * @param ep_id       Endpoint index to terminate
+     * @return            channel index on success, -1 on error
+     */
+    int terminate_ep(in int target_pe, in int ep_id);
+
+    /*
      * Set the VPE ID on a target PE's DTU.
      *
      * Maps to: kernel::DTU::set_vpeid() / unset_vpeid()
