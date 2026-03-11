@@ -42,7 +42,10 @@ Platform::KEnv::KEnv() {
     pes[3] = m3::PEDesc((static_cast<m3::PEDesc::value_t>(3) << 54) |
              static_cast<m3::PEDesc::value_t>(m3::PEType::COMP_IMEM));
 
-    kernelId = 0;
+#ifndef SEMPER_KERNEL_ID
+#define SEMPER_KERNEL_ID 0
+#endif
+    kernelId = SEMPER_KERNEL_ID;
     creatorKernelId = 0;
     creatorCore = 0;
     creatorThread = -1;

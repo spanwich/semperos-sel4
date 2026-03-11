@@ -47,6 +47,12 @@ if(SEMPEROS_NO_NETWORK)
     set(SEMPEROS_NO_NET_FLAG "-DSEMPEROS_NO_NETWORK")
 endif()
 
+# Node identity (compile-time constants per image)
+set(KERNEL_ID "0" CACHE STRING "Kernel identity (0, 1, 2)")
+set(SELF_IP "192.168.100.10" CACHE STRING "This node's IP address")
+set(PEER_IP_0 "192.168.100.11" CACHE STRING "First peer IP address")
+set(PEER_IP_1 "192.168.100.12" CACHE STRING "Second peer IP address")
+
 # =========================================================================
 #  VDTUService Component
 # =========================================================================
@@ -121,6 +127,7 @@ DeclareCAmkESComponent(SemperKernel
     CXX_FLAGS
         -std=c++11 -fno-exceptions -fno-rtti -fno-threadsafe-statics
         -D__sel4__
+        -DSEMPER_KERNEL_ID=${KERNEL_ID}
         ${SEMPER_BENCH_FLAG}
         ${SEMPEROS_NO_NET_FLAG}
     LINKER_LANGUAGE
@@ -204,6 +211,10 @@ DeclareCAmkESComponent(DTUBridge
         ${projects_dir}/util_libs/liblwip/include/lwip
     C_FLAGS
         -DNODE_ID=${NODE_ID}
+        -DKERNEL_ID=${KERNEL_ID}
+        -DDTUB_SELF_IP=\"${SELF_IP}\"
+        -DDTUB_PEER_IP_0=\"${PEER_IP_0}\"
+        -DDTUB_PEER_IP_1=\"${PEER_IP_1}\"
 )
 
 endif(NOT SEMPEROS_NO_NETWORK)

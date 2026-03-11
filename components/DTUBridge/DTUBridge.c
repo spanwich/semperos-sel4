@@ -47,15 +47,38 @@
 /* Hello exchange UDP port */
 #define HELLO_UDP_PORT 5000
 
-/* Network: IP derived from MAC at runtime (last octet of MAC = last octet of IP) */
-#define IP_PREFIX_A 10
-#define IP_PREFIX_B 0
-#define IP_PREFIX_C 0
+/*
+ * Network identity — compile-time constants from cmake.
+ * DTUB_SELF_IP, DTUB_PEER_IP_0, DTUB_PEER_IP_1 are string literals
+ * like "192.168.100.10", passed via -D flags.
+ */
+#ifndef DTUB_SELF_IP
+#define DTUB_SELF_IP    "10.0.0.1"
+#endif
+#ifndef DTUB_PEER_IP_0
+#define DTUB_PEER_IP_0  "10.0.0.2"
+#endif
+#ifndef DTUB_PEER_IP_1
+#define DTUB_PEER_IP_1  "10.0.0.3"
+#endif
+#ifndef KERNEL_ID
+#define KERNEL_ID 0
+#endif
 
-/* Runtime node identity — derived from MAC address after e1000 init */
-static uint8_t my_node_id = 0;    /* 0 or 1 */
-static uint8_t my_ip_last = 1;    /* last octet: 1 or 2 */
-static uint8_t peer_ip_last = 2;  /* peer's last octet */
+#define NUM_PEERS 2
+
+static ip4_addr_t self_ip_addr;
+static ip4_addr_t peer_addrs[NUM_PEERS];
+static uint8_t my_node_id = 0;
+
+/* Parse "A.B.C.D" into an ip4_addr_t. Returns 0 on success. */
+static int parse_ip4(const char *s, ip4_addr_t *out)
+{
+    unsigned a, b, c, d;
+    if (sscanf(s, "%u.%u.%u.%u", &a, &b, &c, &d) != 4) return -1;
+    IP4_ADDR(out, a, b, c, d);
+    return 0;
+}
 
 /* Frame MTU */
 #define FRAME_MTU 1536
@@ -469,24 +492,23 @@ static void hello_udp_recv_cb(void *arg, struct udp_pcb *pcb,
 static void send_hello(void)
 {
     char msg[64];
-    int len = snprintf(msg, sizeof(msg), "HELLO FROM NODE %u (10.0.0.%u)",
-                       my_node_id, my_ip_last);
+    int len = snprintf(msg, sizeof(msg), "HELLO FROM NODE %u (%s)",
+                       my_node_id, DTUB_SELF_IP);
 
-    struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (uint16_t)len, PBUF_RAM);
-    if (!p) {
-        printf("[%s] Failed to alloc hello pbuf\n", COMPONENT_NAME);
-        return;
+    for (int i = 0; i < NUM_PEERS; i++) {
+        struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (uint16_t)len, PBUF_RAM);
+        if (!p) continue;
+        memcpy(p->payload, msg, len);
+
+        ip_addr_t dest;
+        ip_addr_copy_from_ip4(dest, peer_addrs[i]);
+
+        err_t err = udp_sendto(g_hello_pcb, p, &dest, HELLO_UDP_PORT);
+        pbuf_free(p);
+
+        printf("[%s] HELLO TX to peer %d:%u: \"%s\" (err=%d)\n",
+               COMPONENT_NAME, i, HELLO_UDP_PORT, msg, err);
     }
-    memcpy(p->payload, msg, len);
-
-    ip_addr_t dest;
-    IP4_ADDR(ip_2_ip4(&dest), IP_PREFIX_A, IP_PREFIX_B, IP_PREFIX_C, peer_ip_last);
-
-    err_t err = udp_sendto(g_hello_pcb, p, &dest, HELLO_UDP_PORT);
-    pbuf_free(p);
-
-    printf("[%s] HELLO TX to 10.0.0.%u:%u: \"%s\" (err=%d)\n",
-           COMPONENT_NAME, peer_ip_last, HELLO_UDP_PORT, msg, err);
 }
 
 /*
@@ -543,6 +565,10 @@ static void dtu_udp_recv_cb(void *arg, struct udp_pcb *pcb,
 int net_net_send(int dest_node, int msg_len)
 {
     if (msg_len <= 0 || msg_len > 1400) return -1;
+    if (dest_node < 0 || dest_node >= NUM_PEERS) {
+        printf("[%s] Invalid dest_node %d\n", COMPONENT_NAME, dest_node);
+        return -1;
+    }
 
     const uint8_t *msg_bytes = (const uint8_t *)dtu_out;
 
@@ -553,8 +579,7 @@ int net_net_send(int dest_node, int msg_len)
     memcpy(p->payload, msg_bytes, msg_len);
 
     ip_addr_t dest_ip;
-    IP4_ADDR(ip_2_ip4(&dest_ip), IP_PREFIX_A, IP_PREFIX_B, IP_PREFIX_C,
-             (dest_node == 0) ? 1 : 2);
+    ip_addr_copy_from_ip4(dest_ip, peer_addrs[dest_node]);
 
     err_t err = udp_sendto(g_udp_pcb, p, &dest_ip, DTU_UDP_PORT);
     pbuf_free(p);
@@ -564,7 +589,7 @@ int net_net_send(int dest_node, int msg_len)
         return -1;
     }
 
-    printf("[%s] TX DTU msg to node %d (%d bytes)\n",
+    printf("[%s] TX DTU msg to peer %d (%d bytes)\n",
            COMPONENT_NAME, dest_node, msg_len);
     return 0;
 }
@@ -632,31 +657,27 @@ void post_init(void)
         return;
     }
 
-    /* Derive node identity from MAC address.
-     * QEMU sets MAC via -device e1000,...,mac=52:54:00:00:00:XX
-     * Node A: mac[5]=0x01 → IP 10.0.0.1, node_id=0
-     * Node B: mac[5]=0x02 → IP 10.0.0.2, node_id=1 */
-    my_ip_last = g_drv.mac_addr[5];        /* 1 or 2 */
-    my_node_id = my_ip_last - 1;           /* 0 or 1 */
-    peer_ip_last = (my_ip_last == 1) ? 2 : 1;
+    /* Node identity from compile-time constants */
+    my_node_id = KERNEL_ID;
+    parse_ip4(DTUB_SELF_IP, &self_ip_addr);
+    parse_ip4(DTUB_PEER_IP_0, &peer_addrs[0]);
+    parse_ip4(DTUB_PEER_IP_1, &peer_addrs[1]);
 
-    printf("[%s] Node %u (MAC ...:%02x → IP 10.0.0.%u, peer 10.0.0.%u)\n",
-           COMPONENT_NAME, my_node_id, g_drv.mac_addr[5],
-           my_ip_last, peer_ip_last);
+    printf("[%s] Node %u (self=%s, peer0=%s, peer1=%s)\n",
+           COMPONENT_NAME, my_node_id, DTUB_SELF_IP, DTUB_PEER_IP_0, DTUB_PEER_IP_1);
 
     /* lwIP init */
     lwip_init();
 
-    ip4_addr_t ipaddr, netmask, gw;
-    IP4_ADDR(&ipaddr, IP_PREFIX_A, IP_PREFIX_B, IP_PREFIX_C, my_ip_last);
+    ip4_addr_t netmask, gw;
     IP4_ADDR(&netmask, 255, 255, 255, 0);
     IP4_ADDR(&gw, 0, 0, 0, 0);
 
-    netif_add(&g_netif, &ipaddr, &netmask, &gw, NULL, e1000_netif_init, ethernet_input);
+    netif_add(&g_netif, &self_ip_addr, &netmask, &gw, NULL, e1000_netif_init, ethernet_input);
     netif_set_default(&g_netif);
     netif_set_up(&g_netif);
 
-    printf("[%s] lwIP UP: 10.0.0.%u/24\n", COMPONENT_NAME, my_ip_last);
+    printf("[%s] lwIP UP: %s/24\n", COMPONENT_NAME, DTUB_SELF_IP);
 
     /* UDP PCB for DTU transport (port 7654) */
     g_udp_pcb = udp_new();
@@ -733,7 +754,10 @@ int run(void)
             }
         }
 
-        /* Poll outbound ring: kernel → network (07e) */
+        /* Poll outbound ring: kernel → network (07e)
+         * Route to peer 0 by default. For now, the kernel's ring messages
+         * are PING/PONG or inter-kernel calls targeting the first peer.
+         * Multi-peer routing (by dest PE in the DTU header) is future work. */
         if (net_rings_ready && !vdtu_ring_is_empty(&g_net_out_ring)) {
             const struct vdtu_message *outmsg = vdtu_ring_fetch(&g_net_out_ring);
             if (outmsg) {
@@ -742,10 +766,10 @@ int run(void)
                 if (p) {
                     memcpy(p->payload, outmsg, total_len);
                     ip_addr_t dest_ip;
-                    IP4_ADDR(ip_2_ip4(&dest_ip), IP_PREFIX_A, IP_PREFIX_B, IP_PREFIX_C, peer_ip_last);
+                    ip_addr_copy_from_ip4(dest_ip, peer_addrs[0]);
                     err_t err = udp_sendto(g_udp_pcb, p, &dest_ip, DTU_UDP_PORT);
                     pbuf_free(p);
-                    printf("[%s] NET TX ring: %u bytes to peer (label=0x%lx, err=%d)\n",
+                    printf("[%s] NET TX ring: %u bytes to peer 0 (label=0x%lx, err=%d)\n",
                            COMPONENT_NAME, total_len,
                            (unsigned long)outmsg->hdr.label, err);
                 }
