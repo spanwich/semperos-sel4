@@ -100,11 +100,12 @@ static int parse_ip4(const char *s, ip4_addr_t *out)
 #define E1000_VENDOR_ID     0x8086
 #define E1000_DEVICE_ID     0x100E  /* 82540EM */
 
-#define E1000_PCI_BUS       0
-#define E1000_PCI_DEV       2
-#define E1000_PCI_FUN       0
-
 #define E1000_BAR0_ADDR     0xfeb80000
+
+/* Discovered PCI slot — filled in by e1000_pci_scan() */
+static uint8_t e1000_pci_bus = 0;
+static uint8_t e1000_pci_dev = 0;
+static uint8_t e1000_pci_fun = 0;
 
 static uint32_t pci_cfg_read32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t offset)
 {
@@ -139,30 +140,39 @@ static void pci_cfg_write16(uint8_t bus, uint8_t dev, uint8_t func, uint8_t offs
 
 static int e1000_pci_init(void)
 {
-    printf("[%s] Initializing PCI for e1000...\n", COMPONENT_NAME);
+    printf("[%s] Scanning PCI bus 0 for 82540EM (8086:100E)...\n", COMPONENT_NAME);
 
-    uint16_t vendor = pci_cfg_read16(E1000_PCI_BUS, E1000_PCI_DEV, E1000_PCI_FUN, PCI_VENDOR_ID);
-    uint16_t device = pci_cfg_read16(E1000_PCI_BUS, E1000_PCI_DEV, E1000_PCI_FUN, PCI_DEVICE_ID);
+    int found = 0;
+    for (int slot = 0; slot < 32 && !found; slot++) {
+        uint16_t vendor = pci_cfg_read16(0, (uint8_t)slot, 0, PCI_VENDOR_ID);
+        if (vendor == 0xFFFF) continue;
+        uint16_t device = pci_cfg_read16(0, (uint8_t)slot, 0, PCI_DEVICE_ID);
+        printf("[%s] PCI 0:%d.0: vendor=0x%04x device=0x%04x\n",
+               COMPONENT_NAME, slot, vendor, device);
+        if (vendor == E1000_VENDOR_ID && device == E1000_DEVICE_ID) {
+            printf("[%s] Found 82540EM at PCI 0:%d.0\n", COMPONENT_NAME, slot);
+            e1000_pci_bus = 0;
+            e1000_pci_dev = (uint8_t)slot;
+            e1000_pci_fun = 0;
+            found = 1;
+        }
+    }
 
-    printf("[%s] PCI %d:%d.%d: vendor=0x%04x device=0x%04x\n",
-           COMPONENT_NAME, E1000_PCI_BUS, E1000_PCI_DEV, E1000_PCI_FUN, vendor, device);
-
-    if (vendor != E1000_VENDOR_ID || device != E1000_DEVICE_ID) {
-        printf("[%s] ERROR: Expected 82540EM (8086:100E), got %04x:%04x\n",
-               COMPONENT_NAME, vendor, device);
+    if (!found) {
+        printf("[%s] ERROR: No 82540EM found on PCI bus 0\n", COMPONENT_NAME);
         return -1;
     }
 
-    uint32_t bar0 = pci_cfg_read32(E1000_PCI_BUS, E1000_PCI_DEV, E1000_PCI_FUN, PCI_BAR0);
+    uint32_t bar0 = pci_cfg_read32(e1000_pci_bus, e1000_pci_dev, e1000_pci_fun, PCI_BAR0);
     if ((bar0 & ~0xF) == 0 || bar0 == 0xFFFFFFFF) {
-        pci_cfg_write32(E1000_PCI_BUS, E1000_PCI_DEV, E1000_PCI_FUN, PCI_BAR0, E1000_BAR0_ADDR);
+        pci_cfg_write32(e1000_pci_bus, e1000_pci_dev, e1000_pci_fun, PCI_BAR0, E1000_BAR0_ADDR);
     }
 
-    uint16_t cmd = pci_cfg_read16(E1000_PCI_BUS, E1000_PCI_DEV, E1000_PCI_FUN, PCI_COMMAND);
+    uint16_t cmd = pci_cfg_read16(e1000_pci_bus, e1000_pci_dev, e1000_pci_fun, PCI_COMMAND);
     cmd |= PCI_CMD_MEM_SPACE | PCI_CMD_BUS_MASTER;
-    pci_cfg_write16(E1000_PCI_BUS, E1000_PCI_DEV, E1000_PCI_FUN, PCI_COMMAND, cmd);
+    pci_cfg_write16(e1000_pci_bus, e1000_pci_dev, e1000_pci_fun, PCI_COMMAND, cmd);
 
-    printf("[%s] PCI initialized\n", COMPONENT_NAME);
+    printf("[%s] PCI initialized (0:%d.0)\n", COMPONENT_NAME, e1000_pci_dev);
     return 0;
 }
 
