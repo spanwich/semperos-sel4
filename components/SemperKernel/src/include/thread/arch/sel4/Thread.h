@@ -27,7 +27,7 @@ struct Regs {
 };
 
 enum {
-    T_STACK_WORDS = 4096   /* 32 KiB -- worker threads run full WorkLoop dispatch */
+    T_STACK_WORDS = 16384  /* 128 KiB -- worker threads run full WorkLoop dispatch including revoke_rec (32 KiB frame) */
 };
 
 void thread_init(_thread_func func, void *arg, Regs *regs, word_t *stack);

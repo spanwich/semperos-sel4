@@ -144,7 +144,8 @@ int CapTable::revoke_rec(Capability *c, mht_key_t origin, m3::CapRngDesc::Type t
         mht_key_t capIDs[MAX_BATCH_CAPIDS];
         uint count;
     };
-    RemoteBatch batches[KernelcallHandler::KRNLC_SLOTS];
+    static RemoteBatch batches[KernelcallHandler::KRNLC_SLOTS];
+    memset(batches, 0, sizeof(batches));
     uint numBatches = 0;
 
     // Helper lambda to flush a single batch (send its accumulated capIDs)

@@ -952,25 +952,13 @@ int run(void)
             ok = 0;
         }
 
-        /* Build chain: alternate delegate from VPE0->VPE1 and VPE1->VPE0
-         * Since VPE0 can only issue syscalls (VPE1 is passive), we use
-         * the EXCHANGE syscall to delegate in both directions.
-         *
-         * Step i=0: delegate VPE0:100 -> VPE1:110 (own=100, other=110, obtain=false)
-         * Step i=1: obtain  VPE1:110 -> VPE0:120 (own=120, other=110, obtain=true)
-         * Step i=2: delegate VPE0:120 -> VPE1:130 ...
-         * etc. */
+        /* Build chain via self-exchange (tcap=0, delegate) within VPE0.
+         * Each step clones the previous tip: 100→110→120→...→200.
+         * Self-exchange creates proper parent-child links in one CapTable. */
         for (int i = 0; i < depth && ok; i++) {
             uint32_t src_sel = (uint32_t)(100 + i * 10);
             uint32_t dst_sel = (uint32_t)(100 + (i + 1) * 10);
-
-            if (i % 2 == 0) {
-                /* Delegate from VPE0 to VPE1 */
-                err = send_exchange(2, src_sel, 1, dst_sel, 1, 0);
-            } else {
-                /* Obtain from VPE1 to VPE0 */
-                err = send_exchange(2, dst_sel, 1, src_sel, 1, 1);
-            }
+            err = send_exchange(0, src_sel, 1, dst_sel, 1, 0);
             if (err != 0) {
                 printf("[VPE0]   Test 11: chain step %d failed: %d\n", i, err);
                 ok = 0;
@@ -1081,139 +1069,166 @@ int run(void)
 
     /* --- Bench 2A-3: chain_revoke_10 --- */
     {
-        /* Build a chain of depth 10 (alternate delegate/obtain) and revoke root */
+        /* Build a chain of depth 10 via self-exchange (tcap=0, delegate).
+         * Each step clones the previous tip into a new selector within VPE0's
+         * CapTable, creating a parent-child chain: 200→210→220→...→300.
+         * revoke_rec walks the chain recursively regardless of VPE ownership. */
+        int chain_ok = 1;
         /* Warmup */
-        for (int w = 0; w < BENCH_CHAIN_WARMUP; w++) {
+        for (int w = 0; w < BENCH_CHAIN_WARMUP && chain_ok; w++) {
             send_creategate(200, 0xBE00, 8, 32);
             for (int d = 0; d < 10; d++) {
                 uint32_t s = (uint32_t)(200 + d * 10);
                 uint32_t ds = (uint32_t)(200 + (d + 1) * 10);
-                if (d % 2 == 0)
-                    send_exchange(2, s, 1, ds, 1, 0);
-                else
-                    send_exchange(2, ds, 1, s, 1, 1);
+                err = send_exchange(0, s, 1, ds, 1, 0);
+                if (err != 0) {
+                    printf("[VPE0] chain_revoke_10 warmup FAILED at d=%d err=%d\n", d, err);
+                    chain_ok = 0; break;
+                }
             }
             send_revoke(200);
         }
         /* Measure: kernel-measured revoke cycles */
-        for (int i = 0; i < BENCH_CHAIN_ITERS; i++) {
+        for (int i = 0; i < BENCH_CHAIN_ITERS && chain_ok; i++) {
             send_creategate(200, 0xBE00, 8, 32);
             for (int d = 0; d < 10; d++) {
                 uint32_t s = (uint32_t)(200 + d * 10);
                 uint32_t ds = (uint32_t)(200 + (d + 1) * 10);
-                if (d % 2 == 0)
-                    send_exchange(2, s, 1, ds, 1, 0);
-                else
-                    send_exchange(2, ds, 1, s, 1, 1);
+                err = send_exchange(0, s, 1, ds, 1, 0);
+                if (err != 0) {
+                    printf("[VPE0] chain_revoke_10 build FAILED at i=%d d=%d err=%d\n", i, d, err);
+                    chain_ok = 0; break;
+                }
             }
+            if (!chain_ok) { send_revoke(200); break; }
             uint64_t kcycles = 0;
             send_revoke_ex(200, &kcycles);
             bench_samples[i] = kcycles;
         }
-        bench_report_n("chain_revoke_10_kernel", BENCH_CHAIN_ITERS);
-        printf("[BENCH-2A-LOCAL-UNVERIFIED] chain_revoke_10_kernel: collected\n");
+        if (chain_ok) {
+            bench_report_n("chain_revoke_10_kernel", BENCH_CHAIN_ITERS);
+            printf("[BENCH-2A-LOCAL-UNVERIFIED] chain_revoke_10_kernel: collected\n");
+        }
     }
 
     /* --- Bench 2A-4: chain_revoke_25 --- */
     {
+        int chain_ok = 1;
         /* Warmup */
-        for (int w = 0; w < BENCH_CHAIN_WARMUP; w++) {
+        for (int w = 0; w < BENCH_CHAIN_WARMUP && chain_ok; w++) {
             send_creategate(200, 0xBE00, 8, 32);
             for (int d = 0; d < 25; d++) {
                 uint32_t s = (uint32_t)(200 + d * 4);
                 uint32_t ds = (uint32_t)(200 + (d + 1) * 4);
-                if (d % 2 == 0)
-                    send_exchange(2, s, 1, ds, 1, 0);
-                else
-                    send_exchange(2, ds, 1, s, 1, 1);
+                err = send_exchange(0, s, 1, ds, 1, 0);
+                if (err != 0) {
+                    printf("[VPE0] chain_revoke_25 warmup FAILED at d=%d err=%d\n", d, err);
+                    chain_ok = 0; break;
+                }
             }
             send_revoke(200);
         }
-        /* Measure: kernel-measured revoke cycles */
-        for (int i = 0; i < BENCH_CHAIN_ITERS; i++) {
+        /* Measure */
+        for (int i = 0; i < BENCH_CHAIN_ITERS && chain_ok; i++) {
             send_creategate(200, 0xBE00, 8, 32);
             for (int d = 0; d < 25; d++) {
                 uint32_t s = (uint32_t)(200 + d * 4);
                 uint32_t ds = (uint32_t)(200 + (d + 1) * 4);
-                if (d % 2 == 0)
-                    send_exchange(2, s, 1, ds, 1, 0);
-                else
-                    send_exchange(2, ds, 1, s, 1, 1);
+                err = send_exchange(0, s, 1, ds, 1, 0);
+                if (err != 0) {
+                    printf("[VPE0] chain_revoke_25 build FAILED at i=%d d=%d err=%d\n", i, d, err);
+                    chain_ok = 0; break;
+                }
             }
+            if (!chain_ok) { send_revoke(200); break; }
             uint64_t kcycles = 0;
             send_revoke_ex(200, &kcycles);
             bench_samples[i] = kcycles;
         }
-        bench_report_n("chain_revoke_25_kernel", BENCH_CHAIN_ITERS);
-        printf("[BENCH-2A-LOCAL-UNVERIFIED] chain_revoke_25_kernel: collected\n");
+        if (chain_ok) {
+            bench_report_n("chain_revoke_25_kernel", BENCH_CHAIN_ITERS);
+            printf("[BENCH-2A-LOCAL-UNVERIFIED] chain_revoke_25_kernel: collected\n");
+        }
     }
 
     /* --- Bench 2A-5: chain_revoke_50 --- */
     {
+        int chain_ok = 1;
         /* Warmup */
-        for (int w = 0; w < BENCH_CHAIN_WARMUP; w++) {
+        for (int w = 0; w < BENCH_CHAIN_WARMUP && chain_ok; w++) {
             send_creategate(200, 0xBE00, 8, 32);
             for (int d = 0; d < 50; d++) {
                 uint32_t s = (uint32_t)(200 + d * 2);
                 uint32_t ds = (uint32_t)(200 + (d + 1) * 2);
-                if (d % 2 == 0)
-                    send_exchange(2, s, 1, ds, 1, 0);
-                else
-                    send_exchange(2, ds, 1, s, 1, 1);
+                err = send_exchange(0, s, 1, ds, 1, 0);
+                if (err != 0) {
+                    printf("[VPE0] chain_revoke_50 warmup FAILED at d=%d err=%d\n", d, err);
+                    chain_ok = 0; break;
+                }
             }
             send_revoke(200);
         }
-        /* Measure: kernel-measured revoke cycles */
-        for (int i = 0; i < BENCH_CHAIN_ITERS; i++) {
+        /* Measure */
+        for (int i = 0; i < BENCH_CHAIN_ITERS && chain_ok; i++) {
             send_creategate(200, 0xBE00, 8, 32);
             for (int d = 0; d < 50; d++) {
                 uint32_t s = (uint32_t)(200 + d * 2);
                 uint32_t ds = (uint32_t)(200 + (d + 1) * 2);
-                if (d % 2 == 0)
-                    send_exchange(2, s, 1, ds, 1, 0);
-                else
-                    send_exchange(2, ds, 1, s, 1, 1);
+                err = send_exchange(0, s, 1, ds, 1, 0);
+                if (err != 0) {
+                    printf("[VPE0] chain_revoke_50 build FAILED at i=%d d=%d err=%d\n", i, d, err);
+                    chain_ok = 0; break;
+                }
             }
+            if (!chain_ok) { send_revoke(200); break; }
             uint64_t kcycles = 0;
             send_revoke_ex(200, &kcycles);
             bench_samples[i] = kcycles;
         }
-        bench_report_n("chain_revoke_50_kernel", BENCH_CHAIN_ITERS);
-        printf("[BENCH-2A-LOCAL-UNVERIFIED] chain_revoke_50_kernel: collected\n");
+        if (chain_ok) {
+            bench_report_n("chain_revoke_50_kernel", BENCH_CHAIN_ITERS);
+            printf("[BENCH-2A-LOCAL-UNVERIFIED] chain_revoke_50_kernel: collected\n");
+        }
     }
 
     /* --- Bench 2A-6: chain_revoke_100 --- */
     {
+        int chain_ok = 1;
         /* Warmup */
-        for (int w = 0; w < BENCH_CHAIN_WARMUP; w++) {
+        for (int w = 0; w < BENCH_CHAIN_WARMUP && chain_ok; w++) {
             send_creategate(200, 0xBE00, 8, 32);
             for (int d = 0; d < 100; d++) {
                 uint32_t s = (uint32_t)(200 + d);
                 uint32_t ds = (uint32_t)(200 + d + 1);
-                if (d % 2 == 0)
-                    send_exchange(2, s, 1, ds, 1, 0);
-                else
-                    send_exchange(2, ds, 1, s, 1, 1);
+                err = send_exchange(0, s, 1, ds, 1, 0);
+                if (err != 0) {
+                    printf("[VPE0] chain_revoke_100 warmup FAILED at d=%d err=%d\n", d, err);
+                    chain_ok = 0; break;
+                }
             }
             send_revoke(200);
         }
-        /* Measure: kernel-measured revoke cycles */
-        for (int i = 0; i < BENCH_CHAIN_ITERS; i++) {
+        /* Measure */
+        for (int i = 0; i < BENCH_CHAIN_ITERS && chain_ok; i++) {
             send_creategate(200, 0xBE00, 8, 32);
             for (int d = 0; d < 100; d++) {
                 uint32_t s = (uint32_t)(200 + d);
                 uint32_t ds = (uint32_t)(200 + d + 1);
-                if (d % 2 == 0)
-                    send_exchange(2, s, 1, ds, 1, 0);
-                else
-                    send_exchange(2, ds, 1, s, 1, 1);
+                err = send_exchange(0, s, 1, ds, 1, 0);
+                if (err != 0) {
+                    printf("[VPE0] chain_revoke_100 build FAILED at i=%d d=%d err=%d\n", i, d, err);
+                    chain_ok = 0; break;
+                }
             }
+            if (!chain_ok) { send_revoke(200); break; }
             uint64_t kcycles = 0;
             send_revoke_ex(200, &kcycles);
             bench_samples[i] = kcycles;
         }
-        bench_report_n("chain_revoke_100_kernel", BENCH_CHAIN_ITERS);
-        printf("[BENCH-2A-LOCAL-UNVERIFIED] chain_revoke_100_kernel: collected\n");
+        if (chain_ok) {
+            bench_report_n("chain_revoke_100_kernel", BENCH_CHAIN_ITERS);
+            printf("[BENCH-2A-LOCAL-UNVERIFIED] chain_revoke_100_kernel: collected\n");
+        }
     }
 
     printf("\n[VPE0] === Experiment 2A complete ===\n");
