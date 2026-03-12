@@ -585,8 +585,14 @@ void SyscallHandler::exchange(GateIStream &is) {
 
     VPE *t1 = obtain ? vpecap->vpe : vpe;
     VPE *t2 = obtain ? vpe : vpecap->vpe;
+    CAP_BENCH_TRACE_X_S(KERNEL_EXC_SYSC_RCV);
     m3::Errors::Code res = do_exchange(t1, t2, own, other, obtain);
+    CAP_BENCH_TRACE_X_F(KERNEL_EXC_SYSC_RESP);
+#ifdef SEMPER_BENCH_MODE
+    reply_vmsg(is, res, _cap_bench_cycles);
+#else
     reply_vmsg(is, res);
+#endif
 }
 
 void SyscallHandler::vpectrl(GateIStream &is) {
@@ -1062,7 +1068,11 @@ void SyscallHandler::revoke(GateIStream &is) {
         SYS_ERROR(vpe, is, res, "Revoke failed");
 
     CAP_BENCH_TRACE_X_F(KERNEL_REV_SYSC_RESP);
+#ifdef SEMPER_BENCH_MODE
+    reply_vmsg(is, m3::Errors::NO_ERROR, _cap_bench_cycles);
+#else
     reply_vmsg(is, m3::Errors::NO_ERROR);
+#endif
 }
 
 void SyscallHandler::exit(GateIStream &is) {

@@ -62,12 +62,16 @@ static void init_channel_table(void)
 /*
  * Wait for a reply on any recv channel (skip channel 0 = kernel's recv EP).
  * Returns the error code from the reply, or -1 on timeout.
+ * If out_cycles is non-NULL and the reply contains a second word (kernel-measured
+ * cap_op_cycles from SEMPER_BENCH_MODE), it is written to *out_cycles.
  */
-static int wait_for_reply(void)
+static int wait_for_reply_ex(uint64_t *out_cycles)
 {
     int timeout = 100000000;
     const struct vdtu_message *reply = NULL;
     struct vdtu_ring *ring = NULL;
+
+    if (out_cycles) *out_cycles = 0;
 
     while (timeout-- > 0) {
         for (int ch = 1; ch < VDTU_MSG_CHANNELS; ch++) {
@@ -92,15 +96,25 @@ static int wait_for_reply(void)
     if (reply->hdr.length >= sizeof(uint64_t)) {
         result = (int)(*(const uint64_t *)reply->data);
     }
+    /* Second word: kernel-measured cycles (present when SEMPER_BENCH_MODE is on) */
+    if (out_cycles && reply->hdr.length >= 2 * sizeof(uint64_t)) {
+        *out_cycles = *(const uint64_t *)(reply->data + sizeof(uint64_t));
+    }
     vdtu_ring_ack(ring);
     return result;
+}
+
+static int wait_for_reply(void)
+{
+    return wait_for_reply_ex(NULL);
 }
 
 /*
  * Send a syscall with the given payload and wait for reply.
  * Returns the error code from the kernel's reply.
+ * If out_cycles is non-NULL, the kernel-measured cycle count is stored there.
  */
-static int send_syscall(const void *payload, uint16_t payload_len)
+static int send_syscall_ex(const void *payload, uint16_t payload_len, uint64_t *out_cycles)
 {
     struct vdtu_ring *ring = vdtu_channels_get_ring(&channels, send_chan);
     if (!ring) return -1;
@@ -112,7 +126,12 @@ static int send_syscall(const void *payload, uint16_t payload_len)
                             payload, payload_len);
     if (rc != 0) return -1;
 
-    return wait_for_reply();
+    return wait_for_reply_ex(out_cycles);
+}
+
+static int send_syscall(const void *payload, uint16_t payload_len)
+{
+    return send_syscall_ex(payload, payload_len, NULL);
 }
 
 /* Send a NOOP syscall. Returns 0 on success. */
@@ -244,6 +263,61 @@ static int send_exchange(uint64_t tcap, uint32_t own_start, uint32_t own_count,
     payload.obtain      = obtain ? 1 : 0;
 
     return send_syscall(&payload, sizeof(payload));
+}
+
+/* Benchmark variants that return kernel-measured cycles */
+static int send_exchange_ex(uint64_t tcap, uint32_t own_start, uint32_t own_count,
+                             uint32_t other_start, uint32_t other_count, int obtain,
+                             uint64_t *out_cycles)
+{
+    struct {
+        uint64_t opcode;
+        uint64_t tcap;
+        uint32_t own_type;
+        uint32_t own_start;
+        uint32_t own_count;
+        uint32_t _pad1;
+        uint32_t other_type;
+        uint32_t other_start;
+        uint32_t other_count;
+        uint32_t _pad2;
+        uint64_t obtain;
+    } __attribute__((packed)) payload;
+
+    payload.opcode      = SYSCALL_EXCHANGE;
+    payload.tcap        = tcap;
+    payload.own_type    = CAP_TYPE_OBJ;
+    payload.own_start   = own_start;
+    payload.own_count   = own_count;
+    payload._pad1       = 0;
+    payload.other_type  = CAP_TYPE_OBJ;
+    payload.other_start = other_start;
+    payload.other_count = other_count;
+    payload._pad2       = 0;
+    payload.obtain      = obtain ? 1 : 0;
+
+    return send_syscall_ex(&payload, sizeof(payload), out_cycles);
+}
+
+static int send_revoke_ex(uint64_t cap_sel, uint64_t *out_cycles)
+{
+    struct {
+        uint64_t opcode;
+        uint32_t crd_type;
+        uint32_t crd_start;
+        uint32_t crd_count;
+        uint32_t _pad;
+        uint64_t own;
+    } __attribute__((packed)) payload;
+
+    payload.opcode    = SYSCALL_REVOKE;
+    payload.crd_type  = CAP_TYPE_OBJ;
+    payload.crd_start = (uint32_t)cap_sel;
+    payload.crd_count = 1;
+    payload._pad      = 0;
+    payload.own        = 1;
+
+    return send_syscall_ex(&payload, sizeof(payload), out_cycles);
 }
 
 /* ==============================================================
@@ -968,17 +1042,17 @@ int run(void)
                     send_exchange(2, 220 + (i % 10), 1, 210, 1, 1);
                     send_revoke(220 + (i % 10));
                 }
-                /* Measure: obtain from VPE1:210 into VPE0 at rotating selectors */
+                /* Measure: obtain from VPE1:210 into VPE0 at rotating selectors.
+                 * Use kernel-measured cycles (via _cap_bench_cycles in reply). */
                 for (int i = 0; i < BENCH_CAP_ITERS; i++) {
                     uint32_t sel = (uint32_t)(300 + (i % 100));
-                    uint64_t t0 = rdtsc();
-                    send_exchange(2, sel, 1, 210, 1, 1);
-                    uint64_t t1 = rdtsc();
-                    bench_samples[i] = t1 - t0;
+                    uint64_t kcycles = 0;
+                    send_exchange_ex(2, sel, 1, 210, 1, 1, &kcycles);
+                    bench_samples[i] = kcycles;
                     send_revoke(sel);
                 }
-                bench_report_n("local_exchange", BENCH_CAP_ITERS);
-                printf("[BENCH-2A-LOCAL-UNVERIFIED] local_exchange: collected\n");
+                bench_report_n("local_exchange_kernel", BENCH_CAP_ITERS);
+                printf("[BENCH-2A-LOCAL-UNVERIFIED] local_exchange_kernel: collected\n");
             }
             send_revoke(200);
         }
@@ -993,17 +1067,16 @@ int run(void)
             send_exchange(2, 200, 1, 210, 1, 0);
             send_revoke(200);
         }
-        /* Measure */
+        /* Measure: kernel-measured revoke cycles */
         for (int i = 0; i < BENCH_CAP_ITERS; i++) {
             send_creategate(200, 0xBE00, 8, 32);
             send_exchange(2, 200, 1, 210, 1, 0);
-            uint64_t t0 = rdtsc();
-            send_revoke(200);
-            uint64_t t1 = rdtsc();
-            bench_samples[i] = t1 - t0;
+            uint64_t kcycles = 0;
+            send_revoke_ex(200, &kcycles);
+            bench_samples[i] = kcycles;
         }
-        bench_report_n("local_revoke", BENCH_CAP_ITERS);
-        printf("[BENCH-2A-LOCAL-UNVERIFIED] local_revoke: collected\n");
+        bench_report_n("local_revoke_kernel", BENCH_CAP_ITERS);
+        printf("[BENCH-2A-LOCAL-UNVERIFIED] local_revoke_kernel: collected\n");
     }
 
     /* --- Bench 2A-3: chain_revoke_10 --- */

@@ -97,6 +97,7 @@ DeclareCAmkESComponent(SemperKernel
         ${SK_KERNEL}/KernelcallHandler.cc
         ${SK_KERNEL}/Kernelcalls.cc
         ${SK_KERNEL}/Coordinator.cc
+        ${SK_KERNEL}/capbench.cc
         # Capability system
         ${SK_KERNEL}/cap/CapTable.cc
         ${SK_KERNEL}/cap/Capability.cc

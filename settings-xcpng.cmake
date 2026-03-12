@@ -23,3 +23,6 @@ set(SEMPEROS_NO_NETWORK ON CACHE BOOL "Disable DTUBridge network code paths" FOR
 
 # Clean benchmark measurements (no hot-path KLOG evaluation)
 set(SEMPER_BENCH_MODE ON CACHE BOOL "Disable verbose hot-path kernel logging for benchmarking" FORCE)
+
+# Enable seL4 TSC-based thread utilisation counters (for future Option F work)
+set(KernelBenchmarks "generic" CACHE STRING "" FORCE)
