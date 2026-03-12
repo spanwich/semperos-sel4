@@ -1095,7 +1095,7 @@ int run(void)
             }
             send_revoke(200);
         }
-        /* Measure */
+        /* Measure: kernel-measured revoke cycles */
         for (int i = 0; i < BENCH_CHAIN_ITERS; i++) {
             send_creategate(200, 0xBE00, 8, 32);
             for (int d = 0; d < 10; d++) {
@@ -1106,16 +1106,49 @@ int run(void)
                 else
                     send_exchange(2, ds, 1, s, 1, 1);
             }
-            uint64_t t0 = rdtsc();
-            send_revoke(200);
-            uint64_t t1 = rdtsc();
-            bench_samples[i] = t1 - t0;
+            uint64_t kcycles = 0;
+            send_revoke_ex(200, &kcycles);
+            bench_samples[i] = kcycles;
         }
-        bench_report_n("chain_revoke_10", BENCH_CHAIN_ITERS);
-        printf("[BENCH-2A-LOCAL-UNVERIFIED] chain_revoke_10: collected\n");
+        bench_report_n("chain_revoke_10_kernel", BENCH_CHAIN_ITERS);
+        printf("[BENCH-2A-LOCAL-UNVERIFIED] chain_revoke_10_kernel: collected\n");
     }
 
-    /* --- Bench 2A-4: chain_revoke_50 --- */
+    /* --- Bench 2A-4: chain_revoke_25 --- */
+    {
+        /* Warmup */
+        for (int w = 0; w < BENCH_CHAIN_WARMUP; w++) {
+            send_creategate(200, 0xBE00, 8, 32);
+            for (int d = 0; d < 25; d++) {
+                uint32_t s = (uint32_t)(200 + d * 4);
+                uint32_t ds = (uint32_t)(200 + (d + 1) * 4);
+                if (d % 2 == 0)
+                    send_exchange(2, s, 1, ds, 1, 0);
+                else
+                    send_exchange(2, ds, 1, s, 1, 1);
+            }
+            send_revoke(200);
+        }
+        /* Measure: kernel-measured revoke cycles */
+        for (int i = 0; i < BENCH_CHAIN_ITERS; i++) {
+            send_creategate(200, 0xBE00, 8, 32);
+            for (int d = 0; d < 25; d++) {
+                uint32_t s = (uint32_t)(200 + d * 4);
+                uint32_t ds = (uint32_t)(200 + (d + 1) * 4);
+                if (d % 2 == 0)
+                    send_exchange(2, s, 1, ds, 1, 0);
+                else
+                    send_exchange(2, ds, 1, s, 1, 1);
+            }
+            uint64_t kcycles = 0;
+            send_revoke_ex(200, &kcycles);
+            bench_samples[i] = kcycles;
+        }
+        bench_report_n("chain_revoke_25_kernel", BENCH_CHAIN_ITERS);
+        printf("[BENCH-2A-LOCAL-UNVERIFIED] chain_revoke_25_kernel: collected\n");
+    }
+
+    /* --- Bench 2A-5: chain_revoke_50 --- */
     {
         /* Warmup */
         for (int w = 0; w < BENCH_CHAIN_WARMUP; w++) {
@@ -1130,9 +1163,8 @@ int run(void)
             }
             send_revoke(200);
         }
-        /* Measure */
-        int iters_50 = BENCH_CHAIN_ITERS;
-        for (int i = 0; i < iters_50; i++) {
+        /* Measure: kernel-measured revoke cycles */
+        for (int i = 0; i < BENCH_CHAIN_ITERS; i++) {
             send_creategate(200, 0xBE00, 8, 32);
             for (int d = 0; d < 50; d++) {
                 uint32_t s = (uint32_t)(200 + d * 2);
@@ -1142,30 +1174,15 @@ int run(void)
                 else
                     send_exchange(2, ds, 1, s, 1, 1);
             }
-            uint64_t t0 = rdtsc();
-            send_revoke(200);
-            uint64_t t1 = rdtsc();
-            bench_samples[i] = t1 - t0;
+            uint64_t kcycles = 0;
+            send_revoke_ex(200, &kcycles);
+            bench_samples[i] = kcycles;
         }
-        /* Report with potentially fewer samples */
-        shell_sort_u64(bench_samples, iters_50);
-        {
-            uint64_t min = bench_samples[0];
-            uint64_t max = bench_samples[iters_50 - 1];
-            uint64_t med = bench_samples[iters_50 / 2];
-            uint64_t sum = 0;
-            for (int i = 0; i < iters_50; i++) sum += bench_samples[i];
-            uint64_t mean = sum / iters_50;
-            double med_us = cycles_to_us(med);
-            printf("[BENCH] %-18s min=%-6lu  med=%-6lu  mean=%-6lu  max=%-6lu  cycles  (%.1fus median) [%d iters]\n",
-                   "chain_revoke_50",
-                   (unsigned long)min, (unsigned long)med,
-                   (unsigned long)mean, (unsigned long)max, med_us, iters_50);
-        }
-        printf("[BENCH-2A-LOCAL-UNVERIFIED] chain_revoke_50: collected\n");
+        bench_report_n("chain_revoke_50_kernel", BENCH_CHAIN_ITERS);
+        printf("[BENCH-2A-LOCAL-UNVERIFIED] chain_revoke_50_kernel: collected\n");
     }
 
-    /* --- Bench 2A-5: chain_revoke_100 --- */
+    /* --- Bench 2A-6: chain_revoke_100 --- */
     {
         /* Warmup */
         for (int w = 0; w < BENCH_CHAIN_WARMUP; w++) {
@@ -1180,9 +1197,8 @@ int run(void)
             }
             send_revoke(200);
         }
-        /* Measure */
-        int iters_100 = BENCH_CHAIN_ITERS;
-        for (int i = 0; i < iters_100; i++) {
+        /* Measure: kernel-measured revoke cycles */
+        for (int i = 0; i < BENCH_CHAIN_ITERS; i++) {
             send_creategate(200, 0xBE00, 8, 32);
             for (int d = 0; d < 100; d++) {
                 uint32_t s = (uint32_t)(200 + d);
@@ -1192,26 +1208,12 @@ int run(void)
                 else
                     send_exchange(2, ds, 1, s, 1, 1);
             }
-            uint64_t t0 = rdtsc();
-            send_revoke(200);
-            uint64_t t1 = rdtsc();
-            bench_samples[i] = t1 - t0;
+            uint64_t kcycles = 0;
+            send_revoke_ex(200, &kcycles);
+            bench_samples[i] = kcycles;
         }
-        shell_sort_u64(bench_samples, iters_100);
-        {
-            uint64_t min = bench_samples[0];
-            uint64_t max = bench_samples[iters_100 - 1];
-            uint64_t med = bench_samples[iters_100 / 2];
-            uint64_t sum = 0;
-            for (int i = 0; i < iters_100; i++) sum += bench_samples[i];
-            uint64_t mean = sum / iters_100;
-            double med_us = cycles_to_us(med);
-            printf("[BENCH] %-18s min=%-6lu  med=%-6lu  mean=%-6lu  max=%-6lu  cycles  (%.1fus median) [%d iters]\n",
-                   "chain_revoke_100",
-                   (unsigned long)min, (unsigned long)med,
-                   (unsigned long)mean, (unsigned long)max, med_us, iters_100);
-        }
-        printf("[BENCH-2A-LOCAL-UNVERIFIED] chain_revoke_100: collected\n");
+        bench_report_n("chain_revoke_100_kernel", BENCH_CHAIN_ITERS);
+        printf("[BENCH-2A-LOCAL-UNVERIFIED] chain_revoke_100_kernel: collected\n");
     }
 
     printf("\n[VPE0] === Experiment 2A complete ===\n");
