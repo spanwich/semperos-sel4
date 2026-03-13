@@ -31,7 +31,7 @@ extern void kernel_start(void);
  * This ensures that the first call to malloc/brk finds our 4 MiB buffer
  * via morecore_area/morecore_size (musl's init_morecore_region is lazy).
  */
-#define KERNEL_HEAP_SIZE  (4 * 1024 * 1024)  /* 4 MiB */
+#define KERNEL_HEAP_SIZE  (8 * 1024 * 1024)  /* 8 MiB — chain_revoke_100 needs headroom */
 
 static char __attribute__((aligned(4096)))
     kernel_heap[KERNEL_HEAP_SIZE];

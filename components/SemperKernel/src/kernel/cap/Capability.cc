@@ -39,7 +39,12 @@ void Capability::addChild(mht_key_t child) {
     // sort list w.r.t locality
     // local items are put first
     if (MHTInstance::getInstance().keyLocality(child) || _children.length() == 0) {
-        _children.insert(nullptr, new Child(child));
+        // NEW (semperos-sel4): NULL check on new Child allocation.
+        // Original SemperOS did not check this; heap exhaustion was not reachable
+        // in the original benchmark suite. Our build-failure leak exposed this gap.
+        Child *c = new Child(child);
+        if(!c) { KLOG(ERR, "addChild: heap exhausted"); return; }
+        _children.insert(nullptr, c);
         return;
     }
 
@@ -50,13 +55,17 @@ void Capability::addChild(mht_key_t child) {
     membership_entry::krnl_id_t respKrnl = 0;
     respKrnl = MHTInstance::getInstance().responsibleKrnl(peID);
     if(respKrnl <= MHTInstance::getInstance().responsibleMember(prev->id)) {
-        _children.insert(nullptr, new Child(child));
+        Child *c = new Child(child);
+        if(!c) { KLOG(ERR, "addChild: heap exhausted"); return; }
+        _children.insert(nullptr, c);
         return;
     }
     for(auto &it : _children) {
         current_respKrnl = MHTInstance::getInstance().responsibleMember(it.id);
         if(respKrnl >= current_respKrnl) {
-            _children.insert(prev, new Child(child));
+            Child *c = new Child(child);
+            if(!c) { KLOG(ERR, "addChild: heap exhausted"); return; }
+            _children.insert(prev, c);
             return;
         }
         prev = &it;
