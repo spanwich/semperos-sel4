@@ -20,10 +20,31 @@
 
 #define CAP_BENCH_TRACE_S(marker)     m3::Profile::start(marker)
 #define CAP_BENCH_TRACE_F(marker)     m3::Profile::stop(marker)
-#define CAP_BENCH_TRACE_X_S(marker)
-#define CAP_BENCH_TRACE_X_F(marker)
-//#define CAP_BENCH_TRACE_X_S(marker)   m3::Profile::start(marker)
-//#define CAP_BENCH_TRACE_X_F(marker)   m3::Profile::stop(marker)
+
+#ifdef SEMPER_BENCH_MODE
+    extern "C" uint64_t _cap_bench_t0;
+    extern "C" uint64_t _cap_bench_cycles;
+
+    #define CAP_BENCH_TRACE_X_S(tag)                                    \
+        do {                                                             \
+            uint32_t _lo, _hi;                                          \
+            __asm__ volatile("lfence\n\trdtsc"                          \
+                         : "=a"(_lo), "=d"(_hi) :: "memory");          \
+            _cap_bench_t0 = ((uint64_t)_hi << 32) | _lo;               \
+        } while(0)
+
+    #define CAP_BENCH_TRACE_X_F(tag)                                    \
+        do {                                                             \
+            uint32_t _lo, _hi;                                          \
+            __asm__ volatile("lfence\n\trdtsc"                          \
+                         : "=a"(_lo), "=d"(_hi) :: "memory");          \
+            _cap_bench_cycles =                                         \
+                (((uint64_t)_hi << 32) | _lo) - _cap_bench_t0;        \
+        } while(0)
+#else
+    #define CAP_BENCH_TRACE_X_S(tag) ((void)0)
+    #define CAP_BENCH_TRACE_X_F(tag) ((void)0)
+#endif
 
 // trace markers for capbench
 #define TRACE_START_ANALYSIS        10
@@ -40,6 +61,10 @@
 #define KERNEL_OBT_FROM_SRV         20
 #define KERNEL_OBT_SYSC_RESP        21
 #define APP_OBT_FINISH              22
+
+// exchange (local)
+#define KERNEL_EXC_SYSC_RCV         30
+#define KERNEL_EXC_SYSC_RESP        31
 
 // revoke
 #define APP_REV_START               23

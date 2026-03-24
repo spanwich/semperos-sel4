@@ -1,0 +1,13 @@
+[Unit]
+Description=seL4 Serial Log Receiver
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=/opt/sel4-logger/sel4-serial-logger.sh 9514 /var/log/sel4
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

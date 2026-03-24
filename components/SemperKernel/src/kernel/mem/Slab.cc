@@ -54,6 +54,12 @@ void *Slab::alloc() {
         KLOG(SLAB, "Extending " << _objsize << "B slab by " << (_objsize * STEP_SIZE) << "B");
 
         Pool *p = new Pool(_objsize, STEP_SIZE);
+        // NEW (semperos-sel4): NULL check on slab extension. Original SemperOS
+        // did not guard this; heap exhaustion from leaked caps exposed this gap.
+        if(!p || !p->mem) {
+            KLOG(ERR, "Slab::alloc: heap exhausted extending " << _objsize << "B slab");
+            return nullptr;
+        }
         void **mem = reinterpret_cast<void**>(p->mem);
         void **end = mem + (_objsize * STEP_SIZE) / sizeof(void*);
         while(mem < end) {
@@ -65,6 +71,8 @@ void *Slab::alloc() {
         _pools.append(p);
     }
 
+    if(!_freelist)
+        return nullptr;
     void **ptr = _freelist;
     reinterpret_cast<Pool*>(ptr[0])->free--;
     _freelist = reinterpret_cast<void**>(_freelist[1]);

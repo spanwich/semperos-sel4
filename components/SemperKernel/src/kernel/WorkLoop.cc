@@ -29,6 +29,7 @@
 #if defined(__sel4__)
 extern "C" void net_poll(void);
 
+#if !defined(SEMPEROS_NO_NETWORK)
 /*
  * Dispatch a raw DTU message received from the network to the
  * KernelcallHandler (Task 08). Called from net_poll() in camkes_entry.c
@@ -49,6 +50,7 @@ extern "C" void dispatch_net_krnlc(const void *raw_msg, uint16_t len) {
     is.claim();  /* sets _ack = false */
     krnlch.handle_message(is, nullptr);
 }
+#endif /* !SEMPEROS_NO_NETWORK */
 #endif
 
 #if defined(__host__)
