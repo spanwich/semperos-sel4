@@ -1,6 +1,6 @@
 ---
 name: xcpng-deploy
-description: Deploy SemperOS ISOs to XCP-ng cluster, reboot VMs, collect benchmark output from serial log ports, and save results to timestamped JSON.
+description: Deploy SemperOS ISOs to XCP-ng cluster, reboot VMs, collect benchmark output from Loki or serial log ports, and save results to timestamped JSON.
 argument-hint: [--dry-run | --collect-only | --build-only]
 allowed-tools: Bash(*), Read, Write, Glob, Grep
 ---
@@ -13,7 +13,7 @@ Full pipeline: build ISOs, deploy to XCP-ng, collect Exp 2A benchmark results.
 
 Parse `$ARGUMENTS` for these flags:
 - `--dry-run` — print all commands but do not execute any SSH/xe operations
-- `--collect-only` — skip build and deploy, just collect from log ports
+- `--collect-only` — skip build and deploy, just collect from Loki/log ports
 - `--build-only` — build ISOs only, do not deploy or collect
 
 If no flag is given, run the full pipeline (build + deploy + collect).
@@ -33,7 +33,7 @@ If no flag is given, run the full pipeline (build + deploy + collect).
 | Log port node1 | `9502` on `192.168.40.106` |
 | Log port node2 | `9503` on `192.168.40.106` |
 | Loki endpoint | `http://192.168.40.107:3100` |
-| Loki VM labels | `sel4-node1` (verify node0/node2 labels at runtime) |
+| Loki VM labels | discover at runtime via `/loki/api/v1/label/vm/values` |
 | Completion marker | `[VPE0] === Experiment 2A complete ===` |
 | ISO SR name | `ISO-Store` (path: `/var/opt/xen/ISO_Store/`) |
 
@@ -41,7 +41,7 @@ If no flag is given, run the full pipeline (build + deploy + collect).
 
 ## Phase 1: Build ISOs (skip if --collect-only)
 
-Use the `/build-isos` skill or follow the same procedure:
+Use the `/iso-builder` skill or follow the same procedure.
 
 Build all three nodes from `camkes-vm-examples` root (`/home/iamfo470/phd/camkes-vm-examples`).
 The project root is `/home/iamfo470/phd/camkes-vm-examples/projects/semperos-sel4`.
@@ -110,7 +110,7 @@ Store each UUID in a variable. If any returns empty, report the error and stop.
 ssh root@192.168.40.100 "xe sr-list name-label=ISO-Store --minimal"
 ```
 
-Note: the SR name is `ISO-Store` (with hyphen), not `ISO_Store`.
+Note: the SR name is `ISO-Store` (with hyphen).
 
 ### Step 2.3: Find CD VBDs for each VM
 
@@ -139,7 +139,7 @@ Ignore errors if already empty.
 
 ### Step 2.5: Delete old ISO from ISO SR storage
 
-Remove the previous ISO file from the host filesystem to avoid duplicate VDIs:
+Remove the previous ISO file from the host to avoid duplicate VDIs:
 
 ```bash
 ssh root@192.168.40.100 "rm -f /var/opt/xen/ISO_Store/semperos-node${N}.iso"
@@ -191,8 +191,7 @@ and running benchmarks (~3-5 minutes on bare metal).
 
 ### Step 3.1: Wait for completion
 
-Poll Loki for the completion marker on each node. The Loki `vm` label may
-differ from the XCP-ng VM name — discover labels first:
+Poll Loki for the completion marker on each node. Discover VM labels first:
 
 ```bash
 curl -s 'http://192.168.40.107:3100/loki/api/v1/label/vm/values' | python3 -c "import sys,json; print(json.load(sys.stdin)['data'])"
@@ -252,7 +251,7 @@ Build a JSON file at `results/exp2a_YYYYMMDD_HHMMSS.json` with this structure:
 
 ```json
 {
-  "timestamp": "2026-03-23T12:34:56",
+  "timestamp": "2026-03-25T12:34:56",
   "branch": "<current git branch>",
   "commit": "<current git short hash>",
   "tsc_mhz": {
