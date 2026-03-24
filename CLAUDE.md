@@ -144,6 +144,11 @@ Strips DTUBridge + E1000 (not needed for local benchmarks on XCP-ng).
 Log transport uses Xen's `hvm_serial=tcp:` serial redirect — no in-guest NIC.
 See docs/XCPNG-RUNBOOK.md for full deployment instructions.
 
+### Three-Node ISO Build (with DTUBridge)
+
+Use `/build-isos` to build all three XCP-ng node ISOs with distinct identity.
+Or pass a commit message to also commit+push: `/build-isos "rebuild with fix X"`.
+
 ### Standalone Ring Buffer Tests
 
 ```bash
