@@ -10,6 +10,7 @@
 #include <camkes.h>
 #include "vdtu_ring.h"
 #include "vdtu_channels.h"
+#include "tsc_calibrate.h"
 
 /* VPE0 is PE 2 in the platform config */
 #define MY_PE       2
@@ -342,63 +343,9 @@ static inline uint64_t rdtsc(void)
     return ((uint64_t)hi << 32) | lo;
 }
 
-static inline void cpuid(uint32_t leaf, uint32_t *eax, uint32_t *ebx,
-                          uint32_t *ecx, uint32_t *edx)
-{
-    __asm__ volatile("cpuid"
-        : "=a"(*eax), "=b"(*ebx), "=c"(*ecx), "=d"(*edx)
-        : "a"(leaf), "c"(0));
-}
-
-/* Measured TSC frequency in MHz (0 = unknown) */
-static uint64_t tsc_mhz = 0;
-static const char *tsc_method = "unknown";
-
-/*
- * Attempt to measure TSC frequency using CPUID.
- *
- * Method 1: CPUID leaf 0x16 — Processor Frequency Information (Intel SDM Vol 2).
- *   EAX = base frequency in MHz. Available on Skylake+ and many Xen HVM guests.
- *
- * Method 2: CPUID leaf 0x15 — TSC/Crystal Ratio.
- *   EAX = denominator, EBX = numerator, ECX = crystal Hz (may be 0).
- *   TSC Hz = crystal_hz * (ebx / eax). If ECX=0, crystal is platform-specific.
- *
- * Fallback: 0 (print cycles only, mark µs as approximate).
- */
-static void probe_tsc_frequency(void)
-{
-    uint32_t eax, ebx, ecx, edx;
-
-    /* Check max CPUID leaf */
-    cpuid(0, &eax, &ebx, &ecx, &edx);
-    uint32_t max_leaf = eax;
-
-    /* Try leaf 0x16: Processor Frequency */
-    if (max_leaf >= 0x16) {
-        cpuid(0x16, &eax, &ebx, &ecx, &edx);
-        if (eax > 0) {
-            tsc_mhz = eax;
-            tsc_method = "cpuid-0x16";
-            return;
-        }
-    }
-
-    /* Try leaf 0x15: TSC/Crystal Ratio */
-    if (max_leaf >= 0x15) {
-        cpuid(0x15, &eax, &ebx, &ecx, &edx);
-        if (eax > 0 && ebx > 0 && ecx > 0) {
-            /* TSC Hz = crystal_hz * (ebx / eax) */
-            tsc_mhz = ((uint64_t)ecx * ebx) / ((uint64_t)eax * 1000000ULL);
-            tsc_method = "cpuid-0x15";
-            return;
-        }
-    }
-
-    /* Fallback: assume 2000 MHz (QEMU default) */
-    tsc_mhz = 2000;
-    tsc_method = "fallback-2ghz";
-}
+/* TSC frequency accessors — delegate to tsc_calibrate.h globals */
+#define tsc_mhz    (g_tsc_cal.freq_mhz)
+#define tsc_method (g_tsc_cal.method)
 
 static uint64_t bench_samples[BENCH_ITERS];
 
@@ -417,8 +364,8 @@ static void shell_sort_u64(uint64_t *arr, int n)
 
 static double cycles_to_us(uint64_t cycles)
 {
-    if (tsc_mhz == 0) return 0.0;
-    return (double)cycles / (double)tsc_mhz;
+    if (g_tsc_cal.freq_khz == 0) return 0.0;
+    return (double)cycles * 1000.0 / (double)g_tsc_cal.freq_khz;
 }
 
 static void bench_report(const char *name)
@@ -653,10 +600,10 @@ int run(void)
 {
     printf("[VPE0] Starting (PE %d, VPE ID %d)\n", MY_PE, MY_VPE_ID);
 
-    /* Measure TSC frequency before any benchmarks */
-    probe_tsc_frequency();
-    printf("[VPE0] TSC frequency: %lu MHz (method: %s)\n",
-           (unsigned long)tsc_mhz, tsc_method);
+    /* Calibrate TSC frequency using PIT speaker gate before any benchmarks */
+    tsc_calibrate();
+    printf("[VPE0] TSC frequency: %u MHz (method: %s)\n",
+           g_tsc_cal.freq_mhz, g_tsc_cal.method);
 
     init_channel_table();
 

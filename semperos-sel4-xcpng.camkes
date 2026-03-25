@@ -104,11 +104,25 @@ component SemperKernel {
     consumes Signal signal_from_vpe0;
 }
 
+component HWPITPorts {
+    hardware;
+    provides IOPort pit_port;
+}
+
+component HWSpkrPort {
+    hardware;
+    provides IOPort spkr_port;
+}
+
 component VPE0 {
     control;
 
     /* Config RPC: VPE0 -> vDTU (for benchmarks: ep_configure, ep_terminate) */
     uses VDTUConfig vdtu;
+
+    /* PIT I/O ports for TSC calibration */
+    uses IOPort pit_port;   /* 0x42-0x43: PIT channel 2 data + command */
+    uses IOPort spkr_port;  /* 0x61: speaker gate control */
 
     /* Pre-allocated message channel dataports (shared with SemperKernel) */
     dataport Buf(4096) msgchan_kv_0;
@@ -157,12 +171,20 @@ assembly {
         component SemperKernel  kernel0;
         component VPE0          vpe0;
         component VPE1          vpe1;
+        component HWPITPorts    pit_hardware;
+        component HWSpkrPort   spkr_hardware;
 
         /*
          * Config RPC: kernel0 -> vdtu, vpe0 -> vdtu (benchmark access)
          */
         connection seL4RPCCall config_rpc(from kernel0.vdtu, to vdtu.config);
         connection seL4RPCCall vpe0_config_rpc(from vpe0.vdtu, to vdtu.config);
+
+        /* PIT I/O ports for TSC calibration */
+        connection seL4HardwareIOPort pit_port_conn(from vpe0.pit_port,
+                                                     to pit_hardware.pit_port);
+        connection seL4HardwareIOPort spkr_port_conn(from vpe0.spkr_port,
+                                                      to spkr_hardware.spkr_port);
 
         /*
          * Message channel dataports: kernel0 <-> vpe0 (point-to-point).
@@ -224,5 +246,9 @@ assembly {
         /* VPE1: passive EXCHANGE target */
         vpe1.priority = 200;
         vpe1._heap_size = 4096;
+        /* PIT channel 2 (0x42-0x43) for TSC calibration */
+        pit_hardware.pit_port_attributes = "0x42:0x44";
+        /* Speaker gate (0x61) for TSC calibration */
+        spkr_hardware.spkr_port_attributes = "0x61:0x62";
     }
 }
