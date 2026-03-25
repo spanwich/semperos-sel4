@@ -147,25 +147,11 @@ component SemperKernel {
     dataport Buf(4096) net_inbound;     /* bridge writes, kernel reads */
 }
 
-component HWPITPorts {
-    hardware;
-    provides IOPort pit_port;
-}
-
-component HWSpkrPort {
-    hardware;
-    provides IOPort spkr_port;
-}
-
 component VPE0 {
     control;
 
     /* Config RPC: VPE0 -> vDTU (for benchmarks: ep_configure, ep_terminate) */
     uses VDTUConfig vdtu;
-
-    /* PIT I/O ports for TSC calibration */
-    uses IOPort pit_port;   /* 0x42-0x43: PIT channel 2 data + command */
-    uses IOPort spkr_port;  /* 0x61: speaker gate control */
 
     /* Pre-allocated message channel dataports (shared with SemperKernel) */
     dataport Buf(4096) msgchan_kv_0;
@@ -245,8 +231,6 @@ assembly {
         component VPE1          vpe1;
         component HWEthDriver   eth_hardware;
         component HWPCIConfig   pci_hardware;
-        component HWPITPorts    pit_hardware;
-        component HWSpkrPort   spkr_hardware;
         component DTUBridge     dtu_bridge;
 
         /*
@@ -316,10 +300,7 @@ assembly {
                                                        to dtu_bridge.eth_irq);
         connection seL4HardwareIOPort pci_config_conn(from dtu_bridge.pci_config,
                                                        to pci_hardware.pci_config);
-        connection seL4HardwareIOPort pit_port_conn(from vpe0.pit_port,
-                                                     to pit_hardware.pit_port);
-        connection seL4HardwareIOPort spkr_port_conn(from vpe0.spkr_port,
-                                                      to spkr_hardware.spkr_port);
+
 
         /* RPC: kernel sends outgoing DTU messages to bridge */
         connection seL4RPCCall net_rpc(from kernel0.net, to dtu_bridge.net);
@@ -376,9 +357,5 @@ assembly {
         eth_hardware.irq_irq_ioapic_pin = 11;
         eth_hardware.irq_irq_vector = 11;
         pci_hardware.pci_config_attributes = "0xCF8:0xCFF";
-        /* PIT channel 2 (0x42-0x43) for TSC calibration */
-        pit_hardware.pit_port_attributes = "0x42:0x44";
-        /* Speaker gate (0x61) for TSC calibration */
-        spkr_hardware.spkr_port_attributes = "0x61:0x62";
     }
 }

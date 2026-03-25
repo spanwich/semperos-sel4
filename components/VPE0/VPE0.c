@@ -343,9 +343,9 @@ static inline uint64_t rdtsc(void)
     return ((uint64_t)hi << 32) | lo;
 }
 
-/* TSC frequency accessors — delegate to tsc_calibrate.h globals */
-#define tsc_mhz    (g_tsc_cal.freq_mhz)
-#define tsc_method (g_tsc_cal.method)
+/* TSC frequency accessors — from tsc_calibrate.h constants */
+#define tsc_mhz    TSC_FREQ_MHZ
+#define tsc_method TSC_METHOD
 
 static uint64_t bench_samples[BENCH_ITERS];
 
@@ -364,8 +364,7 @@ static void shell_sort_u64(uint64_t *arr, int n)
 
 static double cycles_to_us(uint64_t cycles)
 {
-    if (g_tsc_cal.freq_khz == 0) return 0.0;
-    return (double)cycles * 1000.0 / (double)g_tsc_cal.freq_khz;
+    return (double)cycles * 1000.0 / (double)TSC_FREQ_KHZ;
 }
 
 static void bench_report(const char *name)
@@ -600,10 +599,8 @@ int run(void)
 {
     printf("[VPE0] Starting (PE %d, VPE ID %d)\n", MY_PE, MY_VPE_ID);
 
-    /* Calibrate TSC frequency using PIT speaker gate before any benchmarks */
-    tsc_calibrate();
     printf("[VPE0] TSC frequency: %u MHz (method: %s)\n",
-           g_tsc_cal.freq_mhz, g_tsc_cal.method);
+           TSC_FREQ_MHZ, TSC_METHOD);
 
     init_channel_table();
 

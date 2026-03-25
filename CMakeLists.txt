@@ -141,7 +141,6 @@ DeclareCAmkESComponent(SemperKernel
 DeclareCAmkESComponent(VPE0
     SOURCES
         components/VPE0/VPE0.c
-        components/VPE0/tsc_calibrate.c
         ${VDTU_RING_SRC}
         ${VDTU_CHANNELS_SRC}
     INCLUDES
