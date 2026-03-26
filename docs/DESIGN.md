@@ -1,5 +1,11 @@
 # SemperOS on seL4/CAmkES: System Design
 
+> **Scope:** This document describes the vDTU design (Contribution 1) —
+> how SemperOS's hardware DTU is virtualized on seL4/CAmkES. For the
+> broader system architecture including CryptoTransport, Raft consensus,
+> direct exchange protocol, and the three-plane SDN model, see
+> `docs/secure-distributed-capability-architecture.md`.
+
 ## 1. Overview
 
 This document describes the architecture for running SemperOS on seL4 using CAmkES, with a virtual DTU (vDTU) replacing the gem5-simulated hardware DTU.
@@ -300,10 +306,34 @@ Boot on QEMU x86_64. Expected serial output:
 [SemperKernel] Basic DTU channel test PASSED
 ```
 
-## 8. Future Work (Tasks 03-05)
+## 8. Relationship to Broader Architecture
 
-1. **Task 03: vDTU Full Implementation** — Complete the vDTU with proper channel management, notification-based waking, and memory endpoint support.
+The vDTU design described above (Sections 1-7) is Contribution 1 — it is
+complete and producing paper-ready benchmark numbers on XCP-ng.
 
-2. **Task 04: SemperOS Integration** — Create `arch/sel4/` platform files that compile the real SemperOS kernel and m3 library against the vDTU ring buffer API.
+The broader system builds on top of the vDTU:
 
-3. **Task 05: Multi-Kernel** — Add SemperKernel1, inter-kernel message channels, and the DDL coordination protocol.
+**Contribution 2 (Verified vDTU):** EverParse/F*/Z3 verification of the
+vDTU's capability validity check. Extends the ep_state machine (Section
+5.1) with BLOCK ancestry checking against the Raft log cache.
+
+**Contribution 3 (Raft Revocation):** RaftPD CAmkES component providing
+consensus-backed revocation. CAP_BLOCK entries replace ThreadManager
+blocking for spanning revocations.
+
+**Contribution 4 (Secure SD-WAN):** Three additions to the architecture:
+1. CryptoTransport — HACL* AEAD layer inside DTUBridge (between the ring
+   buffer read/write in Section 6.1/6.2 and the UDP send/recv). Every
+   inter-kernel packet is authenticated and encrypted.
+2. SwitchFabric — L2 VLAN-aware switch (from sel4_xcpng) integrated as a
+   CAmkES component. The device IS the switch.
+3. Direct exchange protocol — replaces the SemperOS session protocol
+   (createsrv/createsess). SyscallHandler opcode 9 detects remote targets
+   via Raft-replicated MHT, routes via CryptoTransport.
+
+The vDTU's ring buffer design (Section 4), SPSC protocol (Section 4.2),
+and DTU header compatibility (Section 2.2) are unchanged by these additions.
+CryptoTransport encrypts the UDP payload that carries ring buffer messages
+between nodes — it does not modify the ring buffer protocol itself.
+
+Full architecture: `docs/secure-distributed-capability-architecture.md`
