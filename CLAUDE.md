@@ -207,8 +207,8 @@ docker/                               <- dual-QEMU orchestration
 docker/docker-compose.yml             <- dual-node services (node-a, node-b)
 docker/run-qemu.sh                    <- QEMU launcher with $QEMU_EXTRA
 docs/                                 <- task reports and design docs
-DESIGN.md                             <- full architecture specification
-TASK07-REPORT.md                      <- cross-node communication report
+docs/DESIGN.md                        <- full architecture specification
+docs/TASK07-REPORT.md                 <- cross-node communication report
 semperos-sel4-xcpng.camkes            <- stripped assembly for XCP-ng (no DTUBridge)
 settings-xcpng.cmake                  <- XCP-ng build preset (SEMPEROS_NO_NETWORK + BENCH_MODE)
 scripts/grub.cfg                      <- GRUB2 multiboot config for ISO boot
