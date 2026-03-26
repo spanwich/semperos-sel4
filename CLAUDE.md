@@ -12,7 +12,7 @@ PhD project. 6-month paper submission target, 18-month thesis target.
 
 SemperOS is a distributed capability OS from TU Dresden that has only ever
 run inside gem5 simulation. This project is the first to run it on real
-x86_64 hardware. Three contributions:
+x86_64 hardware. Four contributions:
 
 **Contribution 1 — SemperOS on Real Hardware**
 Ported to seL4 via CAmkES component architecture. The DTU hardware is
@@ -34,6 +34,17 @@ multi-kernel spanning revocations). Partitioned approach:
 - Spanning revocations: Raft audit log replaces ThreadManager blocking.
   Tier 1 return on Raft quorum commit. Tier 2 on TERMINATE ACK chain.
 
+**Contribution 4 — Secure Distributed Capability System**
+Provides the security properties that SemperOS's DTU hardware was intended
+to provide, but on commodity Ethernet. Three new components:
+- CryptoTransport: HACL* ChaCha20-Poly1305 AEAD on every inter-kernel packet
+  (hooks into DTUBridge between ring buffer read and UDP send/recv)
+- AdmissionAgent: 802.1X EAP-TLS node admission → Raft AddServer → capability minting
+- Raft-replicated MHT: consensus-backed membership, PE partition assignment,
+  node blocklist, and revoke_all() on RemoveServer commit (~300ms revocation)
+Depends on Contributions 1-3. Full design: `docs/secure-distributed-capability-architecture.md`.
+Reusable infrastructure: HACL* from `http_gateway_x86`, 802.1X/802.1Q from `sel4_xcpng`.
+
 ---
 
 ## Architecture
@@ -50,9 +61,11 @@ seL4 (x86_64, CAmkES, pc99)
 ├── VDTUService       ← virtual DTU (ring buffer manager + endpoint table)
 ├── SemperKernel      ← SemperOS kernel (arch/sel4/ backend)
 ├── DTUBridge         ← cross-node transport (E1000 + lwIP UDP)
+│   └── CryptoTransport  ← [PLANNED C4] HACL* AEAD on every inter-kernel packet
 ├── VPE0              ← test harness
 ├── VPE1              ← passive exchange target
-└── RaftPD            ← [PLANNED] revocation audit log
+├── RaftPD            ← [PLANNED C3/C4] Raft consensus: log, MHT, blocklist
+└── AdmissionAgent    ← [PLANNED C4] 802.1X EAP-TLS + VPN + Raft join
 ```
 
 ### Components
@@ -203,6 +216,7 @@ scripts/make-iso.sh                   <- grub-mkrescue wrapper -> semperos-sel4.
 logserver/                            <- host-side TCP log receiver (socat + systemd)
 docs/XCPNG-AUDIT.md                   <- sel4_xcpng reference project analysis
 docs/XCPNG-RUNBOOK.md                 <- XCP-ng deployment + benchmark collection
+docs/secure-distributed-capability-architecture.md <- Contribution 4 design: CryptoTransport, AdmissionAgent, Raft MHT
 ```
 
 ---
@@ -285,8 +299,13 @@ docs/XCPNG-RUNBOOK.md                 <- XCP-ng deployment + benchmark collectio
 | Application VPE components (tar, find, SQLite, PostMark) | — | P2 | One component each |
 | EverParse 3D spec extension (Contribution 2) | — | P3 | proofs/ infrastructure done; extend HTTP gateway validator to cover DTU message format |
 | RaftLogCache (hash table, C-callable) | — | P3 | For vDTU enforcement point; wiring spec at docs/VERIFICATION-WIRING-SPEC.md |
-| RaftPD CAmkES component | — | P4 | Leader election + log replication |
-| Two-tier revocation in SemperKernel (Contribution 3) | — | P4 | revoke_spanning(), TERMINATE/ACK |
+| RaftPD CAmkES component (C3/C4) | — | P4 | Leader election, log replication, MHT state machine. New RaftPD.idl4 interface needed. |
+| Two-tier revocation in SemperKernel (C3) | — | P4 | revoke_spanning(), TERMINATE/ACK |
+| CryptoTransport in DTUBridge (C4) | — | P4 | HACL* ChaCha20-Poly1305 AEAD. Hook at DTUBridge.c:777 (outbound) and :540 (inbound). Reuse HACL* build pattern from http_gateway_x86. |
+| AdmissionAgent CAmkES component (C4) | — | P4 | 802.1X EAP-TLS + Raft AddServer. Reuse EAP state machine from sel4_xcpng, mbedTLS X.509 from http_gateway_x86. |
+| 802.1Q VLAN in DTUBridge (C4) | — | P4 | E1000 VFTA hw offload for trusted fabric / quarantine VLANs. Reuse e1000_vfta_set() from sel4_xcpng. |
+| revoke_by_pe_range() in CapTable (C4) | — | P4 | Needed for RemoveServer → revoke_all(pe_partition). Current revoke_all() is per-VPE only. |
+| Raft-replicated MHT + blocklist (C4) | — | P4 | ADD_SERVER, REMOVE_SERVER, MHT_UPDATE, CAP_BLOCK entries. Design at docs/secure-distributed-capability-architecture.md. |
 
 ---
 
@@ -352,7 +371,7 @@ SemperOS kernel is C++11. CAmkES natively supports `.cc` files via `DeclareCAmkE
 - `<cassert>` -> `<assert.h>`, `<cstring>` -> `<string.h>`, etc.
 - `<functional>` -> `base/util/Functional.h` (custom `std::function`/`std::bind`/`std::move`)
 - `operator new/delete` -> musl `malloc`/`free` (in `cxx_runtime.cc`)
-- Kernel heap: 4 MiB static BSS buffer in `camkes_entry.c` (CAmkES's `CAmkESDefaultHeapSize` cmake override doesn't work; see heap fix below)
+- Kernel heap: 8 MiB static BSS buffer in `camkes_entry.c` (CAmkES's `CAmkESDefaultHeapSize` cmake override doesn't work; see heap fix below)
 - `<camkes.h>` is not includable from C++ — CAmkES symbols declared manually via `extern "C"` in DTU.cc and camkes_entry.c
 
 See `docs/task04-kernel-integration.md` for full details.
@@ -363,17 +382,17 @@ CAmkES forces `LibSel4MuslcSysMorecoreBytes=0` in `camkes.cmake`, disabling
 musl's static morecore. CAmkES provides a 1 MiB heap via its
 `component.common.c` template, but the `CAmkESDefaultHeapSize` cmake variable
 override does NOT propagate to the generated config header. Fix:
-`camkes_entry.c` defines a 4 MiB static buffer and a
+`camkes_entry.c` defines an 8 MiB static buffer and a
 `__attribute__((constructor(200)))` function that sets
 `morecore_area`/`morecore_size` BEFORE musl init (priority 201) and CAmkES init
-(priority 202). This ensures the first malloc call uses the 4 MiB buffer.
+(priority 202). This ensures the first malloc call uses the 8 MiB buffer.
 
 ---
 
 ## Known Limitations
 
-- **Inter-kernel protocol partial** — Kernelcalls::connect() dispatch path is wired (Task 08), ThreadManager cooperative threading works (Task 09), but distributed revocation and cross-kernel OBTAIN/DELEGATE are not yet exercised end-to-end. Requires dual-node testing.
-- **Same binary, both nodes** — Node identity derived at runtime from MAC last octet. Both kernels have ID 0, same PE layout (0-3). True multi-kernel needs disjoint PE ranges.
+- **Inter-kernel protocol partial** — Kernelcalls::connect() dispatch path is wired (Task 08), ThreadManager cooperative threading works (Task 09), but spanning EXCHANGE/REVOKE require session protocol (createsrv/createsess) which has never been exercised. Handlers exist (imported from SemperOS) but no test harness.
+- **Same PE layout, all nodes** — Each node has PE IDs 0-3. KERNEL_ID and IPs are compile-time distinct (Task 14), but true multi-kernel needs disjoint PE ranges for the MHT to route correctly.
 - **PING/PONG is kernel-level** — not VPE-initiated. Test 9 in VPE0 only verifies local NOOP + remote routing entry; actual cross-node traffic is in net_poll().
 - **Legacy dataports retained** — `dtu_out`/`dtu_in` (8 KiB each) and `DTUNetIPC` RPC still wired but unused by the ring buffer path. Could be removed to save 2 seL4SharedData + 1 seL4RPCCall.
 - **Polling, not interrupt-driven** — DTUBridge polls outbound ring, kernel polls inbound ring, both with seL4_Yield(). Fine for single-core QEMU; needs notification wakeup for multi-core.
@@ -381,6 +400,19 @@ override does NOT propagate to the generated config header. Fix:
 - **128 KiB kernel stack** — cross-VPE revocation call depth exceeds 64 KiB. Set via `kernel0._stack_size = 131072`.
 - **cmpxchg_mem stub** — `cmpxchg_mem()` is still unimplemented (not used in current prototype).
 - **VPE1 is passive** — no shared data channels, doesn't send/receive messages. Only its CapTable is used.
+- **Plaintext inter-kernel traffic** — DTUBridge UDP is unauthenticated and unencrypted. CryptoTransport (Contribution 4) will add HACL* AEAD on every packet.
+- **No node admission control** — any node with correct IP can join. AdmissionAgent (Contribution 4) will add 802.1X + Raft AddServer.
+
+---
+
+## Reusable Infrastructure from Sister Projects
+
+| Source project | What it provides | For which contribution |
+|---|---|---|
+| `projects/http_gateway_x86` | HACL* build integration (vendored C, KreMLin runtime, cmake pattern), mbedTLS TLS 1.2 + X.509 | C4: CryptoTransport (HACL*), AdmissionAgent (mbedTLS X.509 for EAP-TLS) |
+| `projects/sel4_xcpng` | 802.1X EAP authenticator + RADIUS client, 802.1Q E1000 VLAN hw offload (VFTA), EAPOL framing, SwitchFabric VLAN policy | C4: AdmissionAgent (EAP state machine), DTUBridge VLAN filtering |
+
+Full design: `docs/secure-distributed-capability-architecture.md`
 
 ---
 
