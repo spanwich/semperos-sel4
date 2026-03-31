@@ -72,6 +72,10 @@ static ip4_addr_t self_ip_addr;
 static ip4_addr_t peer_addrs[NUM_PEERS];
 static uint8_t my_node_id = 0;
 
+/* Map peer array index to KERNEL_ID (for CryptoTransport peer_id).
+ * Populated at init time: peer_kernel_id[i] is the KERNEL_ID of peer_addrs[i]. */
+static uint8_t peer_kernel_id[NUM_PEERS];
+
 /* Parse "A.B.C.D" into an ip4_addr_t. Returns 0 on success. */
 static int parse_ip4(const char *s, ip4_addr_t *out)
 {
@@ -693,8 +697,18 @@ void post_init(void)
     parse_ip4(DTUB_PEER_IP_0, &peer_addrs[0]);
     parse_ip4(DTUB_PEER_IP_1, &peer_addrs[1]);
 
-    printf("[%s] Node %u (self=%s, peer0=%s, peer1=%s)\n",
-           COMPONENT_NAME, my_node_id, DTUB_SELF_IP, DTUB_PEER_IP_0, DTUB_PEER_IP_1);
+    /* Build peer index → KERNEL_ID mapping from IP last octet convention.
+     * XCP-ng: .10 = kernel 0, .11 = kernel 1, .12 = kernel 2 (offset 10).
+     * QEMU:   .1  = kernel 0, .2  = kernel 1, .3  = kernel 2 (offset 1). */
+    for (int i = 0; i < NUM_PEERS; i++) {
+        uint8_t last = ip4_addr4(&peer_addrs[i]);
+        peer_kernel_id[i] = (last >= 10) ? (last - 10) : (last - 1);
+    }
+
+    printf("[%s] Node %u (self=%s, peer0=%s[k%u], peer1=%s[k%u])\n",
+           COMPONENT_NAME, my_node_id, DTUB_SELF_IP,
+           DTUB_PEER_IP_0, peer_kernel_id[0],
+           DTUB_PEER_IP_1, peer_kernel_id[1]);
 
     /* CryptoTransport init — per-packet AEAD with static PSKs (FPT-155) */
     ct_init(my_node_id);
@@ -797,9 +811,10 @@ int run(void)
                 uint16_t plaintext_len = VDTU_HEADER_SIZE + outmsg->hdr.length;
 
                 /* CryptoTransport: encrypt before sending.
-                 * Peer 0 is the default destination (multi-peer routing is future work). */
+                 * Route to peer_addrs[0] (first peer). peer_kernel_id[0]
+                 * maps to that peer's KERNEL_ID for PSK selection. */
                 uint8_t ct_buf[700];
-                int ct_len = ct_encrypt(0, /* peer_id = 0 for now */
+                int ct_len = ct_encrypt(peer_kernel_id[0],
                                         (const uint8_t *)outmsg, plaintext_len,
                                         ct_buf, sizeof(ct_buf));
                 if (ct_len > 0) {
