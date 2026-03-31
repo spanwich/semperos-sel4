@@ -115,6 +115,11 @@ int ct_encrypt(uint8_t peer_id,
         hdr->nonce              /* nonce */
     );
 
+#ifdef CT_DEBUG
+    printf("[CRYPTO] ct_encrypt: peer=%u seq=%u pt_len=%zu ct_total=%zu\n",
+           peer_id, seq, plaintext_len, total);
+#endif
+
     return (int)total;
 }
 
@@ -180,6 +185,11 @@ int ct_decrypt(const uint8_t *input, size_t input_len,
 
     if (sender_id_out)
         *sender_id_out = sender;
+
+#ifdef CT_DEBUG
+    printf("[CRYPTO] ct_decrypt: sender=%u seq=%u pt_len=%zu auth=OK\n",
+           sender, hdr->sequence_num, ciphertext_len);
+#endif
 
     return (int)ciphertext_len;
 }

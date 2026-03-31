@@ -1,0 +1,20 @@
+services:
+  node0:
+    build: .
+    container_name: crypto-node0
+    hostname: node0
+    command: ["--id", "0", "--peer-id", "1", "--peer-host", "node1", "--port", "7654"]
+    networks:
+      - crypto-net
+
+  node1:
+    build: .
+    container_name: crypto-node1
+    hostname: node1
+    command: ["--id", "1", "--peer-id", "0", "--peer-host", "node0", "--port", "7654"]
+    networks:
+      - crypto-net
+
+networks:
+  crypto-net:
+    driver: bridge
