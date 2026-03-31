@@ -199,23 +199,50 @@ set(LWIP_UDP_SOURCES
     ${LWIP_PATH}/src/api/err.c
 )
 
+# HACL* verified crypto (FPT-155: CryptoTransport)
+set(HACL_DIR ${CMAKE_CURRENT_LIST_DIR}/hacl-star/dist/gcc-compatible)
+set(HACL_KARAMEL_DIR ${CMAKE_CURRENT_LIST_DIR}/hacl-star/dist/karamel)
+set(HACL_SOURCES
+    ${HACL_DIR}/Hacl_AEAD_Chacha20Poly1305.c  # FPT-155: per-packet AEAD
+    ${HACL_DIR}/Hacl_Chacha20.c                # ChaCha20 stream cipher (dep)
+    ${HACL_DIR}/Hacl_MAC_Poly1305.c            # Poly1305 MAC (dep)
+    ${HACL_DIR}/Hacl_Ed25519.c                 # FPT-157: signing
+    ${HACL_DIR}/Hacl_Curve25519_51.c           # FPT-157: key exchange
+    ${HACL_DIR}/Hacl_HKDF.c                    # FPT-157: key derivation
+    ${HACL_DIR}/Hacl_HMAC.c                    # HKDF dependency
+    ${HACL_DIR}/Hacl_Hash_SHA2.c               # HMAC/Ed25519 dependency
+    ${HACL_DIR}/Hacl_Hash_Blake2b.c            # HMAC dependency (generic)
+    ${HACL_DIR}/Hacl_Hash_Blake2s.c            # HMAC dependency (generic)
+    ${HACL_DIR}/Hacl_Hash_MD5.c                # HMAC dependency (generic)
+    ${HACL_DIR}/Hacl_Hash_SHA1.c               # HMAC dependency (generic)
+    ${HACL_DIR}/Hacl_Hash_SHA3.c               # Ed25519 dependency
+    ${HACL_DIR}/Lib_Memzero0.c                 # FPT-166: secure zeroization
+)
+
 DeclareCAmkESComponent(DTUBridge
     SOURCES
         components/DTUBridge/DTUBridge.c
+        components/DTUBridge/crypto_transport.c
         ${VDTU_RING_SRC}
         ${LWIP_UDP_SOURCES}
+        ${HACL_SOURCES}
     INCLUDES
         components/DTUBridge
         ${VDTU_INCLUDE_DIR}
         ${LWIP_PATH}/src/include
         ${projects_dir}/util_libs/liblwip/include
         ${projects_dir}/util_libs/liblwip/include/lwip
+        ${HACL_DIR}
+        ${HACL_DIR}/internal
+        ${HACL_KARAMEL_DIR}/include
+        ${HACL_KARAMEL_DIR}/krmllib/dist/minimal
     C_FLAGS
         -DNODE_ID=${NODE_ID}
         -DKERNEL_ID=${KERNEL_ID}
         -DDTUB_SELF_IP=\"${SELF_IP}\"
         -DDTUB_PEER_IP_0=\"${PEER_IP_0}\"
         -DDTUB_PEER_IP_1=\"${PEER_IP_1}\"
+        -ffunction-sections -fdata-sections
 )
 
 endif(NOT SEMPEROS_NO_NETWORK)

@@ -38,6 +38,7 @@
 
 #include "e1000_hw.h"
 #include "vdtu_ring.h"
+#include "crypto_transport.h"
 
 #define COMPONENT_NAME "DTUBridge"
 
@@ -530,30 +531,49 @@ static void dtu_udp_recv_cb(void *arg, struct udp_pcb *pcb,
 {
     (void)arg; (void)pcb; (void)port;
 
-    if (!p || p->tot_len < VDTU_HEADER_SIZE) {
+    if (!p || p->tot_len < CT_OVERHEAD) {
         if (p) pbuf_free(p);
         return;
     }
 
-    /* Extract DTU header from UDP payload */
+    /* CryptoTransport: decrypt the entire UDP payload.
+     * Wire format: [ct_header_t][ciphertext][tag]
+     * Plaintext is the original DTU message: [vdtu_msg_header][payload]. */
+    uint8_t ct_buf[600];
+    uint16_t ct_len = p->tot_len;
+    if (ct_len > sizeof(ct_buf))
+        ct_len = sizeof(ct_buf);
+    pbuf_copy_partial(p, ct_buf, ct_len, 0);
+    pbuf_free(p);
+
+    uint8_t decrypted[600];
+    uint8_t sender_node;
+    int pt_len = ct_decrypt(ct_buf, ct_len, decrypted, sizeof(decrypted),
+                            &sender_node);
+    if (pt_len < 0) {
+        /* Auth failure, replay, or wrong receiver — drop silently */
+        return;
+    }
+
+    if (pt_len < VDTU_HEADER_SIZE) {
+        printf("[%s] NET RX: decrypted too short (%d)\n", COMPONENT_NAME, pt_len);
+        return;
+    }
+
+    /* Extract DTU header from decrypted plaintext */
     struct vdtu_msg_header hdr;
-    pbuf_copy_partial(p, &hdr, VDTU_HEADER_SIZE, 0);
+    memcpy(&hdr, decrypted, VDTU_HEADER_SIZE);
 
     /* Extract payload */
     uint16_t payload_len = hdr.length;
-    uint8_t payload_buf[487];  /* 512 - VDTU_HEADER_SIZE */
-    if (payload_len > sizeof(payload_buf))
-        payload_len = sizeof(payload_buf);
-    if (payload_len > 0)
-        pbuf_copy_partial(p, payload_buf, payload_len, VDTU_HEADER_SIZE);
+    uint8_t *payload_buf = decrypted + VDTU_HEADER_SIZE;
+    uint16_t avail = (uint16_t)(pt_len - VDTU_HEADER_SIZE);
+    if (payload_len > avail)
+        payload_len = avail;
 
-    printf("[%s] NET RX: %u bytes from %d.%d.%d.%d:%u (label=0x%lx)\n",
-           COMPONENT_NAME, (unsigned)p->tot_len,
-           ip4_addr1(ip_2_ip4(addr)), ip4_addr2(ip_2_ip4(addr)),
-           ip4_addr3(ip_2_ip4(addr)), ip4_addr4(ip_2_ip4(addr)),
-           port, (unsigned long)hdr.label);
-
-    pbuf_free(p);
+    printf("[%s] NET RX: %d bytes from node %u (label=0x%lx)\n",
+           COMPONENT_NAME, pt_len, sender_node,
+           (unsigned long)hdr.label);
 
     /* Write to inbound ring buffer for kernel to consume */
     if (net_rings_ready) {
@@ -676,6 +696,9 @@ void post_init(void)
     printf("[%s] Node %u (self=%s, peer0=%s, peer1=%s)\n",
            COMPONENT_NAME, my_node_id, DTUB_SELF_IP, DTUB_PEER_IP_0, DTUB_PEER_IP_1);
 
+    /* CryptoTransport init — per-packet AEAD with static PSKs (FPT-155) */
+    ct_init(my_node_id);
+
     /* lwIP init */
     lwip_init();
 
@@ -771,17 +794,29 @@ int run(void)
         if (net_rings_ready && !vdtu_ring_is_empty(&g_net_out_ring)) {
             const struct vdtu_message *outmsg = vdtu_ring_fetch(&g_net_out_ring);
             if (outmsg) {
-                uint16_t total_len = VDTU_HEADER_SIZE + outmsg->hdr.length;
-                struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, total_len, PBUF_RAM);
-                if (p) {
-                    memcpy(p->payload, outmsg, total_len);
-                    ip_addr_t dest_ip;
-                    ip_addr_copy_from_ip4(dest_ip, peer_addrs[0]);
-                    err_t err = udp_sendto(g_udp_pcb, p, &dest_ip, DTU_UDP_PORT);
-                    pbuf_free(p);
-                    printf("[%s] NET TX ring: %u bytes to peer 0 (label=0x%lx, err=%d)\n",
-                           COMPONENT_NAME, total_len,
-                           (unsigned long)outmsg->hdr.label, err);
+                uint16_t plaintext_len = VDTU_HEADER_SIZE + outmsg->hdr.length;
+
+                /* CryptoTransport: encrypt before sending.
+                 * Peer 0 is the default destination (multi-peer routing is future work). */
+                uint8_t ct_buf[700];
+                int ct_len = ct_encrypt(0, /* peer_id = 0 for now */
+                                        (const uint8_t *)outmsg, plaintext_len,
+                                        ct_buf, sizeof(ct_buf));
+                if (ct_len > 0) {
+                    struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, ct_len, PBUF_RAM);
+                    if (p) {
+                        memcpy(p->payload, ct_buf, ct_len);
+                        ip_addr_t dest_ip;
+                        ip_addr_copy_from_ip4(dest_ip, peer_addrs[0]);
+                        err_t err = udp_sendto(g_udp_pcb, p, &dest_ip, DTU_UDP_PORT);
+                        pbuf_free(p);
+                        printf("[%s] NET TX: %u->%d bytes to peer 0 (label=0x%lx, err=%d)\n",
+                               COMPONENT_NAME, plaintext_len, ct_len,
+                               (unsigned long)outmsg->hdr.label, err);
+                    }
+                } else {
+                    printf("[%s] NET TX: encrypt failed for %u bytes\n",
+                           COMPONENT_NAME, plaintext_len);
                 }
                 vdtu_ring_ack(&g_net_out_ring);
                 did_work = true;
