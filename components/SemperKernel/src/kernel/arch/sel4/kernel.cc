@@ -262,6 +262,21 @@ extern "C" void kernel_start(void) {
         DTU::get().config_recv_remote(
             vpe1->desc(), SRV_EP, 0, buf_order, msg_order, 0, true);
 
+        /* Configure kernel send channel to VPE1's service recv EP.
+         * SendGate::send() calls DTU::send_to() which needs
+         * find_send_channel_for(local_pe, ep) to succeed.
+         * Use SETUP_EP (13) which is reserved for child kernel spawning
+         * (not used in this prototype). FIRST_FREE_EP (14) must stay
+         * free for m3::DTU::reply() auto-configuration. */
+        DTU::get().config_send_local(
+            DTU::SETUP_EP,       /* kernel EP for this send channel */
+            0x54455354,          /* label (must match Service SendGate) */
+            vpe1->core(),        /* dest PE (global, translated in DTU.cc) */
+            vpe1->id(),          /* dest VPE */
+            SRV_EP,              /* dest EP (2) */
+            Service::SRV_MSG_SIZE,
+            1 << 9);             /* credits */
+
         /* Service capability selectors in VPE1's CapTable */
         const capsel_t GATE_SEL = 5;
         const capsel_t SRV_SEL = 6;
