@@ -192,14 +192,25 @@ extern "C" void kernel_start(void) {
         size_t peer_kid = (my_kid == 0) ? 1 : 0;
         size_t peer_base = peer_kid * NUM_LOCAL_PES;
 
-        /* Update MHT: mark peer's PE range as belonging to peer kernel */
-        MHTInstance::getInstance().updateMembership(
-            static_cast<membership_entry::pe_id_t>(peer_base),
-            static_cast<membership_entry::krnl_id_t>(peer_kid),
-            static_cast<membership_entry::pe_id_t>(peer_base),
-            NUM_LOCAL_PES,
-            MembershipFlags::NONE,
-            false /* don't broadcast — static config */);
+        /* Update MHT: mark peer's PE range as belonging to peer kernel.
+         * Cannot use updateMembership(start, krnl, ...) because it calls
+         * Platform::pe_by_core() which only knows local PEs. Instead,
+         * construct PEDesc array with peer's global PE IDs and use the
+         * array overload directly. */
+        {
+            m3::PEDesc peer_pes[NUM_LOCAL_PES];
+            for (int i = 0; i < NUM_LOCAL_PES; i++) {
+                peer_pes[i] = m3::PEDesc(
+                    (static_cast<m3::PEDesc::value_t>(peer_base + i) << 54) |
+                    static_cast<m3::PEDesc::value_t>(m3::PEType::COMP_IMEM));
+            }
+            MHTInstance::getInstance().updateMembership(
+                peer_pes, NUM_LOCAL_PES,
+                static_cast<membership_entry::krnl_id_t>(peer_kid),
+                static_cast<membership_entry::pe_id_t>(peer_base),
+                MembershipFlags::NONE,
+                false /* don't broadcast — static config */);
+        }
         printf("[SemperKernel] MHT: registered peer kernel %zu (PEs %zu-%zu)\n",
                peer_kid, peer_base, peer_base + NUM_LOCAL_PES - 1);
         MHTInstance::getInstance().printMembership();
@@ -280,11 +291,10 @@ extern "C" void kernel_start(void) {
         printf("[SemperKernel] Registered service 'testsrv' on VPE1 (EP %d, label=0x%x)\n",
                SRV_EP, (unsigned)srv_label);
 
-        /* Announce to peer kernel if KPE is registered */
-        if (Coordinator::get().numKPEs() > 0) {
-            Coordinator::get().broadcastAnnounceSrv(srvname, srv_id);
-            printf("[SemperKernel] Broadcast service announcement to peer\n");
-        }
+        /* Note: service announcement to peer deferred to runtime.
+         * broadcastAnnounceSrv at boot would block (net rings not attached,
+         * no peer connected). The peer discovers "testsrv" via the
+         * broadcastCreateSess fallback when VPE0 calls createsess. */
     }
 #endif
 

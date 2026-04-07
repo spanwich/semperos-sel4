@@ -45,7 +45,10 @@ static int send_chan = -1;
 
 static void init_channel_table(void)
 {
-    volatile void *msg[] = {
+    /* Must provide VDTU_MSG_CHANNELS (12) and VDTU_MEM_CHANNELS (6) entries.
+     * VPE0 only uses channels 0-7 (msg) and 0-3 (mem). Channels 8-11 and
+     * 4-5 belong to VPE1 — NULL from VPE0's perspective. */
+    volatile void *msg[VDTU_MSG_CHANNELS] = {
         (volatile void *)msgchan_kv_0,
         (volatile void *)msgchan_kv_1,
         (volatile void *)msgchan_kv_2,
@@ -54,12 +57,14 @@ static void init_channel_table(void)
         (volatile void *)msgchan_kv_5,
         (volatile void *)msgchan_kv_6,
         (volatile void *)msgchan_kv_7,
+        NULL, NULL, NULL, NULL,  /* channels 8-11: VPE1 */
     };
-    volatile void *mem[] = {
+    volatile void *mem[VDTU_MEM_CHANNELS] = {
         (volatile void *)memep_kv_0,
         (volatile void *)memep_kv_1,
         (volatile void *)memep_kv_2,
         (volatile void *)memep_kv_3,
+        NULL, NULL,  /* channels 4-5: VPE1 */
     };
     vdtu_channels_init(&channels, msg, mem);
 }
