@@ -51,10 +51,12 @@ static inline bool raft_cache_check_ancestry(uint64_t cap_id)
 /* PE IDs for this prototype */
 #define PE_KERNEL           0
 #define PE_VPE0             1
+#define PE_VPE1             3
 
-/* Pre-allocated channel counts (must match .camkes assembly) */
-#define NUM_MSG_CHANNELS    8
-#define NUM_MEM_CHANNELS    4
+/* Pre-allocated channel counts (must match .camkes assembly)
+ * Channels 0-7: kernel0 <-> VPE0, Channels 8-11: kernel0 <-> VPE1 */
+#define NUM_MSG_CHANNELS    12
+#define NUM_MEM_CHANNELS    6
 
 /*
  * =========================================================================
@@ -443,6 +445,8 @@ int config_wakeup_pe(int target_pe)
         notify_kernel_emit();
     } else if (target_pe == PE_VPE0) {
         notify_vpe0_emit();
+    } else if (target_pe == PE_VPE1) {
+        notify_vpe1_emit();
     } else {
         printf("[vDTU] WARNING: wakeup_pe for unknown PE %d\n", target_pe);
         return -1;

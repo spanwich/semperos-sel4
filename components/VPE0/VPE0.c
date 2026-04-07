@@ -27,8 +27,12 @@
  *   REVOKE     = 16
  *   NOOP       = 18
  */
+#define SYSCALL_CREATESRV   1
+#define SYSCALL_CREATESESS  2
 #define SYSCALL_CREATEGATE  4
 #define SYSCALL_EXCHANGE    9
+#define SYSCALL_DELEGATE    11
+#define SYSCALL_OBTAIN      12
 #define SYSCALL_REVOKE      16
 #define SYSCALL_NOOP        18
 
@@ -926,6 +930,114 @@ int run(void)
     }
 
     printf("[VPE0] === %d passed, %d failed ===\n", pass, fail);
+
+#ifdef SEMPER_MULTI_NODE
+    /* ==============================================================
+     * Spanning exchange tests (FPT-176)
+     *
+     * These tests exercise the session-based spanning exchange protocol
+     * across two nodes. They require SEMPER_MULTI_NODE=ON and a peer
+     * kernel with VPE1 running "testsrv".
+     *
+     * CREATESESS marshalling: [opcode(8)] [tvpe(4+pad4)] [sess(4+pad4)] [name_len(8)] [name_data+pad]
+     * OBTAIN/DELEGATE marshalling: [opcode(8)] [tvpe(4+pad4)] [sess(4+pad4)] [own CapRngDesc(16)] [other CapRngDesc(16)] [obtain(8)]
+     * ============================================================== */
+    {
+        int span_pass = 0, span_fail = 0;
+        int err;
+
+        /* Test S1: CREATESESS to "testsrv" on remote node.
+         * Uses broadcast path (Coordinator::broadcastCreateSess) since
+         * RemoteServiceList may not be populated yet. */
+        printf("\n[VPE0] === Spanning Exchange Tests (SEMPER_MULTI_NODE) ===\n");
+        {
+            int ok = 1;
+            /* Marshal CREATESESS: opcode, tvpe, sess, name */
+            uint8_t payload[64];
+            int off = 0;
+
+            /* opcode = CREATESESS (2) */
+            uint64_t opcode = SYSCALL_CREATESESS;
+            memcpy(payload + off, &opcode, 8); off += 8;
+
+            /* tvpe = 0 (self VPE cap) — capsel_t is 4 bytes, padded to 8 */
+            uint64_t tvpe = 0;
+            memcpy(payload + off, &tvpe, 8); off += 8;
+
+            /* sess = 500 (session cap selector) — capsel_t padded to 8 */
+            uint64_t sess = 500;
+            memcpy(payload + off, &sess, 8); off += 8;
+
+            /* name = "testsrv" — size_t len (8) + char data (padded to 8) */
+            uint64_t namelen = 7;
+            memcpy(payload + off, &namelen, 8); off += 8;
+            memcpy(payload + off, "testsrv", 7);
+            off += 8;  /* round up 7 to 8 */
+
+            err = send_syscall(payload, (uint16_t)off);
+            if (err == 0) {
+                span_pass++;
+                printf("[VPE0] Test S1 (CREATESESS 'testsrv' sess=500): PASS\n");
+            } else {
+                span_fail++;
+                printf("[VPE0] Test S1 (CREATESESS 'testsrv'): FAIL (err=%d)\n", err);
+            }
+        }
+
+        /* Test S2: OBTAIN through spanning session.
+         * This sends exchange_over_sess to the remote kernel which
+         * forwards to VPE1's service and returns caps. */
+        if (span_fail == 0) {
+            int ok = 1;
+            /* Marshal OBTAIN (opcode 12): tvpe, sess_cap, CapRngDesc own, CapRngDesc other, obtain flag */
+            uint8_t payload[72];
+            int off = 0;
+
+            uint64_t opcode = SYSCALL_OBTAIN;
+            memcpy(payload + off, &opcode, 8); off += 8;
+
+            /* tvpe = 0 (self) */
+            uint64_t tvpe = 0;
+            memcpy(payload + off, &tvpe, 8); off += 8;
+
+            /* sess_cap = 500 (from createsess) */
+            uint64_t sess_cap = 500;
+            memcpy(payload + off, &sess_cap, 8); off += 8;
+
+            /* own CapRngDesc: {type=OBJ(0), start=600, count=1} + pad */
+            uint32_t own_type = 0, own_start = 600, own_count = 1, own_pad = 0;
+            memcpy(payload + off, &own_type, 4); off += 4;
+            memcpy(payload + off, &own_start, 4); off += 4;
+            memcpy(payload + off, &own_count, 4); off += 4;
+            memcpy(payload + off, &own_pad, 4); off += 4;
+
+            err = send_syscall(payload, (uint16_t)off);
+            if (err == 0) {
+                span_pass++;
+                printf("[VPE0] Test S2 (OBTAIN via session 500 -> sel 600): PASS\n");
+            } else {
+                span_fail++;
+                printf("[VPE0] Test S2 (OBTAIN via session): FAIL (err=%d)\n", err);
+            }
+        }
+
+        /* Test S3: REVOKE spanning capability.
+         * If OBTAIN succeeded, cap at sel 600 has a parent-child link to
+         * the remote node. Revoking it should propagate via Kernelcalls::revoke. */
+        if (span_fail == 0) {
+            err = send_revoke(600);
+            if (err == 0) {
+                span_pass++;
+                printf("[VPE0] Test S3 (spanning REVOKE sel=600): PASS\n");
+            } else {
+                span_fail++;
+                printf("[VPE0] Test S3 (spanning REVOKE): FAIL (err=%d)\n", err);
+            }
+        }
+
+        printf("[VPE0] === Spanning: %d passed, %d failed ===\n", span_pass, span_fail);
+    }
+#endif /* SEMPER_MULTI_NODE */
 
     /* ==============================================================
      * Experiment 1: vDTU Primitive Latency Benchmarks

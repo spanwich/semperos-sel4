@@ -21,6 +21,9 @@
 
 #include "mem/MemoryModule.h"
 
+/* Number of local CAmkES PEs per node (kernel, vDTU, VPE0, VPE1) */
+#define NUM_LOCAL_PES 4
+
 namespace kernel {
 class KPE;
 
@@ -99,6 +102,14 @@ public:
 
     static unsigned int kernelId() {
         return _kenv.kernelId;
+    }
+    /* Base PE ID for this node (0 for node 0, 4 for node 1, etc.) */
+    static size_t pe_base() {
+#ifdef SEMPER_MULTI_NODE
+        return _kenv.kernelId * NUM_LOCAL_PES;
+#else
+        return 0;
+#endif
     }
     static unsigned int creatorKernelId() {
         return _kenv.creatorKernelId;

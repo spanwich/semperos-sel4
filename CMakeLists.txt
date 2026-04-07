@@ -47,6 +47,13 @@ if(SEMPEROS_NO_NETWORK)
     set(SEMPEROS_NO_NET_FLAG "-DSEMPEROS_NO_NETWORK")
 endif()
 
+# Multi-node mode: enables global PE IDs + MHT cross-node wiring (FPT-175)
+option(SEMPER_MULTI_NODE "Enable multi-node spanning protocol wiring" OFF)
+set(SEMPER_MULTI_NODE_FLAG "")
+if(SEMPER_MULTI_NODE)
+    set(SEMPER_MULTI_NODE_FLAG "-DSEMPER_MULTI_NODE")
+endif()
+
 # Node identity (compile-time constants per image)
 set(KERNEL_ID "0" CACHE STRING "Kernel identity (0, 1, 2)")
 set(SELF_IP "192.168.100.10" CACHE STRING "This node's IP address")
@@ -125,12 +132,14 @@ DeclareCAmkESComponent(SemperKernel
         ${SK_KERNEL}
     C_FLAGS
         ${SEMPEROS_NO_NET_FLAG}
+        ${SEMPER_MULTI_NODE_FLAG}
     CXX_FLAGS
         -std=c++11 -fno-exceptions -fno-rtti -fno-threadsafe-statics
         -D__sel4__
         -DSEMPER_KERNEL_ID=${KERNEL_ID}
         ${SEMPER_BENCH_FLAG}
         ${SEMPEROS_NO_NET_FLAG}
+        ${SEMPER_MULTI_NODE_FLAG}
     LINKER_LANGUAGE
         CXX
 )
@@ -145,6 +154,8 @@ DeclareCAmkESComponent(VPE0
         ${VDTU_CHANNELS_SRC}
     INCLUDES
         ${VDTU_INCLUDE_DIR}
+    C_FLAGS
+        ${SEMPER_MULTI_NODE_FLAG}
 )
 
 # =========================================================================
@@ -153,6 +164,10 @@ DeclareCAmkESComponent(VPE0
 DeclareCAmkESComponent(VPE1
     SOURCES
         components/VPE1/VPE1.c
+        ${VDTU_RING_SRC}
+        ${VDTU_CHANNELS_SRC}
+    INCLUDES
+        ${VDTU_INCLUDE_DIR}
 )
 
 # =========================================================================

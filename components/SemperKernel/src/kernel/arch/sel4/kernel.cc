@@ -28,6 +28,8 @@ extern "C" {
 #include "Coordinator.h"
 #include "WorkLoop.h"
 #include "mem/MainMemory.h"
+#include "ddl/MHTInstance.h"
+#include "cap/Capability.h"
 #include <thread/ThreadManager.h>
 
 using namespace kernel;
@@ -177,6 +179,43 @@ extern "C" void kernel_start(void) {
     PEManager::create();
     printf("[SemperKernel] PEManager created\n");
 
+#ifdef SEMPER_MULTI_NODE
+    /* FPT-175: Register peer kernel for 2-node spanning protocol.
+     * Each kernel statically knows the other's PE range and registers
+     * a KPE handle so Kernelcalls can route messages to it. */
+    {
+        size_t my_kid = Platform::kernelId();
+        size_t my_base = Platform::pe_base();
+
+        /* For a 2-node topology: node 0 peers with node 1, node 1 peers with node 0.
+         * Generalize later for 3+ nodes. */
+        size_t peer_kid = (my_kid == 0) ? 1 : 0;
+        size_t peer_base = peer_kid * NUM_LOCAL_PES;
+
+        /* Update MHT: mark peer's PE range as belonging to peer kernel */
+        MHTInstance::getInstance().updateMembership(
+            static_cast<membership_entry::pe_id_t>(peer_base),
+            static_cast<membership_entry::krnl_id_t>(peer_kid),
+            static_cast<membership_entry::pe_id_t>(peer_base),
+            NUM_LOCAL_PES,
+            MembershipFlags::NONE,
+            false /* don't broadcast — static config */);
+        printf("[SemperKernel] MHT: registered peer kernel %zu (PEs %zu-%zu)\n",
+               peer_kid, peer_base, peer_base + NUM_LOCAL_PES - 1);
+        MHTInstance::getInstance().printMembership();
+
+        /* Register KPE for peer kernel so Coordinator::getKPE() succeeds */
+        Coordinator::get().addKPE(
+            m3::String("kernel"),
+            peer_kid,
+            peer_base, /* peer's kernel core (global PE) */
+            DTU::KRNLC_EP,
+            DTU::KRNLC_EP);
+        printf("[SemperKernel] Registered KPE for peer kernel %zu (core %zu)\n",
+               peer_kid, peer_base);
+    }
+#endif
+
     /* Create worker threads for cooperative blocking (Task 09).
      * Must be created BEFORE the WorkLoop starts so wait_for() has
      * sleeping threads to switch to. */
@@ -198,6 +237,56 @@ extern "C" void kernel_start(void) {
     if (!vpe1) {
         printf("[SemperKernel] WARNING: Failed to create VPE1 (EXCHANGE tests unavailable)\n");
     }
+
+#ifdef SEMPER_MULTI_NODE
+    /* FPT-176: Register VPE1 as a service provider ("testsrv").
+     * The kernel creates the service directly rather than having VPE1
+     * send a createsrv syscall, because VPE1's syscall channel setup
+     * would require additional infrastructure. */
+    if (vpe1) {
+        /* Service recv EP on VPE1 — EP 2 (after DEF_RECVEP=1 and SYSC_EP=0) */
+        const int SRV_EP = 2;
+        int buf_order = 11;  /* 2048B buffer */
+        int msg_order = 9;   /* 512B slots → 4 slots */
+        DTU::get().config_recv_remote(
+            vpe1->desc(), SRV_EP, 0, buf_order, msg_order, 0, true);
+
+        /* Service capability selectors in VPE1's CapTable */
+        const capsel_t GATE_SEL = 5;
+        const capsel_t SRV_SEL = 6;
+
+        /* Create MsgCapability pointing to VPE1's service recv EP */
+        label_t srv_label = 0x54455354; /* "TEST" */
+        mht_key_t gate_key = HashUtil::structured_hash(
+            vpe1->core(), vpe1->id(), MSGOBJ, srv_label);
+        vpe1->objcaps().set(GATE_SEL,
+            new MsgCapability(&vpe1->objcaps(), GATE_SEL, srv_label,
+                vpe1->core(), vpe1->id(), SRV_EP, 1 << 9, gate_key, 0));
+
+        /* Register service in ServiceList */
+        mht_key_t srv_id = HashUtil::structured_hash(
+            vpe1->core(), vpe1->id(), SERVICE, SRV_SEL);
+        m3::String srvname("testsrv");
+        Service *srv = ServiceList::get().add(
+            *vpe1, SRV_SEL, srvname,
+            SRV_EP, srv_label, 1 /* capacity */, srv_id);
+
+        /* Create ServiceCapability in VPE1's CapTable */
+        mht_key_t srvcap_key = HashUtil::structured_hash(
+            vpe1->core(), vpe1->id(), SRVCAP, SRV_SEL);
+        vpe1->objcaps().set(SRV_SEL,
+            new ServiceCapability(&vpe1->objcaps(), SRV_SEL, srv, srvcap_key));
+
+        printf("[SemperKernel] Registered service 'testsrv' on VPE1 (EP %d, label=0x%x)\n",
+               SRV_EP, (unsigned)srv_label);
+
+        /* Announce to peer kernel if KPE is registered */
+        if (Coordinator::get().numKPEs() > 0) {
+            Coordinator::get().broadcastAnnounceSrv(srvname, srv_id);
+            printf("[SemperKernel] Broadcast service announcement to peer\n");
+        }
+    }
+#endif
 
     /* Attach to network ring buffers (DTUBridge initialized them in post_init) */
     net_init_rings();

@@ -12,8 +12,8 @@
 
 #include "vdtu_ring.h"
 
-#define VDTU_MSG_CHANNELS  8
-#define VDTU_MEM_CHANNELS  4
+#define VDTU_MSG_CHANNELS  12  /* 8 VPE0 + 4 VPE1 (FPT-175) */
+#define VDTU_MEM_CHANNELS  6   /* 4 VPE0 + 2 VPE1 */
 
 struct vdtu_channel_table {
     volatile void *msg[VDTU_MSG_CHANNELS];

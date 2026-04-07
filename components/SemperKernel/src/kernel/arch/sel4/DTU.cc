@@ -34,6 +34,9 @@ extern "C" {
 extern volatile void *msgchan_kv_0, *msgchan_kv_1, *msgchan_kv_2, *msgchan_kv_3;
 extern volatile void *msgchan_kv_4, *msgchan_kv_5, *msgchan_kv_6, *msgchan_kv_7;
 extern volatile void *memep_kv_0, *memep_kv_1, *memep_kv_2, *memep_kv_3;
+/* VPE1 channels (FPT-175) */
+extern volatile void *msgchan_v1_0, *msgchan_v1_1, *msgchan_v1_2, *msgchan_v1_3;
+extern volatile void *memep_v1_0, *memep_v1_1;
 
 /* vDTU config RPC stubs (from VDTUConfig interface) */
 int vdtu_config_recv(int target_pe, int ep_id, int buf_order, int msg_order, int flags);
@@ -106,6 +109,7 @@ static void ensure_channels_init(void)
     if (channels_initialized) return;
 
     volatile void *msg[] = {
+        /* Channels 0-7: kernel0 <-> VPE0 */
         (volatile void *)msgchan_kv_0,
         (volatile void *)msgchan_kv_1,
         (volatile void *)msgchan_kv_2,
@@ -114,12 +118,20 @@ static void ensure_channels_init(void)
         (volatile void *)msgchan_kv_5,
         (volatile void *)msgchan_kv_6,
         (volatile void *)msgchan_kv_7,
+        /* Channels 8-11: kernel0 <-> VPE1 (FPT-175) */
+        (volatile void *)msgchan_v1_0,
+        (volatile void *)msgchan_v1_1,
+        (volatile void *)msgchan_v1_2,
+        (volatile void *)msgchan_v1_3,
     };
     volatile void *mem[] = {
         (volatile void *)memep_kv_0,
         (volatile void *)memep_kv_1,
         (volatile void *)memep_kv_2,
         (volatile void *)memep_kv_3,
+        /* VPE1 mem channels (FPT-175) */
+        (volatile void *)memep_v1_0,
+        (volatile void *)memep_v1_1,
     };
     vdtu_channels_init(&channels, msg, mem);
 
@@ -150,6 +162,20 @@ static int find_send_channel_for(int dest_pe, int dest_ep)
  * ================================================================ */
 
 namespace kernel {
+
+/*
+ * PE routing helpers.
+ * In multi-node mode, PE IDs are globally unique (node 0: 0-3, node 1: 4-7).
+ * VDTUService and shared memory channels always use local PE indices (0-3).
+ * NUM_LOCAL_PES is defined in Platform.h.
+ */
+static inline bool is_local_pe(int pe) {
+    int base = (int)Platform::pe_base();
+    return pe >= base && pe < base + NUM_LOCAL_PES;
+}
+static inline int to_local_pe(int pe) {
+    return pe - (int)Platform::pe_base();
+}
 
 /* Note: DTU::_inst is defined in top-level DTU.cc with INIT_PRIO_USER(1) */
 
@@ -183,13 +209,13 @@ void DTU::unmap_page(const VPEDesc &, uintptr_t) { }
 
 void DTU::invalidate_ep(const VPEDesc &vpe, int ep) {
     ensure_channels_init();
-    int target_pe = vpe.core;
-    int rc = vdtu_invalidate_ep(target_pe, ep);
+    int local_pe = to_local_pe(vpe.core);
+    int rc = vdtu_invalidate_ep(local_pe, ep);
     if (rc != 0) {
-        KLOG_V(EPS, "invalidate_ep(pe=" << target_pe << " ep=" << ep << ") failed: " << rc);
+        KLOG_V(EPS, "invalidate_ep(pe=" << vpe.core << " ep=" << ep << ") failed: " << rc);
     }
     /* Clear local mapping if this is our own EP */
-    if (target_pe == MY_PE && ep >= 0 && ep < EP_COUNT) {
+    if (local_pe == MY_PE && ep >= 0 && ep < EP_COUNT) {
         ep_channel[ep] = -1;
         ep_type[ep] = EP_NONE;
     }
@@ -197,10 +223,10 @@ void DTU::invalidate_ep(const VPEDesc &vpe, int ep) {
 
 void DTU::invalidate_eps(const VPEDesc &vpe, int first) {
     ensure_channels_init();
-    int target_pe = vpe.core;
-    vdtu_invalidate_eps(target_pe, first);
+    int local_pe = to_local_pe(vpe.core);
+    vdtu_invalidate_eps(local_pe, first);
     /* Clear local mappings */
-    if (target_pe == MY_PE) {
+    if (local_pe == MY_PE) {
         for (int i = first; i < EP_COUNT; i++) {
             ep_channel[i] = -1;
             ep_type[i] = EP_NONE;
@@ -242,9 +268,9 @@ void DTU::config_recv_remote(const VPEDesc &vpe, int ep, uintptr_t buf,
     uint order, uint msgorder, int flags, bool valid)
 {
     ensure_channels_init();
-    int target_pe = vpe.core;
+    int target_pe = to_local_pe(vpe.core);
 
-    /* RPC to vDTU for remote PE */
+    /* RPC to vDTU for remote PE (using local PE index) */
     int ch = vdtu_config_recv(target_pe, ep, order, msgorder, flags);
     if (ch < 0) {
         KLOG(ERR, "config_recv_remote(pe=" << target_pe << " ep=" << ep << ") failed");
@@ -269,8 +295,9 @@ void DTU::config_send_local(int ep, label_t label, int dstcore, int dstvpe,
 {
     ensure_channels_init();
 
-    /* RPC to vDTU: get the channel for the destination's recv EP */
-    int ch = vdtu_config_send(MY_PE, ep, dstcore, dstep, dstvpe,
+    /* Translate global→local for VDTUService RPC */
+    int local_dst = to_local_pe(dstcore);
+    int ch = vdtu_config_send(MY_PE, ep, local_dst, dstep, dstvpe,
                               (int)msgsize, (uint64_t)label, (int)credits);
     if (ch < 0) {
         KLOG(ERR, "config_send_local(ep=" << ep << " -> pe=" << dstcore
@@ -283,7 +310,7 @@ void DTU::config_send_local(int ep, label_t label, int dstcore, int dstvpe,
 
     ep_channel[ep] = ch;
     ep_type[ep] = EP_SEND;
-    ep_send_config[ep].dest_pe = dstcore;
+    ep_send_config[ep].dest_pe = local_dst;
     ep_send_config[ep].dest_ep = dstep;
     ep_send_config[ep].dest_vpe = dstvpe;
     ep_send_config[ep].label = label;
@@ -296,9 +323,11 @@ void DTU::config_send_remote(const VPEDesc &vpe, int ep, label_t label,
     int dstcore, int dstvpe, int dstep, size_t msgsize, word_t credits)
 {
     ensure_channels_init();
-    int target_pe = vpe.core;
+    int target_pe = to_local_pe(vpe.core);
 
-    int ch = vdtu_config_send(target_pe, ep, dstcore, dstep, dstvpe,
+    /* Translate both target and destination to local PE indices */
+    int local_dst = to_local_pe(dstcore);
+    int ch = vdtu_config_send(target_pe, ep, local_dst, dstep, dstvpe,
                               (int)msgsize, (uint64_t)label, (int)credits);
     if (ch < 0) {
         KLOG(ERR, "config_send_remote(pe=" << target_pe << " ep=" << ep << ") failed");
@@ -314,7 +343,7 @@ void DTU::config_send_remote(const VPEDesc &vpe, int ep, label_t label,
 void DTU::config_mem_local(int ep, int dstcore, int dstvpe, uintptr_t addr, size_t size) {
     ensure_channels_init();
 
-    int ch = vdtu_config_mem(MY_PE, ep, dstcore, addr, size, dstvpe, 3 /* RW */);
+    int ch = vdtu_config_mem(MY_PE, ep, to_local_pe(dstcore), addr, size, dstvpe, 3 /* RW */);
     if (ch < 0) {
         KLOG(ERR, "config_mem_local(ep=" << ep << ") failed");
         return;
@@ -330,22 +359,15 @@ void DTU::config_mem_remote(const VPEDesc &vpe, int ep, int dstcore,
     int dstvpe, uintptr_t addr, size_t size, int perm)
 {
     ensure_channels_init();
-    int target_pe = vpe.core;
+    int target_pe = to_local_pe(vpe.core);
 
-    int ch = vdtu_config_mem(target_pe, ep, dstcore, addr, size, dstvpe, perm);
+    int ch = vdtu_config_mem(target_pe, ep, to_local_pe(dstcore), addr, size, dstvpe, perm);
     if (ch < 0) {
         KLOG(ERR, "config_mem_remote(pe=" << target_pe << " ep=" << ep << ") failed");
         return;
     }
     /* For remote PEs, no local mapping needed */
 }
-
-/*
- * Remote PE routing threshold.
- * PE IDs 0..NUM_LOCAL_PES-1 are local (served by shared memory channels).
- * PE IDs >= NUM_LOCAL_PES are remote (forwarded via DTUBridge UDP).
- */
-#define NUM_LOCAL_PES 4
 
 /* Network ring buffer send (07e) — defined in camkes_entry.c */
 extern "C" {
@@ -360,12 +382,9 @@ void DTU::send_to(const VPEDesc &vpe, int ep, label_t label,
 {
     ensure_channels_init();
 
-    /* Route remote PEs via DTUBridge ring buffer → UDP (07e) */
-    if (vpe.core >= NUM_LOCAL_PES) {
-        int dest_node = (vpe.core - NUM_LOCAL_PES) / NUM_LOCAL_PES;
-
-        printf("[SemperKernel] Routing to remote node %d via ring (%zu bytes payload)\n",
-               dest_node, size);
+    /* Route remote PEs via DTUBridge ring buffer → UDP */
+    if (!is_local_pe(vpe.core)) {
+        KLOG(KRNLC, "Routing PE " << vpe.core << " to remote via ring (" << size << "B)");
 
         int rc = net_ring_send(MY_PE, (uint8_t)ep,
                                Platform::kernelId(), (uint8_t)replyep,
@@ -377,8 +396,8 @@ void DTU::send_to(const VPEDesc &vpe, int ep, label_t label,
         return;
     }
 
-    /* Local PE: use shared memory channel */
-    int ch = find_send_channel_for(vpe.core, ep);
+    /* Local PE: use shared memory channel (translate global→local) */
+    int ch = find_send_channel_for(to_local_pe(vpe.core), ep);
     if (ch < 0) {
         KLOG(ERR, "send_to(pe=" << vpe.core << " ep=" << ep << ") no send channel");
         return;
@@ -399,7 +418,8 @@ void DTU::reply_to(const VPEDesc &vpe, int ep, int crdep, word_t credits,
      * Find a send channel to the VPE's reply endpoint. */
     ensure_channels_init();
 
-    int ch = find_send_channel_for(vpe.core, ep);
+    int local_pe = to_local_pe(vpe.core);
+    int ch = find_send_channel_for(local_pe, ep);
     if (ch < 0) {
         KLOG(ERR, "reply_to(pe=" << vpe.core << " ep=" << ep << ") no reply channel");
         return;
@@ -415,9 +435,10 @@ void DTU::reply_to(const VPEDesc &vpe, int ep, int crdep, word_t credits,
 
 void DTU::write_mem(const VPEDesc &vpe, uintptr_t addr, const void *data, size_t size) {
     ensure_channels_init();
+    int local_pe = to_local_pe(vpe.core);
 
     for (int i = 0; i < EP_COUNT; i++) {
-        if (ep_type[i] != EP_MEM || ep_mem_config[i].dest_pe != vpe.core)
+        if (ep_type[i] != EP_MEM || ep_mem_config[i].dest_pe != local_pe)
             continue;
         uintptr_t base = ep_mem_config[i].base_addr;
         size_t region = ep_mem_config[i].size;
@@ -434,9 +455,10 @@ void DTU::write_mem(const VPEDesc &vpe, uintptr_t addr, const void *data, size_t
 
 void DTU::read_mem(const VPEDesc &vpe, uintptr_t addr, void *data, size_t size) {
     ensure_channels_init();
+    int local_pe = to_local_pe(vpe.core);
 
     for (int i = 0; i < EP_COUNT; i++) {
-        if (ep_type[i] != EP_MEM || ep_mem_config[i].dest_pe != vpe.core)
+        if (ep_type[i] != EP_MEM || ep_mem_config[i].dest_pe != local_pe)
             continue;
         uintptr_t base = ep_mem_config[i].base_addr;
         size_t region = ep_mem_config[i].size;

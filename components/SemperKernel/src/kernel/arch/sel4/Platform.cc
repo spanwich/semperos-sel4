@@ -29,22 +29,28 @@ Platform::KEnv::KEnv() {
      *   PE 1 = vDTU service (not a user PE, but in the PE array)
      *   PE 2 = VPE0 (first user VPE)
      *   PE 3 = VPE1 (second user VPE, if configured)
+     *
+     * In multi-node mode, PE IDs are globally unique:
+     *   Node 0: PEs 0-3, Node 1: PEs 4-7, Node 2: PEs 8-11
+     * The MHT uses these global IDs for capability routing.
      */
-    pe_count = 4;
-
-    /* Build PEDesc values: core_id in top 10 bits (bits 63:54), type in low 3 bits */
-    pes[0] = m3::PEDesc((static_cast<m3::PEDesc::value_t>(0) << 54) |
-             static_cast<m3::PEDesc::value_t>(m3::PEType::COMP_IMEM));
-    pes[1] = m3::PEDesc((static_cast<m3::PEDesc::value_t>(1) << 54) |
-             static_cast<m3::PEDesc::value_t>(m3::PEType::COMP_IMEM));
-    pes[2] = m3::PEDesc((static_cast<m3::PEDesc::value_t>(2) << 54) |
-             static_cast<m3::PEDesc::value_t>(m3::PEType::COMP_IMEM));
-    pes[3] = m3::PEDesc((static_cast<m3::PEDesc::value_t>(3) << 54) |
-             static_cast<m3::PEDesc::value_t>(m3::PEType::COMP_IMEM));
-
 #ifndef SEMPER_KERNEL_ID
 #define SEMPER_KERNEL_ID 0
 #endif
+
+#ifdef SEMPER_MULTI_NODE
+    size_t base = SEMPER_KERNEL_ID * NUM_LOCAL_PES;
+#else
+    size_t base = 0;
+#endif
+    pe_count = NUM_LOCAL_PES;
+
+    /* Build PEDesc values: core_id in top 10 bits (bits 63:54), type in low 3 bits */
+    for (size_t i = 0; i < NUM_LOCAL_PES; i++) {
+        pes[i] = m3::PEDesc((static_cast<m3::PEDesc::value_t>(base + i) << 54) |
+                 static_cast<m3::PEDesc::value_t>(m3::PEType::COMP_IMEM));
+    }
+
     kernelId = SEMPER_KERNEL_ID;
     creatorKernelId = 0;
     creatorCore = 0;
@@ -86,7 +92,7 @@ Platform::KEnv::KEnv(uintptr_t* _mods, size_t _pe_count, m3::PEDesc _pes[], uint
 }
 
 size_t Platform::kernel_pe() {
-    return 0; /* kernel is always PE 0 */
+    return pe_base(); /* kernel is always local PE 0, global = pe_base */
 }
 
 m3::PEDesc Platform::first_pe() {

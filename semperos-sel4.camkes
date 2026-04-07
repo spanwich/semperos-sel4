@@ -90,9 +90,10 @@ component VDTUService {
      * memory is point-to-point between kernel and VPE0.
      */
 
-    /* Control plane notifications: vDTU can wake kernel or VPE0 (wakeup_pe) */
+    /* Control plane notifications: vDTU can wake kernel, VPE0, or VPE1 (wakeup_pe) */
     emits    Signal notify_kernel;
     emits    Signal notify_vpe0;
+    emits    Signal notify_vpe1;
 
     /* Kernel signals vDTU when done (for coordination) */
     consumes Signal kernel_done;
@@ -131,6 +132,20 @@ component SemperKernel {
 
     /* Data path: VPE0 signals kernel that a reply is available */
     consumes Signal signal_from_vpe0;
+
+    /* VPE1 message channel dataports (FPT-175) */
+    dataport Buf(4096) msgchan_v1_0;
+    dataport Buf(4096) msgchan_v1_1;
+    dataport Buf(4096) msgchan_v1_2;
+    dataport Buf(4096) msgchan_v1_3;
+
+    /* VPE1 memory endpoint dataports */
+    dataport Buf(4096) memep_v1_0;
+    dataport Buf(4096) memep_v1_1;
+
+    /* VPE1 signals */
+    emits    Signal signal_vpe1;
+    consumes Signal signal_from_vpe1;
 
     /* Network bridge: kernel sends remote DTU messages via RPC */
     uses DTUNetIPC net;
@@ -180,12 +195,34 @@ component VPE0 {
 }
 
 /*
- * VPE1: Passive VPE for EXCHANGE syscall testing (Task 06).
- * VPE1's CapTable is manipulated directly by the kernel during EXCHANGE.
- * No shared data channels needed — VPE1 doesn't send/receive messages.
+ * VPE1: Service VPE for spanning exchange testing (FPT-175).
+ * In multi-node mode, VPE1 registers a service and handles OPEN/OBTAIN/DELEGATE.
+ * In single-node mode, still passive (CapTable manipulated by kernel).
  */
 component VPE1 {
     control;
+
+    /* Config RPC: VPE1 -> vDTU */
+    uses VDTUConfig vdtu;
+
+    /* Message channel dataports (shared with SemperKernel) */
+    dataport Buf(4096) msgchan_v1_0;
+    dataport Buf(4096) msgchan_v1_1;
+    dataport Buf(4096) msgchan_v1_2;
+    dataport Buf(4096) msgchan_v1_3;
+
+    /* Memory endpoint dataports */
+    dataport Buf(4096) memep_v1_0;
+    dataport Buf(4096) memep_v1_1;
+
+    /* Control plane: vDTU can wake VPE1 */
+    consumes Signal vdtu_wakeup_vpe1;
+
+    /* Data path: kernel signals VPE1 that a message is available */
+    consumes Signal signal_from_kernel_v1;
+
+    /* Data path: VPE1 signals kernel that a reply is available */
+    emits    Signal signal_kernel_v1;
 }
 
 /*
@@ -272,6 +309,28 @@ assembly {
                                          to vpe0.memep_kv_3);
 
         /*
+         * Message channel dataports: kernel0 <-> vpe1 (FPT-175)
+         * Channels 8-11 in VDTUService pool.
+         */
+        connection seL4SharedData msgchan_v1_0(from kernel0.msgchan_v1_0,
+                                                to vpe1.msgchan_v1_0);
+        connection seL4SharedData msgchan_v1_1(from kernel0.msgchan_v1_1,
+                                                to vpe1.msgchan_v1_1);
+        connection seL4SharedData msgchan_v1_2(from kernel0.msgchan_v1_2,
+                                                to vpe1.msgchan_v1_2);
+        connection seL4SharedData msgchan_v1_3(from kernel0.msgchan_v1_3,
+                                                to vpe1.msgchan_v1_3);
+
+        /* Memory endpoint dataports: kernel0 <-> vpe1 */
+        connection seL4SharedData memep_v1_0(from kernel0.memep_v1_0,
+                                              to vpe1.memep_v1_0);
+        connection seL4SharedData memep_v1_1(from kernel0.memep_v1_1,
+                                              to vpe1.memep_v1_1);
+
+        /* VPE1 VDTUConfig RPC */
+        connection seL4RPCCall vpe1_config_rpc(from vpe1.vdtu, to vdtu.config);
+
+        /*
          * Control plane notifications: vDTU -> kernel, vDTU -> VPE0
          * Used by wakeup_pe() to wake a PE from seL4_Wait().
          */
@@ -279,6 +338,8 @@ assembly {
                                                     to kernel0.vdtu_wakeup);
         connection seL4Notification vdtu_wake_vpe0(from vdtu.notify_vpe0,
                                                     to vpe0.vdtu_wakeup);
+        connection seL4Notification vdtu_wake_vpe1(from vdtu.notify_vpe1,
+                                                    to vpe1.vdtu_wakeup_vpe1);
         connection seL4Notification kern_done(from kernel0.kernel_done,
                                               to vdtu.kernel_done);
 
@@ -290,6 +351,12 @@ assembly {
                                                   to vpe0.signal_from_kernel);
         connection seL4Notification vpe0_to_kern(from vpe0.signal_kernel,
                                                   to kernel0.signal_from_vpe0);
+
+        /* Data path notifications: kernel <-> VPE1 (FPT-175) */
+        connection seL4Notification kern_to_vpe1(from kernel0.signal_vpe1,
+                                                  to vpe1.signal_from_kernel_v1);
+        connection seL4Notification vpe1_to_kern(from vpe1.signal_kernel_v1,
+                                                  to kernel0.signal_from_vpe1);
 
         /*
          * DTUBridge: E1000 hardware + network transport
@@ -332,8 +399,9 @@ assembly {
         vpe0.priority = 200;
         /* VPE1 gets PE ID 3 — passive EXCHANGE target, same priority for seL4_Yield() */
         vpe1.priority = 200;
-        /* VPE1 is passive — minimal heap (default 4 MiB would exhaust untyped memory) */
-        vpe1._heap_size = 4096;
+        /* VPE1 service mode (FPT-175): needs heap for channel init */
+        vpe1._heap_size = 65536;
+        vpe1._stack_size = 16384;
 
         /* DTUBridge: E1000 + lwIP UDP bridge */
         dtu_bridge.priority = 200;
