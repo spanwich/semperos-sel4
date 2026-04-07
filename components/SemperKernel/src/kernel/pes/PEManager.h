@@ -143,7 +143,7 @@ public:
         return _daemons;
     }
     bool exists(int id) {
-        return id < (int)Platform::pe_count() && _vpes[id];
+        return id >= 0 && id < (int)Platform::MAX_PES && _vpes[id];
     }
     VPE &vpe(int id) {
         assert(_vpes[id]);

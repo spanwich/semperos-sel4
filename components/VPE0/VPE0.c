@@ -12,8 +12,14 @@
 #include "vdtu_channels.h"
 #include "tsc_calibrate.h"
 
-/* VPE0 is PE 2 in the platform config */
+/* VPE0 is local PE 2. In multi-node mode, global PE = KERNEL_ID * 4 + 2.
+ * The kernel's WorkLoop looks up VPE from senderCoreId, which must match
+ * the global PE ID used in PEDesc. */
+#ifdef SEMPER_MULTI_NODE
+#define MY_PE       (SEMPER_KERNEL_ID * 4 + 2)
+#else
 #define MY_PE       2
+#endif
 #define MY_VPE_ID   0
 
 /* SemperOS endpoint IDs */
@@ -98,6 +104,10 @@ static int wait_for_reply_ex(uint64_t *out_cycles)
             }
         }
         if (reply) break;
+        /* Yield every 1000 iterations so kernel + DTUBridge can run.
+         * On single-core QEMU, without this the CPU is monopolized
+         * and the kernel can never process our syscall. */
+        if (timeout % 1000 == 0) seL4_Yield();
     }
 
     if (!reply) return -1;
@@ -636,23 +646,28 @@ int run(void)
 
     int pass = 0, fail = 0, err;
 
+    /* Kernel readiness check: always needed */
     /* ==============================================================
      * Kernel readiness check: retry NOOP until WorkLoop is polling.
      * On XCP-ng cold boot, VPE0 can start before SemperKernel enters
      * its WorkLoop. Retry with spin backoff instead of a fixed sleep.
      * ============================================================== */
     {
-        #define NOOP_RETRIES     20
-        #define NOOP_RETRY_SPIN  100000
+        #define NOOP_RETRIES     50
         int ready = 0;
         for (int attempt = 0; attempt < NOOP_RETRIES; attempt++) {
             if (send_noop() == 0) { ready = 1; break; }
-            for (volatile int s = 0; s < NOOP_RETRY_SPIN; s++) {}
+            /* Yield between retries so kernel can start its WorkLoop */
+            for (int y = 0; y < 100; y++) seL4_Yield();
         }
         if (!ready) {
             printf("[VPE0] WARNING: kernel not ready after %d NOOP retries\n", NOOP_RETRIES);
         }
     }
+
+#ifndef SEMPER_MULTI_NODE
+    /* Local tests 1-11 and benchmarks — skip in multi-node mode
+     * to let DTUBridge run the hello exchange + PING/PONG sooner. */
 
     /* ==============================================================
      * Test 1: NOOP x3 (multi-message, no double-ack)
@@ -935,6 +950,7 @@ int run(void)
     }
 
     printf("[VPE0] === %d passed, %d failed ===\n", pass, fail);
+#endif /* !SEMPER_MULTI_NODE — end of local tests */
 
 #ifdef SEMPER_MULTI_NODE
     /* ==============================================================
@@ -951,41 +967,64 @@ int run(void)
         int span_pass = 0, span_fail = 0;
         int err;
 
+        /* Wait for DTUBridge hello exchange to complete.
+         * On single-core QEMU, DTUBridge needs yield() cycles to send/receive
+         * hello packets and establish peer connectivity. Without this delay,
+         * CREATESESS fires before the network is up and blocks the kernel. */
+        printf("\n[VPE0] === Spanning Exchange Tests (SEMPER_MULTI_NODE, node %d) ===\n",
+               SEMPER_KERNEL_ID);
+
+        /* Only node 0 initiates spanning tests. Other nodes provide the
+         * service and must keep yielding so DTUBridge + kernel can process
+         * incoming requests. */
+        if (SEMPER_KERNEL_ID != 0) {
+            printf("[VPE0] Node %d: service-only mode (not initiator)\n", SEMPER_KERNEL_ID);
+            printf("[VPE0] === Spanning: skipped (not initiator) ===\n");
+            for (;;) { seL4_Yield(); }
+        }
         /* Test S1: CREATESESS to "testsrv" on remote node.
-         * Uses broadcast path (Coordinator::broadcastCreateSess) since
-         * RemoteServiceList may not be populated yet. */
-        printf("\n[VPE0] === Spanning Exchange Tests (SEMPER_MULTI_NODE) ===\n");
+         * DTUBridge gates outbound messages until hello completes.
+         * The kernel blocks in wait_for() but worker threads keep the
+         * WorkLoop running. Retry if timeout (network may need time). */
         {
-            int ok = 1;
             /* Marshal CREATESESS: opcode, tvpe, sess, name */
             uint8_t payload[64];
             int off = 0;
 
-            /* opcode = CREATESESS (2) */
             uint64_t opcode = SYSCALL_CREATESESS;
             memcpy(payload + off, &opcode, 8); off += 8;
 
-            /* tvpe = 0 (self VPE cap) — capsel_t is 4 bytes, padded to 8 */
+            /* tvpe = 0 (self VPE cap) */
             uint64_t tvpe = 0;
             memcpy(payload + off, &tvpe, 8); off += 8;
 
-            /* sess = 500 (session cap selector) — capsel_t padded to 8 */
+            /* sess = 500 (session cap selector) */
             uint64_t sess = 500;
             memcpy(payload + off, &sess, 8); off += 8;
 
-            /* name = "testsrv" — size_t len (8) + char data (padded to 8) */
+            /* name = "testsrv" */
             uint64_t namelen = 7;
             memcpy(payload + off, &namelen, 8); off += 8;
             memcpy(payload + off, "testsrv", 7);
-            off += 8;  /* round up 7 to 8 */
+            off += 8;
 
-            err = send_syscall(payload, (uint16_t)off);
+            #define S1_RETRIES 5
+            err = -1;
+            for (int attempt = 0; attempt < S1_RETRIES && err != 0; attempt++) {
+                if (attempt > 0) {
+                    printf("[VPE0] S1 retry %d/%d (waiting for network)...\n",
+                           attempt + 1, S1_RETRIES);
+                    for (int y = 0; y < 5000; y++) seL4_Yield();
+                }
+                err = send_syscall(payload, (uint16_t)off);
+            }
             if (err == 0) {
                 span_pass++;
                 printf("[VPE0] Test S1 (CREATESESS 'testsrv' sess=500): PASS\n");
             } else {
                 span_fail++;
-                printf("[VPE0] Test S1 (CREATESESS 'testsrv'): FAIL (err=%d)\n", err);
+                printf("[VPE0] Test S1 (CREATESESS 'testsrv'): FAIL (err=%d after %d attempts)\n",
+                       err, S1_RETRIES);
             }
         }
 
@@ -1044,6 +1083,7 @@ int run(void)
     }
 #endif /* SEMPER_MULTI_NODE */
 
+#ifndef SEMPER_MULTI_NODE
     /* ==============================================================
      * Experiment 1: vDTU Primitive Latency Benchmarks
      *
@@ -1293,6 +1333,10 @@ int run(void)
     }
 
     printf("\n[VPE0] === Experiment 2A complete ===\n");
+#endif /* !SEMPER_MULTI_NODE — end of benchmarks */
+
+    /* In multi-node mode, yield forever so DTUBridge keeps polling */
+    for (;;) { seL4_Yield(); }
 
     return 0;
 }

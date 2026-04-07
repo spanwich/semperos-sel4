@@ -15,8 +15,11 @@
 #include "vdtu_ring.h"
 #include "vdtu_channels.h"
 
-/* VPE1 is PE 3 in the platform config (local index) */
-#define MY_PE       3
+/* VPE1 is local PE 3. In multi-node mode, global PE = KERNEL_ID * 4 + 3. */
+#ifndef SEMPER_KERNEL_ID
+#define SEMPER_KERNEL_ID 0
+#endif
+#define MY_PE       (SEMPER_KERNEL_ID * 4 + 3)
 #define MY_VPE_ID   1
 
 /* Service protocol commands (must match m3::KIF::Service in KIF.h:87-95) */

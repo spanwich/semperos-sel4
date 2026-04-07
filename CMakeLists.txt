@@ -156,6 +156,7 @@ DeclareCAmkESComponent(VPE0
         ${VDTU_INCLUDE_DIR}
     C_FLAGS
         ${SEMPER_MULTI_NODE_FLAG}
+        -DSEMPER_KERNEL_ID=${KERNEL_ID}
 )
 
 # =========================================================================
@@ -168,6 +169,8 @@ DeclareCAmkESComponent(VPE1
         ${VDTU_CHANNELS_SRC}
     INCLUDES
         ${VDTU_INCLUDE_DIR}
+    C_FLAGS
+        -DSEMPER_KERNEL_ID=${KERNEL_ID}
 )
 
 # =========================================================================

@@ -781,18 +781,17 @@ int run(void)
         /* Pump lwIP timers (ARP, etc.) */
         sys_check_timeouts();
 
-        /* Hello exchange: send a few times with spacing to ensure ARP resolves.
-         * Send at loop_count 200000, 400000, 600000 (gives ARP time to complete). */
-        if (driver_ready && hello_send_attempts < 3) {
-            if (loop_count == 200000 || loop_count == 400000 || loop_count == 600000) {
-                send_hello();
-                hello_send_attempts++;
-                hello_sent = 1;
-            }
+        /* Hello exchange: prioritize connection establishment.
+         * Send early and repeat until hello_received. ARP needs a few
+         * round-trips to resolve, so space attempts every 100K loops. */
+        if (driver_ready && !hello_received && (loop_count % 100000) == 50000) {
+            send_hello();
+            hello_send_attempts++;
+            hello_sent = 1;
         }
 
         /* Report hello exchange result once */
-        if (hello_sent && loop_count == 800000) {
+        if (hello_sent && !hello_received && loop_count == 800000) {
             if (hello_received) {
                 printf("[%s] === HELLO EXCHANGE: SUCCESS ===\n", COMPONENT_NAME);
             } else {
@@ -802,10 +801,11 @@ int run(void)
         }
 
         /* Poll outbound ring: kernel → network (07e)
-         * Route to peer 0 by default. For now, the kernel's ring messages
-         * are PING/PONG or inter-kernel calls targeting the first peer.
-         * Multi-peer routing (by dest PE in the DTU header) is future work. */
-        if (net_rings_ready && !vdtu_ring_is_empty(&g_net_out_ring)) {
+         * Gate on hello_received: no DTU messages leave until at least one
+         * peer has completed the hello exchange (ARP resolved, peer alive).
+         * Messages stay in the ring until then — the kernel blocks in
+         * wait_for() and worker threads keep the WorkLoop running. */
+        if (net_rings_ready && hello_received && !vdtu_ring_is_empty(&g_net_out_ring)) {
             const struct vdtu_message *outmsg = vdtu_ring_fetch(&g_net_out_ring);
             if (outmsg) {
                 uint16_t plaintext_len = VDTU_HEADER_SIZE + outmsg->hdr.length;
