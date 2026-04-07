@@ -83,7 +83,7 @@ static void init_channel_table(void)
  */
 static int wait_for_reply_ex(uint64_t *out_cycles)
 {
-    int timeout = 100000000;
+    int timeout = 50000;
     const struct vdtu_message *reply = NULL;
     struct vdtu_ring *ring = NULL;
 
@@ -104,10 +104,10 @@ static int wait_for_reply_ex(uint64_t *out_cycles)
             }
         }
         if (reply) break;
-        /* Yield every 1000 iterations so kernel + DTUBridge can run.
-         * On single-core QEMU, without this the CPU is monopolized
-         * and the kernel can never process our syscall. */
-        if (timeout % 1000 == 0) seL4_Yield();
+        /* Yield every iteration so kernel + DTUBridge can run.
+         * On single-core QEMU, the kernel needs a few WorkLoop
+         * iterations to process our syscall and send the reply. */
+        seL4_Yield();
     }
 
     if (!reply) return -1;

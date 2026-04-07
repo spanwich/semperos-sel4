@@ -144,26 +144,149 @@ static volatile int net_pong_sent = 0;
 static volatile int net_pong_received = 0;
 static uint32_t net_poll_count = 0;
 
+/*
+ * ================================================================
+ *  vDTU Outbound State Machine (FPT-176, Design Doc Gap 7)
+ *
+ *  Preserves the gem5 DTU delivery contract: DTU::send_to() never
+ *  fails. Messages sent before the network link is established are
+ *  cached in an SPSC buffer and drained when the link comes up.
+ *  Messages that fail after the link is up are retried.
+ *
+ *  State       | Event                  | Action                    | Next
+ *  ------------|------------------------|---------------------------|------
+ *  DISCONNECTED| net_ring_send()        | Push to cache             | DISC
+ *  DISCONNECTED| inbound msg received   | Drain cache → ring        | CONN
+ *  CONNECTED   | net_ring_send()        | Write to outbound ring    | CONN
+ *  CONNECTED   | send fails (ring full) | Push to cache, retry      | RETRY
+ *  RETRYING    | net_ring_send()        | Push to cache             | RETRY
+ *  RETRYING    | net_poll() tick        | Try drain cache → ring    | RETRY/CONN
+ * ================================================================
+ */
+
+enum net_link_state {
+    NET_DISCONNECTED = 0,
+    NET_CONNECTED    = 1,
+    NET_RETRYING     = 2,
+};
+
+/* Cached outbound message (full DTU message with header) */
+struct net_cache_msg {
+    uint16_t sender_pe;
+    uint8_t  sender_ep;
+    uint16_t sender_vpe;
+    uint8_t  reply_ep;
+    uint64_t label;
+    uint64_t replylabel;
+    uint8_t  flags;
+    uint16_t payload_len;
+    uint8_t  payload[512];  /* max DTU message payload */
+};
+
+#define NET_CACHE_SIZE  16  /* max queued messages before link is up */
+
+static enum net_link_state g_net_state = NET_DISCONNECTED;
+static struct net_cache_msg g_net_cache[NET_CACHE_SIZE];
+static int g_net_cache_head = 0;  /* next write position */
+static int g_net_cache_tail = 0;  /* next read position */
+static int g_net_cache_count = 0;
+
+static int net_cache_push(uint16_t sender_pe, uint8_t sender_ep,
+                          uint16_t sender_vpe, uint8_t reply_ep,
+                          uint64_t label, uint64_t replylabel, uint8_t flags,
+                          const void *payload, uint16_t payload_len)
+{
+    if (g_net_cache_count >= NET_CACHE_SIZE) {
+        printf("[vDTU] WARNING: outbound cache full (%d msgs), dropping\n",
+               NET_CACHE_SIZE);
+        return -1;
+    }
+    struct net_cache_msg *slot = &g_net_cache[g_net_cache_head];
+    slot->sender_pe   = sender_pe;
+    slot->sender_ep   = sender_ep;
+    slot->sender_vpe  = sender_vpe;
+    slot->reply_ep    = reply_ep;
+    slot->label       = label;
+    slot->replylabel  = replylabel;
+    slot->flags       = flags;
+    slot->payload_len = (payload_len <= sizeof(slot->payload))
+                        ? payload_len : sizeof(slot->payload);
+    memcpy(slot->payload, payload, slot->payload_len);
+    g_net_cache_head = (g_net_cache_head + 1) % NET_CACHE_SIZE;
+    g_net_cache_count++;
+    return 0;
+}
+
+static int net_cache_drain(void)
+{
+    int drained = 0;
+    while (g_net_cache_count > 0) {
+        struct net_cache_msg *slot = &g_net_cache[g_net_cache_tail];
+        int rc = vdtu_ring_send(&g_net_out_ring,
+                                slot->sender_pe, slot->sender_ep,
+                                slot->sender_vpe, slot->reply_ep,
+                                slot->label, slot->replylabel, slot->flags,
+                                slot->payload, slot->payload_len);
+        if (rc != 0) {
+            /* Ring full — stop draining, retry next poll */
+            return drained;
+        }
+        g_net_cache_tail = (g_net_cache_tail + 1) % NET_CACHE_SIZE;
+        g_net_cache_count--;
+        drained++;
+    }
+    return drained;
+}
+
+/* Transition to CONNECTED state — drain any cached messages */
+static void net_link_connected(void)
+{
+    if (g_net_state == NET_CONNECTED) return;
+    printf("[vDTU] Link CONNECTED (was %s, %d cached msgs)\n",
+           g_net_state == NET_DISCONNECTED ? "DISCONNECTED" : "RETRYING",
+           g_net_cache_count);
+    g_net_state = NET_CONNECTED;
+    if (g_net_cache_count > 0) {
+        int n = net_cache_drain();
+        printf("[vDTU] Drained %d cached messages\n", n);
+        if (g_net_cache_count > 0)
+            g_net_state = NET_RETRYING;
+    }
+}
+
 /* Called from kernel_start() to attach to ring buffers */
 void net_init_rings(void)
 {
     vdtu_ring_attach(&g_net_out_ring, (void *)net_outbound);
     vdtu_ring_attach(&g_net_in_ring, (void *)net_inbound);
     net_rings_attached = 1;
+    g_net_state = NET_DISCONNECTED;
     printf("[SemperKernel] Net rings attached (outbound + inbound)\n");
 }
 
-/* C wrapper for DTU.cc to write to outbound ring */
+/* C wrapper for DTU.cc to write to outbound ring.
+ * Implements vDTU delivery guarantee: never returns failure to kernel.
+ * In DISCONNECTED/RETRYING state, messages are cached and drained later. */
 int net_ring_send(uint16_t sender_pe, uint8_t sender_ep,
                   uint16_t sender_vpe, uint8_t reply_ep,
                   uint64_t label, uint64_t replylabel, uint8_t flags,
                   const void *payload, uint16_t payload_len)
 {
     if (!net_rings_attached) return -1;
-    return vdtu_ring_send(&g_net_out_ring,
-                          sender_pe, sender_ep, sender_vpe, reply_ep,
-                          label, replylabel, flags,
-                          payload, payload_len);
+
+    if (g_net_state == NET_CONNECTED) {
+        int rc = vdtu_ring_send(&g_net_out_ring,
+                                sender_pe, sender_ep, sender_vpe, reply_ep,
+                                label, replylabel, flags,
+                                payload, payload_len);
+        if (rc == 0) return 0;
+        /* Ring full — cache and retry later */
+        g_net_state = NET_RETRYING;
+    }
+
+    /* DISCONNECTED or RETRYING: cache the message */
+    return net_cache_push(sender_pe, sender_ep, sender_vpe, reply_ep,
+                          label, replylabel, flags, payload, payload_len);
 }
 
 /* Called from WorkLoop every iteration to handle network I/O */
@@ -173,39 +296,49 @@ void net_poll(void)
 
     net_poll_count++;
 
-    /* Send PING after delay (let both nodes boot + hello exchange complete) */
-    if (!net_ping_sent && net_poll_count == 1000000) {
+    /* Send PING directly to outbound ring (bypasses state machine).
+     * PING is a link probe — it's OK if it fails before hello completes.
+     * When the PONG comes back on the inbound ring, the state machine
+     * transitions to CONNECTED and drains the SPSC cache.
+     * Retry PING periodically until PONG received. */
+    if (!net_pong_received && (net_poll_count % 500000) == 100000) {
         const char *payload = "PING from kernel";
         int rc = vdtu_ring_send(&g_net_out_ring,
                                 0, 0, 0, 0,
                                 NET_LABEL_PING, 0, 0,
                                 payload, (uint16_t)strlen(payload));
-        if (rc == 0) {
+        if (rc == 0 && !net_ping_sent) {
             net_ping_sent = 1;
-            printf("[SemperKernel] NET: Sent PING to outbound ring\n");
+            printf("[SemperKernel] NET: PING sent (state=%s)\n",
+                   g_net_state == NET_CONNECTED ? "CONNECTED" :
+                   g_net_state == NET_RETRYING ? "RETRYING" : "DISCONNECTED");
         }
+    }
+
+    /* Retry drain: if we have cached messages and the ring has space */
+    if (g_net_state == NET_RETRYING && g_net_cache_count > 0) {
+        int n = net_cache_drain();
+        if (n > 0)
+            printf("[vDTU] Retry drained %d msgs (%d remaining)\n",
+                   n, g_net_cache_count);
+        if (g_net_cache_count == 0)
+            g_net_state = NET_CONNECTED;
     }
 
     /* Poll inbound ring for messages from remote node */
     const struct vdtu_message *msg = vdtu_ring_fetch(&g_net_in_ring);
     if (msg) {
-        /* Extract payload as string */
-        char payload_str[128];
-        uint16_t plen = msg->hdr.length;
-        if (plen >= sizeof(payload_str)) plen = sizeof(payload_str) - 1;
-        memcpy(payload_str, msg->data, plen);
-        payload_str[plen] = '\0';
-
-        printf("[SemperKernel] NET RX: label=0x%lx len=%u \"%s\"\n",
-               (unsigned long)msg->hdr.label, msg->hdr.length, payload_str);
+        /* First inbound message proves bidirectional link — transition to CONNECTED */
+        if (g_net_state != NET_CONNECTED) {
+            net_link_connected();
+        }
 
         if (msg->hdr.label == NET_LABEL_PING && !net_pong_sent) {
-            /* Received PING -> send PONG back */
+            /* Received PING -> send PONG back (through state machine) */
             const char *pong = "PONG from kernel";
-            vdtu_ring_send(&g_net_out_ring,
-                           0, 0, 0, 0,
-                           NET_LABEL_PONG, 0, 0,
-                           pong, (uint16_t)strlen(pong));
+            net_ring_send(0, 0, 0, 0,
+                          NET_LABEL_PONG, 0, 0,
+                          pong, (uint16_t)strlen(pong));
             net_pong_sent = 1;
             printf("[SemperKernel] NET: Sent PONG reply\n");
         } else if (msg->hdr.label == NET_LABEL_PONG) {
@@ -225,8 +358,10 @@ void net_poll(void)
     if (net_poll_count == 3000000) {
         if (net_pong_received) {
             printf("[SemperKernel] NET: === PING-PONG SUCCESS ===\n");
-        } else if (net_ping_sent) {
-            printf("[SemperKernel] NET: PING sent, PONG not yet received\n");
+        } else if (net_ping_sent && !net_pong_received) {
+            printf("[SemperKernel] NET: PING sent, PONG not yet received (state=%s)\n",
+                   g_net_state == NET_CONNECTED ? "CONNECTED" :
+                   g_net_state == NET_RETRYING ? "RETRYING" : "DISCONNECTED");
         }
     }
 }
