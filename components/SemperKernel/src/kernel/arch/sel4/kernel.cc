@@ -249,69 +249,8 @@ extern "C" void kernel_start(void) {
         printf("[SemperKernel] WARNING: Failed to create VPE1 (EXCHANGE tests unavailable)\n");
     }
 
-#ifdef SEMPER_MULTI_NODE
-    /* FPT-176: Register VPE1 as a service provider ("testsrv").
-     * The kernel creates the service directly rather than having VPE1
-     * send a createsrv syscall, because VPE1's syscall channel setup
-     * would require additional infrastructure. */
-    if (vpe1) {
-        /* Service recv EP on VPE1 — EP 2 (after DEF_RECVEP=1 and SYSC_EP=0) */
-        const int SRV_EP = 2;
-        int buf_order = 11;  /* 2048B buffer */
-        int msg_order = 9;   /* 512B slots → 4 slots */
-        DTU::get().config_recv_remote(
-            vpe1->desc(), SRV_EP, 0, buf_order, msg_order, 0, true);
-
-        /* Configure kernel send channel to VPE1's service recv EP.
-         * SendGate::send() calls DTU::send_to() which needs
-         * find_send_channel_for(local_pe, ep) to succeed.
-         * Use SETUP_EP (13) which is reserved for child kernel spawning
-         * (not used in this prototype). FIRST_FREE_EP (14) must stay
-         * free for m3::DTU::reply() auto-configuration. */
-        DTU::get().config_send_local(
-            DTU::SETUP_EP,       /* kernel EP for this send channel */
-            0x54455354,          /* label (must match Service SendGate) */
-            vpe1->core(),        /* dest PE (global, translated in DTU.cc) */
-            vpe1->id(),          /* dest VPE */
-            SRV_EP,              /* dest EP (2) */
-            Service::SRV_MSG_SIZE,
-            1 << 9);             /* credits */
-
-        /* Service capability selectors in VPE1's CapTable */
-        const capsel_t GATE_SEL = 5;
-        const capsel_t SRV_SEL = 6;
-
-        /* Create MsgCapability pointing to VPE1's service recv EP */
-        label_t srv_label = 0x54455354; /* "TEST" */
-        mht_key_t gate_key = HashUtil::structured_hash(
-            vpe1->core(), vpe1->id(), MSGOBJ, srv_label);
-        vpe1->objcaps().set(GATE_SEL,
-            new MsgCapability(&vpe1->objcaps(), GATE_SEL, srv_label,
-                vpe1->core(), vpe1->id(), SRV_EP, 1 << 9, gate_key, 0));
-
-        /* Register service in ServiceList */
-        mht_key_t srv_id = HashUtil::structured_hash(
-            vpe1->core(), vpe1->id(), SERVICE, SRV_SEL);
-        m3::String srvname("testsrv");
-        Service *srv = ServiceList::get().add(
-            *vpe1, SRV_SEL, srvname,
-            SRV_EP, srv_label, 1 /* capacity */, srv_id);
-
-        /* Create ServiceCapability in VPE1's CapTable */
-        mht_key_t srvcap_key = HashUtil::structured_hash(
-            vpe1->core(), vpe1->id(), SRVCAP, SRV_SEL);
-        vpe1->objcaps().set(SRV_SEL,
-            new ServiceCapability(&vpe1->objcaps(), SRV_SEL, srv, srvcap_key));
-
-        printf("[SemperKernel] Registered service 'testsrv' on VPE1 (EP %d, label=0x%x)\n",
-               SRV_EP, (unsigned)srv_label);
-
-        /* Note: service announcement to peer deferred to runtime.
-         * broadcastAnnounceSrv at boot would block (net rings not attached,
-         * no peer connected). The peer discovers "testsrv" via the
-         * broadcastCreateSess fallback when VPE0 calls createsess. */
-    }
-#endif
+    /* Service registration removed — VPE1 calls createsrv via syscall (Layer 3).
+     * See Confluence: "SemperOS-seL4 — Multi-Node Communication Test Suite Design" */
 
     /* Attach to network ring buffers (DTUBridge initialized them in post_init) */
     net_init_rings();

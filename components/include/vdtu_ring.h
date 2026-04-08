@@ -68,7 +68,7 @@ struct __attribute__((packed)) vdtu_message {
  * --------------------------------------------------------------------------
  */
 
-#define VDTU_EP_COUNT           16
+#define VDTU_EP_COUNT           32  /* increased from 16 for multi-node (FPT-176) */
 #define VDTU_MAX_MSG_SLOTS      32
 #define VDTU_DTU_PKG_SIZE       8
 

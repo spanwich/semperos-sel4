@@ -801,11 +801,11 @@ int run(void)
         }
 
         /* Poll outbound ring: kernel → network (07e)
-         * Gate on hello_received: no DTU messages leave until at least one
-         * peer has completed the hello exchange (ARP resolved, peer alive).
-         * Messages stay in the ring until then — the kernel blocks in
-         * wait_for() and worker threads keep the WorkLoop running. */
-        if (net_rings_ready && hello_received && !vdtu_ring_is_empty(&g_net_out_ring)) {
+         * No gate here — the vDTU state machine in camkes_entry.c handles
+         * buffering pre-connection messages. DTUBridge is a dumb pipe:
+         * if there's a message in the ring, encrypt and send it.
+         * If ARP isn't resolved yet, lwIP buffers the packet internally. */
+        if (net_rings_ready && !vdtu_ring_is_empty(&g_net_out_ring)) {
             const struct vdtu_message *outmsg = vdtu_ring_fetch(&g_net_out_ring);
             if (outmsg) {
                 uint16_t plaintext_len = VDTU_HEADER_SIZE + outmsg->hdr.length;

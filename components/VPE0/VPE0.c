@@ -665,9 +665,7 @@ int run(void)
         }
     }
 
-#ifndef SEMPER_MULTI_NODE
-    /* Local tests 1-11 and benchmarks — skip in multi-node mode
-     * to let DTUBridge run the hello exchange + PING/PONG sooner. */
+    /* Local tests 1-11 — always run (verify kernel communication) */
 
     /* ==============================================================
      * Test 1: NOOP x3 (multi-message, no double-ack)
@@ -950,140 +948,10 @@ int run(void)
     }
 
     printf("[VPE0] === %d passed, %d failed ===\n", pass, fail);
-#endif /* !SEMPER_MULTI_NODE — end of local tests */
 
-#ifdef SEMPER_MULTI_NODE
-    /* ==============================================================
-     * Spanning exchange tests (FPT-176)
-     *
-     * These tests exercise the session-based spanning exchange protocol
-     * across two nodes. They require SEMPER_MULTI_NODE=ON and a peer
-     * kernel with VPE1 running "testsrv".
-     *
-     * CREATESESS marshalling: [opcode(8)] [tvpe(4+pad4)] [sess(4+pad4)] [name_len(8)] [name_data+pad]
-     * OBTAIN/DELEGATE marshalling: [opcode(8)] [tvpe(4+pad4)] [sess(4+pad4)] [own CapRngDesc(16)] [other CapRngDesc(16)] [obtain(8)]
-     * ============================================================== */
-    {
-        int span_pass = 0, span_fail = 0;
-        int err;
-
-        /* Wait for DTUBridge hello exchange to complete.
-         * On single-core QEMU, DTUBridge needs yield() cycles to send/receive
-         * hello packets and establish peer connectivity. Without this delay,
-         * CREATESESS fires before the network is up and blocks the kernel. */
-        printf("\n[VPE0] === Spanning Exchange Tests (SEMPER_MULTI_NODE, node %d) ===\n",
-               SEMPER_KERNEL_ID);
-
-        /* Only node 0 initiates spanning tests. Other nodes provide the
-         * service and must keep yielding so DTUBridge + kernel can process
-         * incoming requests. */
-        if (SEMPER_KERNEL_ID != 0) {
-            printf("[VPE0] Node %d: service-only mode (not initiator)\n", SEMPER_KERNEL_ID);
-            printf("[VPE0] === Spanning: skipped (not initiator) ===\n");
-            for (;;) { seL4_Yield(); }
-        }
-        /* Test S1: CREATESESS to "testsrv" on remote node.
-         * DTUBridge gates outbound messages until hello completes.
-         * The kernel blocks in wait_for() but worker threads keep the
-         * WorkLoop running. Retry if timeout (network may need time). */
-        {
-            /* Marshal CREATESESS: opcode, tvpe, sess, name */
-            uint8_t payload[64];
-            int off = 0;
-
-            uint64_t opcode = SYSCALL_CREATESESS;
-            memcpy(payload + off, &opcode, 8); off += 8;
-
-            /* tvpe = 0 (self VPE cap) */
-            uint64_t tvpe = 0;
-            memcpy(payload + off, &tvpe, 8); off += 8;
-
-            /* sess = 500 (session cap selector) */
-            uint64_t sess = 500;
-            memcpy(payload + off, &sess, 8); off += 8;
-
-            /* name = "testsrv" */
-            uint64_t namelen = 7;
-            memcpy(payload + off, &namelen, 8); off += 8;
-            memcpy(payload + off, "testsrv", 7);
-            off += 8;
-
-            #define S1_RETRIES 5
-            err = -1;
-            for (int attempt = 0; attempt < S1_RETRIES && err != 0; attempt++) {
-                if (attempt > 0) {
-                    printf("[VPE0] S1 retry %d/%d (waiting for network)...\n",
-                           attempt + 1, S1_RETRIES);
-                    for (int y = 0; y < 5000; y++) seL4_Yield();
-                }
-                err = send_syscall(payload, (uint16_t)off);
-            }
-            if (err == 0) {
-                span_pass++;
-                printf("[VPE0] Test S1 (CREATESESS 'testsrv' sess=500): PASS\n");
-            } else {
-                span_fail++;
-                printf("[VPE0] Test S1 (CREATESESS 'testsrv'): FAIL (err=%d after %d attempts)\n",
-                       err, S1_RETRIES);
-            }
-        }
-
-        /* Test S2: OBTAIN through spanning session.
-         * This sends exchange_over_sess to the remote kernel which
-         * forwards to VPE1's service and returns caps. */
-        if (span_fail == 0) {
-            int ok = 1;
-            /* Marshal OBTAIN (opcode 12): tvpe, sess_cap, CapRngDesc own, CapRngDesc other, obtain flag */
-            uint8_t payload[72];
-            int off = 0;
-
-            uint64_t opcode = SYSCALL_OBTAIN;
-            memcpy(payload + off, &opcode, 8); off += 8;
-
-            /* tvpe = 0 (self) */
-            uint64_t tvpe = 0;
-            memcpy(payload + off, &tvpe, 8); off += 8;
-
-            /* sess_cap = 500 (from createsess) */
-            uint64_t sess_cap = 500;
-            memcpy(payload + off, &sess_cap, 8); off += 8;
-
-            /* own CapRngDesc: {type=OBJ(0), start=600, count=1} + pad */
-            uint32_t own_type = 0, own_start = 600, own_count = 1, own_pad = 0;
-            memcpy(payload + off, &own_type, 4); off += 4;
-            memcpy(payload + off, &own_start, 4); off += 4;
-            memcpy(payload + off, &own_count, 4); off += 4;
-            memcpy(payload + off, &own_pad, 4); off += 4;
-
-            err = send_syscall(payload, (uint16_t)off);
-            if (err == 0) {
-                span_pass++;
-                printf("[VPE0] Test S2 (OBTAIN via session 500 -> sel 600): PASS\n");
-            } else {
-                span_fail++;
-                printf("[VPE0] Test S2 (OBTAIN via session): FAIL (err=%d)\n", err);
-            }
-        }
-
-        /* Test S3: REVOKE spanning capability.
-         * If OBTAIN succeeded, cap at sel 600 has a parent-child link to
-         * the remote node. Revoking it should propagate via Kernelcalls::revoke. */
-        if (span_fail == 0) {
-            err = send_revoke(600);
-            if (err == 0) {
-                span_pass++;
-                printf("[VPE0] Test S3 (spanning REVOKE sel=600): PASS\n");
-            } else {
-                span_fail++;
-                printf("[VPE0] Test S3 (spanning REVOKE): FAIL (err=%d)\n", err);
-            }
-        }
-
-        printf("[VPE0] === Spanning: %d passed, %d failed ===\n", span_pass, span_fail);
-    }
-#endif /* SEMPER_MULTI_NODE */
-
-#ifndef SEMPER_MULTI_NODE
+    /* Spanning exchange tests removed — replaced by layered test suite.
+     * See Confluence: "SemperOS-seL4 — Multi-Node Communication Test Suite Design"
+     * Layer 2 (KRNLC_PING) and Layers 3-6 will be added incrementally. */
     /* ==============================================================
      * Experiment 1: vDTU Primitive Latency Benchmarks
      *
@@ -1333,9 +1201,8 @@ int run(void)
     }
 
     printf("\n[VPE0] === Experiment 2A complete ===\n");
-#endif /* !SEMPER_MULTI_NODE — end of benchmarks */
 
-    /* In multi-node mode, yield forever so DTUBridge keeps polling */
+    /* Yield forever — keeps other components (DTUBridge, VPE1) scheduled */
     for (;;) { seL4_Yield(); }
 
     return 0;

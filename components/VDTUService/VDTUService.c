@@ -54,9 +54,13 @@ static inline bool raft_cache_check_ancestry(uint64_t cap_id)
 #define PE_VPE1             3
 
 /* Pre-allocated channel counts (must match .camkes assembly)
- * Channels 0-7: kernel0 <-> VPE0, Channels 8-11: kernel0 <-> VPE1 */
+ * Channels 0-7: kernel0 <-> VPE0, Channels 8-11: kernel0 <-> VPE1
+ * PE-aware allocation: PE 3 (VPE1) uses channels 8-11, others use 0-7 */
 #define NUM_MSG_CHANNELS    12
 #define NUM_MEM_CHANNELS    6
+
+#define VPE1_MSG_CH_START   8   /* first msg channel for PE 3 (VPE1) */
+#define VPE1_MEM_CH_START   4   /* first mem channel for PE 3 (VPE1) */
 
 /*
  * =========================================================================
@@ -131,7 +135,13 @@ static int pe_privileged[MAX_PES];
 
 static int alloc_msg_channel(int pe, int ep)
 {
-    for (int i = 0; i < NUM_MSG_CHANNELS; i++) {
+    /* PE-aware allocation: PE 3 (VPE1) uses channels 8-11 which map to
+     * kernel↔VPE1 dataports. All other PEs use channels 0-7 which map
+     * to kernel↔VPE0 dataports. This ensures each PE writes to shared
+     * memory that the correct component can access. */
+    int start = (pe == PE_VPE1) ? VPE1_MSG_CH_START : 0;
+    int end   = (pe == PE_VPE1) ? NUM_MSG_CHANNELS : VPE1_MSG_CH_START;
+    for (int i = start; i < end; i++) {
         if (!pool.msg_in_use[i]) {
             pool.msg_in_use[i] = 1;
             pool.msg_assigned_pe[i] = pe;
@@ -139,7 +149,8 @@ static int alloc_msg_channel(int pe, int ep)
             return i;
         }
     }
-    printf("[vDTU] ERROR: no free message channels\n");
+    printf("[vDTU] ERROR: no free message channels for PE %d (range %d-%d)\n",
+           pe, start, end - 1);
     return -1;
 }
 
@@ -154,7 +165,9 @@ static void free_msg_channel(int ch)
 
 static int alloc_mem_channel(int pe, int ep)
 {
-    for (int i = 0; i < NUM_MEM_CHANNELS; i++) {
+    int start = (pe == PE_VPE1) ? VPE1_MEM_CH_START : 0;
+    int end   = (pe == PE_VPE1) ? NUM_MEM_CHANNELS : VPE1_MEM_CH_START;
+    for (int i = start; i < end; i++) {
         if (!pool.mem_in_use[i]) {
             pool.mem_in_use[i] = 1;
             pool.mem_assigned_pe[i] = pe;
@@ -162,7 +175,7 @@ static int alloc_mem_channel(int pe, int ep)
             return i;
         }
     }
-    printf("[vDTU] ERROR: no free memory channels\n");
+    printf("[vDTU] ERROR: no free memory channels for PE %d\n", pe);
     return -1;
 }
 
