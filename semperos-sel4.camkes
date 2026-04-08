@@ -105,21 +105,41 @@ component SemperKernel {
     /* Config RPC: calls vDTU to set up endpoints */
     uses VDTUConfig vdtu;
 
-    /* Pre-allocated message channel dataports (shared with VPE0) */
-    dataport Buf(4096) msgchan_kv_0;
-    dataport Buf(4096) msgchan_kv_1;
-    dataport Buf(4096) msgchan_kv_2;
-    dataport Buf(4096) msgchan_kv_3;
-    dataport Buf(4096) msgchan_kv_4;
-    dataport Buf(4096) msgchan_kv_5;
-    dataport Buf(4096) msgchan_kv_6;
-    dataport Buf(4096) msgchan_kv_7;
-
-    /* Pre-allocated memory endpoint dataports */
-    dataport Buf(4096) memep_kv_0;
-    dataport Buf(4096) memep_kv_1;
-    dataport Buf(4096) memep_kv_2;
-    dataport Buf(4096) memep_kv_3;
+    /* vDTU channels: 16 uniform dataports per PE pair (gem5 EP_COUNT=16).
+     * Channels 0-15:  kernel ↔ VPE0 (PE 2) — one NoC link per channel
+     * Channels 16-31: kernel ↔ VPE1 (PE 3) — one NoC link per channel */
+    dataport Buf(4096) dtu_ch_0;
+    dataport Buf(4096) dtu_ch_1;
+    dataport Buf(4096) dtu_ch_2;
+    dataport Buf(4096) dtu_ch_3;
+    dataport Buf(4096) dtu_ch_4;
+    dataport Buf(4096) dtu_ch_5;
+    dataport Buf(4096) dtu_ch_6;
+    dataport Buf(4096) dtu_ch_7;
+    dataport Buf(4096) dtu_ch_8;
+    dataport Buf(4096) dtu_ch_9;
+    dataport Buf(4096) dtu_ch_10;
+    dataport Buf(4096) dtu_ch_11;
+    dataport Buf(4096) dtu_ch_12;
+    dataport Buf(4096) dtu_ch_13;
+    dataport Buf(4096) dtu_ch_14;
+    dataport Buf(4096) dtu_ch_15;
+    dataport Buf(4096) dtu_ch_16;
+    dataport Buf(4096) dtu_ch_17;
+    dataport Buf(4096) dtu_ch_18;
+    dataport Buf(4096) dtu_ch_19;
+    dataport Buf(4096) dtu_ch_20;
+    dataport Buf(4096) dtu_ch_21;
+    dataport Buf(4096) dtu_ch_22;
+    dataport Buf(4096) dtu_ch_23;
+    dataport Buf(4096) dtu_ch_24;
+    dataport Buf(4096) dtu_ch_25;
+    dataport Buf(4096) dtu_ch_26;
+    dataport Buf(4096) dtu_ch_27;
+    dataport Buf(4096) dtu_ch_28;
+    dataport Buf(4096) dtu_ch_29;
+    dataport Buf(4096) dtu_ch_30;
+    dataport Buf(4096) dtu_ch_31;
 
     /* Control plane: vDTU can wake kernel (for wakeup_pe) */
     consumes Signal vdtu_wakeup;
@@ -127,23 +147,9 @@ component SemperKernel {
     /* Control plane: kernel signals vDTU when done */
     emits    Signal kernel_done;
 
-    /* Data path: kernel signals VPE0 that a message is available */
+    /* Data path signals */
     emits    Signal signal_vpe0;
-
-    /* Data path: VPE0 signals kernel that a reply is available */
     consumes Signal signal_from_vpe0;
-
-    /* VPE1 message channel dataports (FPT-175) */
-    dataport Buf(4096) msgchan_v1_0;
-    dataport Buf(4096) msgchan_v1_1;
-    dataport Buf(4096) msgchan_v1_2;
-    dataport Buf(4096) msgchan_v1_3;
-
-    /* VPE1 memory endpoint dataports */
-    dataport Buf(4096) memep_v1_0;
-    dataport Buf(4096) memep_v1_1;
-
-    /* VPE1 signals */
     emits    Signal signal_vpe1;
     consumes Signal signal_from_vpe1;
 
@@ -165,24 +171,26 @@ component SemperKernel {
 component VPE0 {
     control;
 
-    /* Config RPC: VPE0 -> vDTU (for benchmarks: ep_configure, ep_terminate) */
+    /* Config RPC: VPE0 -> vDTU */
     uses VDTUConfig vdtu;
 
-    /* Pre-allocated message channel dataports (shared with SemperKernel) */
-    dataport Buf(4096) msgchan_kv_0;
-    dataport Buf(4096) msgchan_kv_1;
-    dataport Buf(4096) msgchan_kv_2;
-    dataport Buf(4096) msgchan_kv_3;
-    dataport Buf(4096) msgchan_kv_4;
-    dataport Buf(4096) msgchan_kv_5;
-    dataport Buf(4096) msgchan_kv_6;
-    dataport Buf(4096) msgchan_kv_7;
-
-    /* Pre-allocated memory endpoint dataports */
-    dataport Buf(4096) memep_kv_0;
-    dataport Buf(4096) memep_kv_1;
-    dataport Buf(4096) memep_kv_2;
-    dataport Buf(4096) memep_kv_3;
+    /* 16 uniform vDTU channels (shared with kernel, gem5 EP_COUNT=16) */
+    dataport Buf(4096) dtu_ch_0;
+    dataport Buf(4096) dtu_ch_1;
+    dataport Buf(4096) dtu_ch_2;
+    dataport Buf(4096) dtu_ch_3;
+    dataport Buf(4096) dtu_ch_4;
+    dataport Buf(4096) dtu_ch_5;
+    dataport Buf(4096) dtu_ch_6;
+    dataport Buf(4096) dtu_ch_7;
+    dataport Buf(4096) dtu_ch_8;
+    dataport Buf(4096) dtu_ch_9;
+    dataport Buf(4096) dtu_ch_10;
+    dataport Buf(4096) dtu_ch_11;
+    dataport Buf(4096) dtu_ch_12;
+    dataport Buf(4096) dtu_ch_13;
+    dataport Buf(4096) dtu_ch_14;
+    dataport Buf(4096) dtu_ch_15;
 
     /* Control plane: vDTU can wake VPE0 (for wakeup_pe) */
     consumes Signal vdtu_wakeup;
@@ -205,23 +213,29 @@ component VPE1 {
     /* Config RPC: VPE1 -> vDTU */
     uses VDTUConfig vdtu;
 
-    /* Message channel dataports (shared with SemperKernel) */
-    dataport Buf(4096) msgchan_v1_0;
-    dataport Buf(4096) msgchan_v1_1;
-    dataport Buf(4096) msgchan_v1_2;
-    dataport Buf(4096) msgchan_v1_3;
-
-    /* Memory endpoint dataports */
-    dataport Buf(4096) memep_v1_0;
-    dataport Buf(4096) memep_v1_1;
+    /* 16 uniform vDTU channels (shared with kernel, gem5 EP_COUNT=16) */
+    dataport Buf(4096) dtu_ch_0;
+    dataport Buf(4096) dtu_ch_1;
+    dataport Buf(4096) dtu_ch_2;
+    dataport Buf(4096) dtu_ch_3;
+    dataport Buf(4096) dtu_ch_4;
+    dataport Buf(4096) dtu_ch_5;
+    dataport Buf(4096) dtu_ch_6;
+    dataport Buf(4096) dtu_ch_7;
+    dataport Buf(4096) dtu_ch_8;
+    dataport Buf(4096) dtu_ch_9;
+    dataport Buf(4096) dtu_ch_10;
+    dataport Buf(4096) dtu_ch_11;
+    dataport Buf(4096) dtu_ch_12;
+    dataport Buf(4096) dtu_ch_13;
+    dataport Buf(4096) dtu_ch_14;
+    dataport Buf(4096) dtu_ch_15;
 
     /* Control plane: vDTU can wake VPE1 */
     consumes Signal vdtu_wakeup_vpe1;
 
-    /* Data path: kernel signals VPE1 that a message is available */
+    /* Data path signals */
     consumes Signal signal_from_kernel_v1;
-
-    /* Data path: VPE1 signals kernel that a reply is available */
     emits    Signal signal_kernel_v1;
 }
 
@@ -277,55 +291,44 @@ assembly {
         connection seL4RPCCall vpe0_config_rpc(from vpe0.vdtu, to vdtu.config);
 
         /*
-         * Message channel dataports: kernel0 <-> vpe0 (point-to-point).
-         * Each connection allocates one set of physical pages shared
-         * between exactly two components. The vDTU does NOT access these.
+         * vDTU channels: 16 uniform dataports per PE pair.
+         * Each connection = one virtual NoC point-to-point link.
+         * Channels 0-15:  kernel ↔ VPE0 (PE 2)
+         * Channels 16-31: kernel ↔ VPE1 (PE 3)
          */
-        connection seL4SharedData msgchan0(from kernel0.msgchan_kv_0,
-                                           to vpe0.msgchan_kv_0);
-        connection seL4SharedData msgchan1(from kernel0.msgchan_kv_1,
-                                           to vpe0.msgchan_kv_1);
-        connection seL4SharedData msgchan2(from kernel0.msgchan_kv_2,
-                                           to vpe0.msgchan_kv_2);
-        connection seL4SharedData msgchan3(from kernel0.msgchan_kv_3,
-                                           to vpe0.msgchan_kv_3);
-        connection seL4SharedData msgchan4(from kernel0.msgchan_kv_4,
-                                           to vpe0.msgchan_kv_4);
-        connection seL4SharedData msgchan5(from kernel0.msgchan_kv_5,
-                                           to vpe0.msgchan_kv_5);
-        connection seL4SharedData msgchan6(from kernel0.msgchan_kv_6,
-                                           to vpe0.msgchan_kv_6);
-        connection seL4SharedData msgchan7(from kernel0.msgchan_kv_7,
-                                           to vpe0.msgchan_kv_7);
+        connection seL4SharedData ch0(from kernel0.dtu_ch_0, to vpe0.dtu_ch_0);
+        connection seL4SharedData ch1(from kernel0.dtu_ch_1, to vpe0.dtu_ch_1);
+        connection seL4SharedData ch2(from kernel0.dtu_ch_2, to vpe0.dtu_ch_2);
+        connection seL4SharedData ch3(from kernel0.dtu_ch_3, to vpe0.dtu_ch_3);
+        connection seL4SharedData ch4(from kernel0.dtu_ch_4, to vpe0.dtu_ch_4);
+        connection seL4SharedData ch5(from kernel0.dtu_ch_5, to vpe0.dtu_ch_5);
+        connection seL4SharedData ch6(from kernel0.dtu_ch_6, to vpe0.dtu_ch_6);
+        connection seL4SharedData ch7(from kernel0.dtu_ch_7, to vpe0.dtu_ch_7);
+        connection seL4SharedData ch8(from kernel0.dtu_ch_8, to vpe0.dtu_ch_8);
+        connection seL4SharedData ch9(from kernel0.dtu_ch_9, to vpe0.dtu_ch_9);
+        connection seL4SharedData ch10(from kernel0.dtu_ch_10, to vpe0.dtu_ch_10);
+        connection seL4SharedData ch11(from kernel0.dtu_ch_11, to vpe0.dtu_ch_11);
+        connection seL4SharedData ch12(from kernel0.dtu_ch_12, to vpe0.dtu_ch_12);
+        connection seL4SharedData ch13(from kernel0.dtu_ch_13, to vpe0.dtu_ch_13);
+        connection seL4SharedData ch14(from kernel0.dtu_ch_14, to vpe0.dtu_ch_14);
+        connection seL4SharedData ch15(from kernel0.dtu_ch_15, to vpe0.dtu_ch_15);
 
-        /* Memory endpoint dataports: kernel0 <-> vpe0 */
-        connection seL4SharedData memep0(from kernel0.memep_kv_0,
-                                         to vpe0.memep_kv_0);
-        connection seL4SharedData memep1(from kernel0.memep_kv_1,
-                                         to vpe0.memep_kv_1);
-        connection seL4SharedData memep2(from kernel0.memep_kv_2,
-                                         to vpe0.memep_kv_2);
-        connection seL4SharedData memep3(from kernel0.memep_kv_3,
-                                         to vpe0.memep_kv_3);
-
-        /*
-         * Message channel dataports: kernel0 <-> vpe1 (FPT-175)
-         * Channels 8-11 in VDTUService pool.
-         */
-        connection seL4SharedData msgchan_v1_0(from kernel0.msgchan_v1_0,
-                                                to vpe1.msgchan_v1_0);
-        connection seL4SharedData msgchan_v1_1(from kernel0.msgchan_v1_1,
-                                                to vpe1.msgchan_v1_1);
-        connection seL4SharedData msgchan_v1_2(from kernel0.msgchan_v1_2,
-                                                to vpe1.msgchan_v1_2);
-        connection seL4SharedData msgchan_v1_3(from kernel0.msgchan_v1_3,
-                                                to vpe1.msgchan_v1_3);
-
-        /* Memory endpoint dataports: kernel0 <-> vpe1 */
-        connection seL4SharedData memep_v1_0(from kernel0.memep_v1_0,
-                                              to vpe1.memep_v1_0);
-        connection seL4SharedData memep_v1_1(from kernel0.memep_v1_1,
-                                              to vpe1.memep_v1_1);
+        connection seL4SharedData ch16(from kernel0.dtu_ch_16, to vpe1.dtu_ch_0);
+        connection seL4SharedData ch17(from kernel0.dtu_ch_17, to vpe1.dtu_ch_1);
+        connection seL4SharedData ch18(from kernel0.dtu_ch_18, to vpe1.dtu_ch_2);
+        connection seL4SharedData ch19(from kernel0.dtu_ch_19, to vpe1.dtu_ch_3);
+        connection seL4SharedData ch20(from kernel0.dtu_ch_20, to vpe1.dtu_ch_4);
+        connection seL4SharedData ch21(from kernel0.dtu_ch_21, to vpe1.dtu_ch_5);
+        connection seL4SharedData ch22(from kernel0.dtu_ch_22, to vpe1.dtu_ch_6);
+        connection seL4SharedData ch23(from kernel0.dtu_ch_23, to vpe1.dtu_ch_7);
+        connection seL4SharedData ch24(from kernel0.dtu_ch_24, to vpe1.dtu_ch_8);
+        connection seL4SharedData ch25(from kernel0.dtu_ch_25, to vpe1.dtu_ch_9);
+        connection seL4SharedData ch26(from kernel0.dtu_ch_26, to vpe1.dtu_ch_10);
+        connection seL4SharedData ch27(from kernel0.dtu_ch_27, to vpe1.dtu_ch_11);
+        connection seL4SharedData ch28(from kernel0.dtu_ch_28, to vpe1.dtu_ch_12);
+        connection seL4SharedData ch29(from kernel0.dtu_ch_29, to vpe1.dtu_ch_13);
+        connection seL4SharedData ch30(from kernel0.dtu_ch_30, to vpe1.dtu_ch_14);
+        connection seL4SharedData ch31(from kernel0.dtu_ch_31, to vpe1.dtu_ch_15);
 
         /* VPE1 VDTUConfig RPC */
         connection seL4RPCCall vpe1_config_rpc(from vpe1.vdtu, to vdtu.config);

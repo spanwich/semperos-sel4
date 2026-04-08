@@ -45,7 +45,7 @@ static inline bool raft_cache_check_ancestry(uint64_t cap_id)
  * =========================================================================
  */
 
-#define MAX_PES             4
+#define MAX_PES             8   /* must accommodate global PE IDs (node1: PEs 4-7) */
 #define EP_PER_PE           VDTU_EP_COUNT   /* 16 endpoints per PE */
 
 /* PE IDs for this prototype */
@@ -53,14 +53,12 @@ static inline bool raft_cache_check_ancestry(uint64_t cap_id)
 #define PE_VPE0             1
 #define PE_VPE1             3
 
-/* Pre-allocated channel counts (must match .camkes assembly)
- * Channels 0-7: kernel0 <-> VPE0, Channels 8-11: kernel0 <-> VPE1
- * PE-aware allocation: PE 3 (VPE1) uses channels 8-11, others use 0-7 */
-#define NUM_MSG_CHANNELS    12
-#define NUM_MEM_CHANNELS    6
-
-#define VPE1_MSG_CH_START   8   /* first msg channel for PE 3 (VPE1) */
-#define VPE1_MEM_CH_START   4   /* first mem channel for PE 3 (VPE1) */
+/* Uniform channel pool: 16 channels per PE pair (gem5 EP_COUNT=16).
+ * Channels 0-15:  kernel ↔ VPE0 (PE 2)
+ * Channels 16-31: kernel ↔ VPE1 (PE 3)
+ * No msg/mem split — type is tracked per-endpoint, not per-channel. */
+#define CHANNELS_PER_PE     16
+#define TOTAL_CHANNELS      32
 
 /*
  * =========================================================================
@@ -107,13 +105,9 @@ struct ep_desc {
  */
 
 struct channel_pool {
-    int msg_in_use[NUM_MSG_CHANNELS];       /* 0=free, 1=assigned */
-    int msg_assigned_pe[NUM_MSG_CHANNELS];  /* Which PE owns the recv EP */
-    int msg_assigned_ep[NUM_MSG_CHANNELS];  /* Which recv EP number */
-
-    int mem_in_use[NUM_MEM_CHANNELS];
-    int mem_assigned_pe[NUM_MEM_CHANNELS];
-    int mem_assigned_ep[NUM_MEM_CHANNELS];
+    int in_use[TOTAL_CHANNELS];          /* 0=free, 1=assigned */
+    int assigned_pe[TOTAL_CHANNELS];     /* Which PE owns the recv EP */
+    int assigned_ep[TOTAL_CHANNELS];     /* Which recv EP number */
 };
 
 /*
@@ -133,58 +127,38 @@ static int pe_privileged[MAX_PES];
  * =========================================================================
  */
 
-static int alloc_msg_channel(int pe, int ep)
+/* Map PE to channel pool base. Each PE pair gets 16 channels.
+ * VPE1 (local PE 3, regardless of global offset) uses channels 16-31.
+ * All other PEs (kernel=0, vDTU=1, VPE0=2) use channels 0-15. */
+static int pe_channel_base(int pe)
 {
-    /* PE-aware allocation: PE 3 (VPE1) uses channels 8-11 which map to
-     * kernel↔VPE1 dataports. All other PEs use channels 0-7 which map
-     * to kernel↔VPE0 dataports. This ensures each PE writes to shared
-     * memory that the correct component can access. */
-    int start = (pe == PE_VPE1) ? VPE1_MSG_CH_START : 0;
-    int end   = (pe == PE_VPE1) ? NUM_MSG_CHANNELS : VPE1_MSG_CH_START;
-    for (int i = start; i < end; i++) {
-        if (!pool.msg_in_use[i]) {
-            pool.msg_in_use[i] = 1;
-            pool.msg_assigned_pe[i] = pe;
-            pool.msg_assigned_ep[i] = ep;
+    /* pe is always local PE index (DTU.cc translates global→local) */
+    return (pe == PE_VPE1) ? CHANNELS_PER_PE : 0;
+}
+
+static int alloc_channel(int pe, int ep)
+{
+    int base = pe_channel_base(pe);
+    int end = base + CHANNELS_PER_PE;
+    for (int i = base; i < end; i++) {
+        if (!pool.in_use[i]) {
+            pool.in_use[i] = 1;
+            pool.assigned_pe[i] = pe;
+            pool.assigned_ep[i] = ep;
             return i;
         }
     }
-    printf("[vDTU] ERROR: no free message channels for PE %d (range %d-%d)\n",
-           pe, start, end - 1);
+    printf("[vDTU] ERROR: no free channels for PE %d (range %d-%d)\n",
+           pe, base, end - 1);
     return -1;
 }
 
-static void free_msg_channel(int ch)
+static void free_channel(int ch)
 {
-    if (ch >= 0 && ch < NUM_MSG_CHANNELS) {
-        pool.msg_in_use[ch] = 0;
-        pool.msg_assigned_pe[ch] = -1;
-        pool.msg_assigned_ep[ch] = -1;
-    }
-}
-
-static int alloc_mem_channel(int pe, int ep)
-{
-    int start = (pe == PE_VPE1) ? VPE1_MEM_CH_START : 0;
-    int end   = (pe == PE_VPE1) ? NUM_MEM_CHANNELS : VPE1_MEM_CH_START;
-    for (int i = start; i < end; i++) {
-        if (!pool.mem_in_use[i]) {
-            pool.mem_in_use[i] = 1;
-            pool.mem_assigned_pe[i] = pe;
-            pool.mem_assigned_ep[i] = ep;
-            return i;
-        }
-    }
-    printf("[vDTU] ERROR: no free memory channels for PE %d\n", pe);
-    return -1;
-}
-
-static void free_mem_channel(int ch)
-{
-    if (ch >= 0 && ch < NUM_MEM_CHANNELS) {
-        pool.mem_in_use[ch] = 0;
-        pool.mem_assigned_pe[ch] = -1;
-        pool.mem_assigned_ep[ch] = -1;
+    if (ch >= 0 && ch < TOTAL_CHANNELS) {
+        pool.in_use[ch] = 0;
+        pool.assigned_pe[ch] = -1;
+        pool.assigned_ep[ch] = -1;
     }
 }
 
@@ -218,7 +192,7 @@ int config_config_recv(int target_pe, int ep_id,
         return -1;
     }
 
-    int ch = alloc_msg_channel(target_pe, ep_id);
+    int ch = alloc_channel(target_pe, ep_id);
     if (ch < 0)
         return -1;
 
@@ -244,10 +218,8 @@ int config_config_recv(int target_pe, int ep_id,
     ep->slot_size   = (int)slot_size;
     ep->flags       = flags;
 
-    VDTU_LOG("[vDTU] config_recv(pe=%d, ep=%d, buf_order=%d, msg_order=%d) "
-             "-> channel %d (%d slots x %dB)\n",
-             target_pe, ep_id, buf_order, msg_order,
-             ch, (int)slot_count, (int)slot_size);
+    printf("[vDTU] config_recv(pe=%d, ep=%d) -> channel %d (%d slots x %dB)\n",
+           target_pe, ep_id, ch, (int)slot_count, (int)slot_size);
 
     return ch;
 }
@@ -303,9 +275,8 @@ int config_config_send(int target_pe, int ep_id,
     ep->label       = label;
     ep->credits     = credits;
 
-    VDTU_LOG("[vDTU] config_send(pe=%d, ep=%d, dest=%d:%d, label=0x%lx) -> channel %d\n",
-             target_pe, ep_id, dest_pe, dest_ep,
-             (unsigned long)label, ep->channel_idx);
+    printf("[vDTU] config_send(pe=%d, ep=%d -> dest pe=%d ep=%d) -> channel %d\n",
+           target_pe, ep_id, dest_pe, dest_ep, ep->channel_idx);
 
     return ep->channel_idx;
 }
@@ -335,7 +306,7 @@ int config_config_mem(int target_pe, int ep_id,
         return -1;
     }
 
-    int ch = alloc_mem_channel(target_pe, ep_id);
+    int ch = alloc_channel(target_pe, ep_id);
     if (ch < 0)
         return -1;
 
@@ -367,11 +338,11 @@ int config_invalidate_ep(int target_pe, int ep_id)
     if (ep->type == EP_RECEIVE) {
         VDTU_LOG("[vDTU] invalidate_ep(pe=%d, ep=%d) -> freed msg channel %d\n",
                  target_pe, ep_id, ep->channel_idx);
-        free_msg_channel(ep->channel_idx);
+        free_channel(ep->channel_idx);
     } else if (ep->type == EP_MEMORY) {
         VDTU_LOG("[vDTU] invalidate_ep(pe=%d, ep=%d) -> freed mem channel %d\n",
                  target_pe, ep_id, ep->channel_idx);
-        free_mem_channel(ep->channel_idx);
+        free_channel(ep->channel_idx);
     } else if (ep->type == EP_SEND) {
         VDTU_LOG("[vDTU] invalidate_ep(pe=%d, ep=%d) -> cleared send EP\n",
                  target_pe, ep_id);
@@ -495,17 +466,13 @@ void pre_init(void)
             endpoints[pe][ep].channel_idx = -1;
         }
     }
-    for (int i = 0; i < NUM_MSG_CHANNELS; i++) {
-        pool.msg_assigned_pe[i] = -1;
-        pool.msg_assigned_ep[i] = -1;
-    }
-    for (int i = 0; i < NUM_MEM_CHANNELS; i++) {
-        pool.mem_assigned_pe[i] = -1;
-        pool.mem_assigned_ep[i] = -1;
+    for (int i = 0; i < TOTAL_CHANNELS; i++) {
+        pool.assigned_pe[i] = -1;
+        pool.assigned_ep[i] = -1;
     }
 
-    printf("[vDTU] Initialized (%d msg channels, %d mem channels available)\n",
-           NUM_MSG_CHANNELS, NUM_MEM_CHANNELS);
+    printf("[vDTU] Initialized (%d uniform channels available)\n",
+           TOTAL_CHANNELS);
 }
 
 int run(void)

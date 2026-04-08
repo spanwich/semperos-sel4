@@ -74,6 +74,10 @@ public:
     void config_recv_local(int ep, uintptr_t buf, uint order, uint msgorder, int flags);
     void config_recv_remote(const VPEDesc &vpe, int ep, uintptr_t buf, uint order, uint msgorder,
         int flags, bool valid);
+    /* Initialize a recv channel at a pre-allocated VDTUService channel index.
+     * Used for per-VPE SYSC recv EPs where the channel is allocated from
+     * a different PE's pool but read by the kernel. */
+    void init_recv_channel(int ep, int ch, uint32_t slot_count, uint32_t slot_size);
 
     void config_send_local(int ep, label_t label, int dstcore, int dstvpe,
         int dstep, size_t msgsize, word_t credits);

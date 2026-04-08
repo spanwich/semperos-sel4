@@ -1,0 +1,127 @@
+{
+  "timestamp": "2026-03-31T16:00:04",
+  "branch": "master",
+  "commit": "b99e483",
+  "crypto_transport": true,
+  "tsc_mhz": {
+    "node0": 2100,
+    "node1": 2100,
+    "node2": 2100
+  },
+  "benchmarks": {
+    "node0": {
+      "chain_revoke_100_kernel": {
+        "min": 280942,
+        "med": 308952,
+        "mean": 315744,
+        "max": 545703
+      },
+      "chain_revoke_50_kernel": {
+        "min": 144552,
+        "med": 155916,
+        "mean": 161447,
+        "max": 239476
+      },
+      "chain_revoke_25_kernel": {
+        "min": 71226,
+        "med": 76410,
+        "mean": 81571,
+        "max": 173395
+      },
+      "chain_revoke_10_kernel": {
+        "min": 29690,
+        "med": 31464,
+        "mean": 32779,
+        "max": 71248
+      },
+      "local_revoke_kernel": {
+        "min": 5842,
+        "med": 6248,
+        "mean": 6528,
+        "max": 43331
+      },
+      "local_exchange_kernel": {
+        "min": 300,
+        "med": 370,
+        "mean": 443,
+        "max": 1602
+      }
+    },
+    "node1": {
+      "chain_revoke_100_kernel": {
+        "min": 285352,
+        "med": 312098,
+        "mean": 320239,
+        "max": 515634
+      },
+      "chain_revoke_50_kernel": {
+        "min": 141796,
+        "med": 153460,
+        "mean": 159827,
+        "max": 233021
+      },
+      "chain_revoke_25_kernel": {
+        "min": 70512,
+        "med": 75962,
+        "mean": 80523,
+        "max": 182433
+      },
+      "chain_revoke_10_kernel": {
+        "min": 28560,
+        "med": 30714,
+        "mean": 31985,
+        "max": 96234
+      },
+      "local_revoke_kernel": {
+        "min": 5520,
+        "med": 5896,
+        "mean": 6136,
+        "max": 42565
+      },
+      "local_exchange_kernel": {
+        "min": 300,
+        "med": 340,
+        "mean": 351,
+        "max": 939
+      }
+    },
+    "node2": {
+      "chain_revoke_100_kernel": {
+        "min": 280810,
+        "med": 306086,
+        "mean": 314880,
+        "max": 422817
+      },
+      "chain_revoke_50_kernel": {
+        "min": 141756,
+        "med": 159604,
+        "mean": 163118,
+        "max": 251574
+      },
+      "chain_revoke_25_kernel": {
+        "min": 69172,
+        "med": 72662,
+        "mean": 76024,
+        "max": 194453
+      },
+      "chain_revoke_10_kernel": {
+        "min": 28298,
+        "med": 29656,
+        "mean": 31608,
+        "max": 67058
+      },
+      "local_revoke_kernel": {
+        "min": 6026,
+        "med": 6380,
+        "mean": 6888,
+        "max": 45328
+      },
+      "local_exchange_kernel": {
+        "min": 296,
+        "med": 344,
+        "mean": 393,
+        "max": 1815
+      }
+    }
+  }
+}

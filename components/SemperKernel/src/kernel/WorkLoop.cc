@@ -114,6 +114,19 @@ void WorkLoop::run() {
         sysep[i] = sysch.epid(i);
     int srvep = sysch.srvepid();
     const m3::DTU::Message *msg;
+    /* Debug: print EP→channel mapping once */
+    static int ep_map_printed = 0;
+    if (!ep_map_printed) {
+        printf("[WorkLoop] SYSC EPs: ");
+        for (int i = 0; i < DTU::SYSC_GATES; i++)
+            printf("sysep[%d]=%d ", i, sysep[i]);
+        printf("\n[WorkLoop] KRNLC EPs: ");
+        for (int i = 0; i < DTU::KRNLC_GATES; i++)
+            printf("krnlep[%d]=%d ", i, krnlep[i]);
+        printf("\nsrvep=%d\n", srvep);
+        ep_map_printed = 1;
+    }
+
     while(has_items()) {
         m3::DTU::get().wait();
 

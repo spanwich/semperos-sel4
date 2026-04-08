@@ -145,6 +145,10 @@ public:
     bool exists(int id) {
         return id >= 0 && id < (int)Platform::MAX_PES && _vpes[id];
     }
+    void set_vpe(size_t core_id, VPE *vpe) {
+        _vpes[core_id] = vpe;
+        _count++;
+    }
     VPE &vpe(int id) {
         assert(_vpes[id]);
         return *_vpes[id];

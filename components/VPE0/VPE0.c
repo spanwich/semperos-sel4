@@ -51,28 +51,19 @@ static int send_chan = -1;
 
 static void init_channel_table(void)
 {
-    /* Must provide VDTU_MSG_CHANNELS (12) and VDTU_MEM_CHANNELS (6) entries.
-     * VPE0 only uses channels 0-7 (msg) and 0-3 (mem). Channels 8-11 and
-     * 4-5 belong to VPE1 — NULL from VPE0's perspective. */
-    volatile void *msg[VDTU_MSG_CHANNELS] = {
-        (volatile void *)msgchan_kv_0,
-        (volatile void *)msgchan_kv_1,
-        (volatile void *)msgchan_kv_2,
-        (volatile void *)msgchan_kv_3,
-        (volatile void *)msgchan_kv_4,
-        (volatile void *)msgchan_kv_5,
-        (volatile void *)msgchan_kv_6,
-        (volatile void *)msgchan_kv_7,
-        NULL, NULL, NULL, NULL,  /* channels 8-11: VPE1 */
+    /* VPE0 has 16 uniform channels (gem5 EP_COUNT=16).
+     * These map to kernel channels 0-15 (kernel ↔ VPE0 links). */
+    volatile void *dataports[VDTU_CHANNELS_PER_PE] = {
+        (volatile void *)dtu_ch_0,  (volatile void *)dtu_ch_1,
+        (volatile void *)dtu_ch_2,  (volatile void *)dtu_ch_3,
+        (volatile void *)dtu_ch_4,  (volatile void *)dtu_ch_5,
+        (volatile void *)dtu_ch_6,  (volatile void *)dtu_ch_7,
+        (volatile void *)dtu_ch_8,  (volatile void *)dtu_ch_9,
+        (volatile void *)dtu_ch_10, (volatile void *)dtu_ch_11,
+        (volatile void *)dtu_ch_12, (volatile void *)dtu_ch_13,
+        (volatile void *)dtu_ch_14, (volatile void *)dtu_ch_15,
     };
-    volatile void *mem[VDTU_MEM_CHANNELS] = {
-        (volatile void *)memep_kv_0,
-        (volatile void *)memep_kv_1,
-        (volatile void *)memep_kv_2,
-        (volatile void *)memep_kv_3,
-        NULL, NULL,  /* channels 4-5: VPE1 */
-    };
-    vdtu_channels_init(&channels, msg, mem);
+    vdtu_channels_init(&channels, dataports, VDTU_CHANNELS_PER_PE);
 }
 
 /*
@@ -90,9 +81,9 @@ static int wait_for_reply_ex(uint64_t *out_cycles)
     if (out_cycles) *out_cycles = 0;
 
     while (timeout-- > 0) {
-        for (int ch = 1; ch < VDTU_MSG_CHANNELS; ch++) {
-            if (!channels.msg[ch]) continue;
-            if (!channels.msg_rings[ch].ctrl)
+        for (int ch = 1; ch < VDTU_CHANNELS_PER_PE; ch++) {
+            if (!channels.ch[ch]) continue;
+            if (!channels.rings[ch].ctrl)
                 vdtu_channels_attach_ring(&channels, ch);
             struct vdtu_ring *r = vdtu_channels_get_ring(&channels, ch);
             if (r && !vdtu_ring_is_empty(r)) {
@@ -572,11 +563,11 @@ static void bench_ep_terminate(void)
 /* --- Benchmark 6: mem_access --- */
 static void bench_mem_access(void)
 {
-    /* Measure memcpy through a memory dataport (memep_kv_0).
+    /* Measure memcpy through a memory dataport (dtu_ch_0).
      * This bypasses the kernel — VPE0 directly reads/writes the dataport,
      * simulating the DTU memory EP path. */
 
-    volatile void *mem = (volatile void *)memep_kv_0;
+    volatile void *mem = (volatile void *)dtu_ch_0;
     char buf[256];
     memset(buf, 0xDD, sizeof(buf));
 
@@ -628,11 +619,11 @@ int run(void)
     for (volatile int i = 0; i < 10000000; i++) {}
 
     /* Find the send channel */
-    for (int ch = 0; ch < VDTU_MSG_CHANNELS; ch++) {
-        if (!channels.msg[ch]) continue;
-        if (!channels.msg_rings[ch].ctrl)
+    for (int ch = 0; ch < VDTU_CHANNELS_PER_PE; ch++) {
+        if (!channels.ch[ch]) continue;
+        if (!channels.rings[ch].ctrl)
             vdtu_channels_attach_ring(&channels, ch);
-        if (channels.msg_rings[ch].ctrl) {
+        if (channels.rings[ch].ctrl) {
             send_chan = ch;
             break;
         }

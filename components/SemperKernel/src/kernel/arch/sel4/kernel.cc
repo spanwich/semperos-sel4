@@ -10,6 +10,10 @@
 
 extern "C" {
 #include <stdio.h>
+#include "vdtu_ring.h"
+#include "vdtu_channels.h"
+/* VDTUService RPC stub — needed for per-VPE SYSC recv EP allocation */
+int vdtu_config_recv(int target_pe, int ep_id, int buf_order, int msg_order, int flags);
 }
 
 #include <base/log/Kernel.h>
@@ -43,12 +47,37 @@ static void configure_recv_endpoints(void)
 {
     SyscallHandler &sysch = SyscallHandler::get();
 
-    /* Configure 1 SYSC_GATE recv endpoint (for syscalls from VPEs).
-     * Prototype uses 1 gate (channel budget: 8 total).
-     * Channel allocation: 1 SYSC + 1 SRV + 1 KRNLC + 1 VPE0_RECV + 1 VPE0_SEND = 5/8 */
+    /* Configure per-VPE SYSC recv endpoints (gem5: one recv EP per sending VPE).
+     * EP 0: reads from VPE0's channel pool (channels 0-15)
+     * EP 1: reads from VPE1's channel pool (channels 16-31)
+     * The WorkLoop polls all SYSC_GATES, so both are checked each iteration. */
     int buford = m3::getnextlog2(m3::DTU::MAX_MSG_SLOTS) + VPE::SYSC_CREDIT_ORD;
+
+    /* SYSC EP 0: for VPE0 syscalls (channel from PE 0/2 pool) */
     DTU::get().config_recv_local(sysch.epid(0), 0, buford, VPE::SYSC_CREDIT_ORD, 0);
-    printf("[SemperKernel] Configured SYSC_GATE recv endpoint (ep %zu)\n", sysch.epid(0));
+    printf("[SemperKernel] Configured SYSC_GATE[0] for VPE0 (ep %zu)\n", sysch.epid(0));
+
+    /* SYSC EP 1: for VPE1 syscalls.
+     * Allocate channel from VPE1's pool (PE 3 → channels 16-31) so the
+     * physical page is shared between kernel and VPE1. The kernel reads
+     * this channel via its local ep_channel table. This matches the gem5
+     * model: each VPE→kernel link is a separate NoC connection. */
+    /* SYSC EP 1: for VPE1 syscalls.
+     * Directly init on channel 16 (first channel of VPE1's pool).
+     * No VDTUService RPC — we know the channel layout statically.
+     * VPE1's config_send will target this channel directly. */
+    {
+        int sysc_ep1 = (int)sysch.epid(1);
+        int ch = VDTU_CHANNELS_PER_PE;  /* channel 16 = first VPE1 channel */
+        uint32_t slot_count = 1u << (buford - VPE::SYSC_CREDIT_ORD);
+        uint32_t slot_size = 1u << VPE::SYSC_CREDIT_ORD;
+        size_t avail = 4096 - VDTU_RING_CTRL_SIZE;
+        while (slot_count * slot_size > avail && slot_count > 2)
+            slot_count >>= 1;
+        DTU::get().init_recv_channel(sysc_ep1, ch, slot_count, slot_size);
+        printf("[SemperKernel] Configured SYSC_GATE[1] for VPE1 (ep %d, ch %d)\n",
+               sysc_ep1, ch);
+    }
 
     /* Configure service recv endpoint */
     int srv_buford = m3::nextlog2<Service::SRV_MSG_SIZE * m3::DTU::MAX_MSG_SLOTS>::val;
@@ -111,7 +140,14 @@ static VPE *create_vpe0(void)
 static VPE *create_vpe1(VPE *vpe0)
 {
     m3::PEDesc pe(m3::PEType::COMP_IMEM);
-    VPE *vpe1 = PEManager::get().create(m3::String("VPE1"), pe, -1, m3::KIF::INV_SEL);
+    /* Force VPE1 to use SYSC EP 1 (kernel's per-VPE1 recv EP on channel 16).
+     * PEManager::create uses reserve_ep which would assign EP 0 (same as VPE0).
+     * We create VPE1 directly with syscEP=1 to match SYSC_GATE[1]. */
+    size_t core_id = PEManager::get().free_core(pe);
+    if (core_id == Platform::MAX_PES) return nullptr;
+    VPE *vpe1 = new VPE(m3::String("VPE1"), core_id, core_id, false,
+                         1 /* syscEP = SYSC_GATE[1] */, -1, m3::KIF::INV_SEL);
+    PEManager::get().set_vpe(core_id, vpe1);
     if (!vpe1) {
         printf("[SemperKernel] ERROR: PEManager::create() failed for VPE1\n");
         return nullptr;

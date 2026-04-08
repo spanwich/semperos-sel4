@@ -31,12 +31,16 @@ extern "C" {
 /* CAmkES-generated symbols — dataports and RPC stubs.
  * We declare them manually to avoid including <camkes.h> from C++
  * (camkes.h pulls in seL4 utility headers that use C-only constructs). */
-extern volatile void *msgchan_kv_0, *msgchan_kv_1, *msgchan_kv_2, *msgchan_kv_3;
-extern volatile void *msgchan_kv_4, *msgchan_kv_5, *msgchan_kv_6, *msgchan_kv_7;
-extern volatile void *memep_kv_0, *memep_kv_1, *memep_kv_2, *memep_kv_3;
-/* VPE1 channels (FPT-175) */
-extern volatile void *msgchan_v1_0, *msgchan_v1_1, *msgchan_v1_2, *msgchan_v1_3;
-extern volatile void *memep_v1_0, *memep_v1_1;
+/* 32 uniform vDTU channel dataports (16 per PE pair, gem5 EP_COUNT=16).
+ * Channels 0-15: kernel ↔ VPE0.  Channels 16-31: kernel ↔ VPE1. */
+extern volatile void *dtu_ch_0, *dtu_ch_1, *dtu_ch_2, *dtu_ch_3;
+extern volatile void *dtu_ch_4, *dtu_ch_5, *dtu_ch_6, *dtu_ch_7;
+extern volatile void *dtu_ch_8, *dtu_ch_9, *dtu_ch_10, *dtu_ch_11;
+extern volatile void *dtu_ch_12, *dtu_ch_13, *dtu_ch_14, *dtu_ch_15;
+extern volatile void *dtu_ch_16, *dtu_ch_17, *dtu_ch_18, *dtu_ch_19;
+extern volatile void *dtu_ch_20, *dtu_ch_21, *dtu_ch_22, *dtu_ch_23;
+extern volatile void *dtu_ch_24, *dtu_ch_25, *dtu_ch_26, *dtu_ch_27;
+extern volatile void *dtu_ch_28, *dtu_ch_29, *dtu_ch_30, *dtu_ch_31;
 
 /* vDTU config RPC stubs (from VDTUConfig interface) */
 int vdtu_config_recv(int target_pe, int ep_id, int buf_order, int msg_order, int flags);
@@ -108,32 +112,26 @@ static void ensure_channels_init(void)
 {
     if (channels_initialized) return;
 
-    volatile void *msg[] = {
-        /* Channels 0-7: kernel0 <-> VPE0 */
-        (volatile void *)msgchan_kv_0,
-        (volatile void *)msgchan_kv_1,
-        (volatile void *)msgchan_kv_2,
-        (volatile void *)msgchan_kv_3,
-        (volatile void *)msgchan_kv_4,
-        (volatile void *)msgchan_kv_5,
-        (volatile void *)msgchan_kv_6,
-        (volatile void *)msgchan_kv_7,
-        /* Channels 8-11: kernel0 <-> VPE1 (FPT-175) */
-        (volatile void *)msgchan_v1_0,
-        (volatile void *)msgchan_v1_1,
-        (volatile void *)msgchan_v1_2,
-        (volatile void *)msgchan_v1_3,
+    /* 32 uniform channels: 0-15 = kernel↔VPE0, 16-31 = kernel↔VPE1 */
+    volatile void *dataports[VDTU_TOTAL_CHANNELS] = {
+        (volatile void *)dtu_ch_0,  (volatile void *)dtu_ch_1,
+        (volatile void *)dtu_ch_2,  (volatile void *)dtu_ch_3,
+        (volatile void *)dtu_ch_4,  (volatile void *)dtu_ch_5,
+        (volatile void *)dtu_ch_6,  (volatile void *)dtu_ch_7,
+        (volatile void *)dtu_ch_8,  (volatile void *)dtu_ch_9,
+        (volatile void *)dtu_ch_10, (volatile void *)dtu_ch_11,
+        (volatile void *)dtu_ch_12, (volatile void *)dtu_ch_13,
+        (volatile void *)dtu_ch_14, (volatile void *)dtu_ch_15,
+        (volatile void *)dtu_ch_16, (volatile void *)dtu_ch_17,
+        (volatile void *)dtu_ch_18, (volatile void *)dtu_ch_19,
+        (volatile void *)dtu_ch_20, (volatile void *)dtu_ch_21,
+        (volatile void *)dtu_ch_22, (volatile void *)dtu_ch_23,
+        (volatile void *)dtu_ch_24, (volatile void *)dtu_ch_25,
+        (volatile void *)dtu_ch_26, (volatile void *)dtu_ch_27,
+        (volatile void *)dtu_ch_28, (volatile void *)dtu_ch_29,
+        (volatile void *)dtu_ch_30, (volatile void *)dtu_ch_31,
     };
-    volatile void *mem[] = {
-        (volatile void *)memep_kv_0,
-        (volatile void *)memep_kv_1,
-        (volatile void *)memep_kv_2,
-        (volatile void *)memep_kv_3,
-        /* VPE1 mem channels (FPT-175) */
-        (volatile void *)memep_v1_0,
-        (volatile void *)memep_v1_1,
-    };
-    vdtu_channels_init(&channels, msg, mem);
+    vdtu_channels_init(&channels, dataports, VDTU_TOTAL_CHANNELS);
 
     for (int i = 0; i < EP_COUNT; i++) {
         ep_channel[i] = -1;
@@ -259,9 +257,8 @@ void DTU::config_recv_local(int ep, uintptr_t buf, uint order, uint msgorder, in
     ep_channel[ep] = ch;
     ep_type[ep] = EP_RECV;
 
-    KLOG_V(EPS, "config_recv_local(ep=" << ep << " order=" << order
-         << " msgorder=" << msgorder << ") -> channel " << ch
-         << " (" << slot_count << " slots x " << slot_size << "B)");
+    printf("[DTU] config_recv_local(MY_PE=%d, ep=%d) -> ch=%d, ring_ptr=%p\n",
+           MY_PE, ep, ch, (void *)vdtu_channels_get_ring(&channels, ch));
 }
 
 void DTU::config_recv_remote(const VPEDesc &vpe, int ep, uintptr_t buf,
@@ -287,7 +284,17 @@ void DTU::config_recv_remote(const VPEDesc &vpe, int ep, uintptr_t buf,
 
     vdtu_channels_init_ring(&channels, ch, slot_count, slot_size);
 
-    KLOG_V(EPS, "config_recv_remote(pe=" << target_pe << " ep=" << ep << ") -> channel " << ch);
+    printf("[DTU] config_recv_remote(local_pe=%d, ep=%d) -> ch=%d, ring_ptr=%p\n",
+           target_pe, ep, ch, (void *)vdtu_channels_get_ring(&channels, ch));
+}
+
+void DTU::init_recv_channel(int ep, int ch, uint32_t slot_count, uint32_t slot_size) {
+    ensure_channels_init();
+    vdtu_channels_init_ring(&channels, ch, slot_count, slot_size);
+    ep_channel[ep] = ch;
+    ep_type[ep] = EP_RECV;
+    printf("[DTU] init_recv_channel(ep=%d, ch=%d) -> ring_ptr=%p\n",
+           ep, ch, (void *)vdtu_channels_get_ring(&channels, ch));
 }
 
 void DTU::config_send_local(int ep, label_t label, int dstcore, int dstvpe,
@@ -337,7 +344,9 @@ void DTU::config_send_remote(const VPEDesc &vpe, int ep, label_t label,
     /* Attach to ring */
     vdtu_channels_attach_ring(&channels, ch);
 
-    KLOG_V(EPS, "config_send_remote(pe=" << target_pe << " ep=" << ep << ") -> channel " << ch);
+    printf("[DTU] config_send_remote(vpe.core=%d->local_pe=%d, ep=%d, dst_pe=%d->%d, dst_ep=%d) -> ch=%d, ring_ptr=%p\n",
+           vpe.core, target_pe, ep, dstcore, local_dst, dstep, ch,
+           (void *)vdtu_channels_get_ring(&channels, ch));
 }
 
 void DTU::config_mem_local(int ep, int dstcore, int dstvpe, uintptr_t addr, size_t size) {
