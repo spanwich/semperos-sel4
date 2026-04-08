@@ -70,6 +70,7 @@ public:
         CONNECT,
         REPLYKRNLC,
         STARTAPPS,
+        KRNLC_PING,     /* Layer 2: kernel-to-kernel round-trip test (FPT-176) */
         COUNT
     };
 
@@ -166,6 +167,9 @@ public:
 
     void startApps(KPE *kernel);
 
+    /* Layer 2: kernel-to-kernel round-trip test. Sends KRNLC_PING,
+     * remote replies immediately. Blocks in wait_for() until reply. */
+    void ping(KPE *kernel);
 
 private:
     m3::Errors::Code finish(GateIStream &&reply);

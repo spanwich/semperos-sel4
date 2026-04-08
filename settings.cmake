@@ -92,6 +92,15 @@ include(${GLOBAL_COMPONENTS_PATH})
 # the heap with a 4 MiB static BSS allocation in camkes_entry.c.
 set(CAmkESDefaultHeapSize 4194304 CACHE STRING "" FORCE)
 
+# Domain scheduling: DTUBridge gets guaranteed CPU (FPT-177)
+# Domain 0: kernel + VDTUService + VPE0 + VPE1
+# Domain 1: DTUBridge (network I/O)
+# Only enabled for network builds (SEMPEROS_NO_NETWORK=OFF)
+if(NOT SEMPEROS_NO_NETWORK)
+    set(KernelNumDomains 2 CACHE STRING "" FORCE)
+    set(KernelDomainSchedule "${CMAKE_CURRENT_LIST_DIR}/domain_schedule.c" CACHE FILEPATH "" FORCE)
+endif()
+
 # lwIP (for DTUBridge E1000 + UDP transport)
 set(LibLwip ON CACHE BOOL "" FORCE)
 

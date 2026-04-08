@@ -440,4 +440,15 @@ void Kernelcalls::startApps(KPE* kernel) {
     kernel->sendTo(msg.bytes(), msg.total());
 }
 
+void Kernelcalls::ping(KPE* kernel) {
+    KLOG(KRNLC, "ping(kernel=" << kernel->core() << ")");
+    StaticGateOStream<m3::ostreamsize<Kernelcalls::Operation, int>()> msg;
+    int tid = m3::ThreadManager::get().current()->id();
+    msg << KRNLC_PING << tid;
+    kernel->sendTo(msg.bytes(), msg.total());
+    /* Block until remote kernel replies */
+    m3::ThreadManager::get().wait_for(reinterpret_cast<void*>(tid));
+    KLOG(KRNLC, "ping reply received from kernel=" << kernel->core());
+}
+
 }

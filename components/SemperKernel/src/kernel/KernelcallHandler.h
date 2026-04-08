@@ -154,6 +154,7 @@ public:
     void connect(GateIStream &is);
     void reply(GateIStream &is);
     void startApps(GateIStream &is);
+    void krnlcPing(GateIStream &is);
 
 private:
     RecvGate _rcvgate[DTU::KRNLC_GATES];

@@ -164,6 +164,19 @@ static void worker_thread_func(void *) {
         g_kworkloop->run();
 }
 
+/* Layer 2: kernel-to-kernel ping. Called from net_poll() in camkes_entry.c. */
+extern "C" int krnlc_ping_peer(void) {
+#ifdef SEMPER_MULTI_NODE
+    size_t peer_kid = (Platform::kernelId() == 0) ? 1 : 0;
+    KPE *peer = Coordinator::get().tryGetKPE(peer_kid);
+    if (!peer) return -1;
+    Kernelcalls::get().ping(peer);  /* blocks in wait_for() until reply */
+    return 0;
+#else
+    return -1;
+#endif
+}
+
 extern "C" void kernel_start(void) {
     printf("[SemperKernel] Starting SemperOS kernel on seL4/CAmkES\n");
     printf("[SemperKernel] Platform: %zu PEs, kernel PE=%zu, kernel ID=%u\n",

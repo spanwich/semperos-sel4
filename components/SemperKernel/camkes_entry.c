@@ -138,6 +138,8 @@ static volatile int net_rings_attached = 0;
 /* Dispatch inbound KRNLC messages to C++ KernelcallHandler (Task 08).
  * Defined in WorkLoop.cc. */
 extern void dispatch_net_krnlc(const void *raw_msg, uint16_t len);
+/* Layer 2: kernel-to-kernel ping. Returns 0 on success, -1 on no peer. */
+extern int krnlc_ping_peer(void);
 
 static volatile int net_ping_sent = 0;
 static volatile int net_pong_sent = 0;
@@ -352,6 +354,19 @@ void net_poll(void)
         }
 
         vdtu_ring_ack(&g_net_in_ring);
+    }
+
+    /* Layer 2: kernel-to-kernel ping after PONG proves link works */
+    static int krnlc_ping_done = 0;
+    if (net_pong_received && !krnlc_ping_done && net_poll_count > 2000000) {
+        printf("[SemperKernel] Layer 2: sending KRNLC_PING to peer kernel...\n");
+        int rc = krnlc_ping_peer();
+        if (rc == 0) {
+            printf("[SemperKernel] Layer 2: === KRNLC_PING SUCCESS ===\n");
+            krnlc_ping_done = 1;
+        } else {
+            printf("[SemperKernel] Layer 2: KRNLC_PING failed (rc=%d)\n", rc);
+        }
     }
 
     /* Status report */

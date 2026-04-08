@@ -94,6 +94,7 @@ KernelcallHandler::KernelcallHandler()
     add_operation(Kernelcalls::CONNECT, &KernelcallHandler::connect);
     add_operation(Kernelcalls::REPLYKRNLC, &KernelcallHandler::reply);
     add_operation(Kernelcalls::STARTAPPS, &KernelcallHandler::startApps);
+    add_operation(Kernelcalls::KRNLC_PING, &KernelcallHandler::krnlcPing);
 }
 
 void KernelcallHandler::sigvital(GateIStream& is) {
@@ -1147,6 +1148,27 @@ void KernelcallHandler::startApps(GateIStream &is) {
     if(Coordinator::get().kid() != 0)
         m3::DTU::get().debug_msg(0x11000000);
 #endif
+}
+
+void KernelcallHandler::krnlcPing(GateIStream &is) {
+    int tid;
+    is >> tid;
+
+    if (tid < 0) {
+        /* This is a reply (tid = -original_tid). Wake the waiting thread. */
+        int orig_tid = -tid;
+        KLOG(KRNLC, "krnlcPing REPLY from kernel " << is.label() << " tid=" << orig_tid);
+        m3::ThreadManager::get().notify(reinterpret_cast<void*>(orig_tid));
+        Coordinator::get().getKPE(is.label())->msg_received();
+    } else {
+        /* This is a request. Reply with negated tid. */
+        KLOG(KRNLC, "krnlcPing REQUEST from kernel " << is.label() << " tid=" << tid);
+        KPE *sender = Coordinator::get().getKPE(is.label());
+        StaticGateOStream<m3::ostreamsize<Kernelcalls::Operation, int>()> reply;
+        reply << Kernelcalls::KRNLC_PING << (-tid);
+        sender->reply(reply.bytes(), reply.total());
+        sender->msg_received();
+    }
 }
 
 }

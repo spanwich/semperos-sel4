@@ -403,10 +403,19 @@ assembly {
         vpe1._heap_size = 65536;
         vpe1._stack_size = 16384;
 
-        /* DTUBridge: E1000 + lwIP UDP bridge */
+        /* DTUBridge: E1000 + lwIP UDP bridge
+         * Domain 1 for guaranteed CPU time (FPT-177, Model A).
+         * CRITICAL: every interface thread must be in domain 1 or CAmkES
+         * init deadlocks. See .claude/camkes-domain-scheduling.md. */
         dtu_bridge.priority = 200;
-        dtu_bridge._stack_size = 0x100000;  /* 1 MiB (e1000 init + lwIP) */
-        dtu_bridge.heap_size = 0x100000;    /* 1 MiB */
+        dtu_bridge._domain = 1;
+        /* Interface threads — MUST match control thread domain */
+        dtu_bridge.eth_irq_domain = 1;        /* consumes IRQ */
+        dtu_bridge.pci_config_domain = 1;     /* uses IOPort */
+        dtu_bridge.net_domain = 1;            /* provides DTUNetIPC RPC */
+        dtu_bridge.net_msg_ready_domain = 1;  /* emits Signal */
+        dtu_bridge._stack_size = 0x100000;    /* 1 MiB (e1000 init + lwIP) */
+        dtu_bridge.heap_size = 0x100000;      /* 1 MiB */
 
         /* DMA pool for e1000 descriptor rings + buffers */
         dtu_bridge.dma_pool = 0x200000;         /* 2 MiB */
