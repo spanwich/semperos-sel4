@@ -150,9 +150,10 @@ extern "C" void net_init_rings(void);
  * We create NUM_WORKER_THREADS workers at startup so that nested
  * blocking (e.g., main blocks, worker handles a message that also
  * blocks) has a sleeping thread to switch to. Two workers is
- * sufficient for the current prototype (one active, one sleeping).
+ * Three workers needed for multi-node: one runs WorkLoop, one handles
+ * blocking Kernelcalls (ping, createSessFwd), one sleeps as backup.
  */
-#define NUM_WORKER_THREADS 2
+#define NUM_WORKER_THREADS 3
 
 static kernel::WorkLoop *g_kworkloop = nullptr;
 
@@ -244,10 +245,11 @@ extern "C" void kernel_start(void) {
      * Must be created BEFORE the WorkLoop starts so wait_for() has
      * sleeping threads to switch to. */
     for (int i = 0; i < NUM_WORKER_THREADS; i++) {
-        new m3::Thread(worker_thread_func, nullptr);
+        m3::Thread *t = new m3::Thread(worker_thread_func, nullptr);
+        m3::ThreadManager::get().add_sleeping(t);
     }
-    printf("[SemperKernel] Created %d worker threads (thread count: %zu)\n",
-           NUM_WORKER_THREADS, m3::ThreadManager::get().thread_count());
+    printf("[SemperKernel] Created %d worker threads (sleep count: %zu)\n",
+           NUM_WORKER_THREADS, m3::ThreadManager::get().sleeping_count());
 
     /* Create and start VPE0 */
     VPE *vpe0 = create_vpe0();

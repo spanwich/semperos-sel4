@@ -15,6 +15,9 @@
  * General Public License version 2 for more details.
  */
 
+extern "C" {
+#include <stdio.h>
+}
 #include <base/Common.h>
 #include <base/tracing/Tracing.h>
 #include <base/log/Kernel.h>
@@ -48,6 +51,14 @@ extern "C" void dispatch_net_krnlc(const void *raw_msg, uint16_t len) {
      * net_poll() via vdtu_ring_ack(). Letting GateIStream's destructor
      * call mark_read() would ack the wrong (KRNLC) ring. */
     is.claim();  /* sets _ack = false */
+    /* Debug: print opcode for network-delivered KRNLC messages */
+    {
+        const unsigned char *d = msg->data;
+        uint64_t op = 0;
+        if (len >= 25 + 8) memcpy(&op, d, 8);
+        printf("[dispatch_net_krnlc] len=%u op=%lu label=0x%lx\n",
+               len, (unsigned long)op, (unsigned long)msg->label);
+    }
     krnlch.handle_message(is, nullptr);
 }
 #endif /* !SEMPEROS_NO_NETWORK */

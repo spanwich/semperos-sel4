@@ -133,18 +133,28 @@ int ct_decrypt(const uint8_t *input, size_t input_len,
     const ct_header_t *hdr = (const ct_header_t *)input;
 
     /* Check receiver */
-    if (hdr->receiver_id != g_my_id)
+    if (hdr->receiver_id != g_my_id) {
+        printf("[CRYPTO] REJECT: receiver_id=%u but my_id=%u\n",
+               hdr->receiver_id, g_my_id);
         return -1;
+    }
 
     uint8_t sender = hdr->sender_id;
-    if (sender >= CT_MAX_NODES || !g_peers[sender].active)
+    if (sender >= CT_MAX_NODES || !g_peers[sender].active) {
+        printf("[CRYPTO] REJECT: sender=%u invalid (max=%d, active=%d)\n",
+               sender, CT_MAX_NODES,
+               (sender < CT_MAX_NODES) ? g_peers[sender].active : -1);
         return -1;
+    }
 
     ct_peer_t *peer = &g_peers[sender];
 
     /* Anti-replay: reject if sequence <= highest seen */
-    if (hdr->sequence_num <= peer->rx_seq_max)
+    if (hdr->sequence_num <= peer->rx_seq_max) {
+        printf("[CRYPTO] REJECT: replay seq=%u <= max=%u from sender=%u\n",
+               hdr->sequence_num, peer->rx_seq_max, sender);
         return -1;
+    }
 
     size_t ciphertext_len = input_len - CT_HEADER_SIZE - CT_TAG_SIZE;
     if (plaintext_max < ciphertext_len)

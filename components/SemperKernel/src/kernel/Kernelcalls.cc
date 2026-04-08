@@ -15,6 +15,9 @@
  * General Public License version 2 for more details.
  */
 
+extern "C" {
+#include <stdio.h>
+}
 #include <base/log/Kernel.h>
 #include <base/Init.h>
 #include <base/Errors.h>
@@ -447,6 +450,7 @@ void Kernelcalls::ping(KPE* kernel) {
     msg << KRNLC_PING << tid;
     kernel->sendTo(msg.bytes(), msg.total());
     /* Block until remote kernel replies */
+    printf("[Kernelcalls::ping] about to wait_for tid=%d\n", tid);
     m3::ThreadManager::get().wait_for(reinterpret_cast<void*>(tid));
     KLOG(KRNLC, "ping reply received from kernel=" << kernel->core());
 }

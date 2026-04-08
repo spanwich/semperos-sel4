@@ -15,6 +15,9 @@
  * General Public License version 2 for more details.
  */
 
+extern "C" {
+#include <stdio.h>
+}
 #include <base/log/Kernel.h>
 #include <base/Init.h>
 #include <base/Heap.h>
@@ -1155,14 +1158,13 @@ void KernelcallHandler::krnlcPing(GateIStream &is) {
     is >> tid;
 
     if (tid < 0) {
-        /* This is a reply (tid = -original_tid). Wake the waiting thread. */
         int orig_tid = -tid;
-        KLOG(KRNLC, "krnlcPing REPLY from kernel " << is.label() << " tid=" << orig_tid);
+        printf("[KRNLC_PING] REPLY received, waking tid=%d\n", orig_tid);
         m3::ThreadManager::get().notify(reinterpret_cast<void*>(orig_tid));
         Coordinator::get().getKPE(is.label())->msg_received();
     } else {
-        /* This is a request. Reply with negated tid. */
-        KLOG(KRNLC, "krnlcPing REQUEST from kernel " << is.label() << " tid=" << tid);
+        printf("[KRNLC_PING] REQUEST from kernel %lu, tid=%d, replying\n",
+               (unsigned long)is.label(), tid);
         KPE *sender = Coordinator::get().getKPE(is.label());
         StaticGateOStream<m3::ostreamsize<Kernelcalls::Operation, int>()> reply;
         reply << Kernelcalls::KRNLC_PING << (-tid);

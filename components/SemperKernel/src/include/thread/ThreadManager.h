@@ -45,6 +45,9 @@ public:
     size_t sleeping_count() const {
         return _sleep.length();
     }
+    void add_sleeping(Thread *t) {
+        _sleep.append(t);
+    }
     const unsigned char *get_current_msg() const {
         return _current->get_msg();
     }

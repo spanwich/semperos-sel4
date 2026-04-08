@@ -356,11 +356,19 @@ void net_poll(void)
         vdtu_ring_ack(&g_net_in_ring);
     }
 
-    /* Layer 2: kernel-to-kernel ping after PONG proves link works */
+    /* Layer 2: kernel-to-kernel ping after PONG proves link works.
+     * krnlc_ping_peer() blocks in ThreadManager::wait_for(). When a worker
+     * thread takes over the WorkLoop, it must NOT re-enter ping. The
+     * "in_progress" flag prevents re-entrancy. */
     static int krnlc_ping_done = 0;
-    if (net_pong_received && !krnlc_ping_done && net_poll_count > 2000000) {
+    static volatile int krnlc_ping_in_progress = 0;
+    if (net_pong_received && !krnlc_ping_done && !krnlc_ping_in_progress
+        && net_poll_count > 2000000) {
+        krnlc_ping_in_progress = 1;
+        __sync_synchronize();
         printf("[SemperKernel] Layer 2: sending KRNLC_PING to peer kernel...\n");
         int rc = krnlc_ping_peer();
+        krnlc_ping_in_progress = 0;
         if (rc == 0) {
             printf("[SemperKernel] Layer 2: === KRNLC_PING SUCCESS ===\n");
             krnlc_ping_done = 1;
