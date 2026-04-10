@@ -31,7 +31,7 @@ extern "C" {
 /* CAmkES-generated symbols — dataports and RPC stubs.
  * We declare them manually to avoid including <camkes.h> from C++
  * (camkes.h pulls in seL4 utility headers that use C-only constructs). */
-/* 32 uniform vDTU channel dataports (16 per PE pair, gem5 EP_COUNT=16).
+/* 32 uniform vDTU channel dataports (16 per PE pair).
  * Channels 0-15: kernel ↔ VPE0.  Channels 16-31: kernel ↔ VPE1. */
 extern volatile void *dtu_ch_0, *dtu_ch_1, *dtu_ch_2, *dtu_ch_3;
 extern volatile void *dtu_ch_4, *dtu_ch_5, *dtu_ch_6, *dtu_ch_7;
@@ -44,6 +44,7 @@ extern volatile void *dtu_ch_28, *dtu_ch_29, *dtu_ch_30, *dtu_ch_31;
 
 /* vDTU config RPC stubs (from VDTUConfig interface) */
 int vdtu_config_recv(int target_pe, int ep_id, int buf_order, int msg_order, int flags);
+int vdtu_config_recv_at(int target_pe, int ep_id, int channel, int buf_order, int msg_order, int flags);
 int vdtu_config_send(int target_pe, int ep_id, int dest_pe, int dest_ep,
                      int dest_vpe, int msg_size, uint64_t label, int credits);
 int vdtu_config_mem(int target_pe, int ep_id, int dest_pe, uint64_t addr,
@@ -293,8 +294,13 @@ void DTU::init_recv_channel(int ep, int ch, uint32_t slot_count, uint32_t slot_s
     vdtu_channels_init_ring(&channels, ch, slot_count, slot_size);
     ep_channel[ep] = ch;
     ep_type[ep] = EP_RECV;
-    printf("[DTU] init_recv_channel(ep=%d, ch=%d) -> ring_ptr=%p\n",
-           ep, ch, (void *)vdtu_channels_get_ring(&channels, ch));
+    volatile uint8_t *page = (volatile uint8_t *)channels.ch[ch];
+    /* Verify the ring init actually wrote to the page */
+    struct vdtu_ring_ctrl *verify = (struct vdtu_ring_ctrl *)page;
+    printf("[DTU] init_recv_channel(ep=%d, ch=%d, sc=%u, ss=%u) page=%p verify: sc=%u ss=%u\n",
+           ep, ch, slot_count, slot_size, (void *)page,
+           verify ? verify->slot_count : 0,
+           verify ? verify->slot_size : 0);
 }
 
 void DTU::config_send_local(int ep, label_t label, int dstcore, int dstvpe,
@@ -539,9 +545,10 @@ Errors::Code DTU::reply(int ep, const void *data, size_t size, size_t msgoff) {
     if (ep < 0 || ep >= EP_COUNT || ep_channel[ep] < 0)
         return Errors::INV_ARGS;
 
-    /* Cast msgoff back to the original message to read reply routing info */
+    /* Cast msgoff back to the original message to read reply routing info.
+     * sender_pe may be a global PE ID — translate to local for VDTUService. */
     const DTU::Message *orig = reinterpret_cast<const DTU::Message*>(msgoff);
-    int sender_pe = orig->senderCoreId;
+    int sender_pe = orig->senderCoreId - (int)kernel::Platform::pe_base();
     int reply_ep_id = orig->replyEpId;
     uint64_t replylabel = orig->replylabel;
 

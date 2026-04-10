@@ -64,7 +64,7 @@ public:
                 highCoreID = coreid;
         }
 
-        _rbufs = static_cast<RBuf**>(m3::Heap::alloc(sizeof(RBuf*) * highCoreID * EP_COUNT));
+        _rbufs = static_cast<RBuf**>(m3::Heap::alloc(sizeof(RBuf*) * (highCoreID + 1) * EP_COUNT));
         if(!_rbufs)
             PANIC("Could not allocate space for receive buffers");
 
@@ -134,7 +134,7 @@ private:
         }
     }
     static RBuf &get(size_t coreid, size_t epid) {
-        assert(_rbufs[coreid + epid] != nullptr);
+        assert(_rbufs[(coreid * EP_COUNT) + epid] != nullptr);
         return *_rbufs[(coreid * EP_COUNT) + epid];
     }
 

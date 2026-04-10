@@ -18,7 +18,7 @@
 #define APP_HEAP_SIZE       (64 * 1024 * 1024)
 
 #define HEAP_SIZE           0x10000
-#define EP_COUNT            16
+#define EP_COUNT            32
 
 /* Runtime layout — not used on sel4 but needed for compilation */
 #define RT_START            0x3000

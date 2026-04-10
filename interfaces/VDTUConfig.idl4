@@ -54,6 +54,24 @@ procedure VDTUConfig {
                     in int buf_order, in int msg_order, in int flags);
 
     /*
+     * Configure a receive endpoint on a target PE with an explicit channel.
+     *
+     * Like config_recv(), but the caller specifies which channel to use
+     * instead of auto-allocating. Used for cross-pool endpoints (e.g.,
+     * kernel SYSC_GATE[1] on VPE1's channel 16).
+     *
+     * @param target_pe   PE whose DTU to configure
+     * @param ep_id       Endpoint index (0..EP_COUNT-1)
+     * @param channel     Channel index to assign (0..TOTAL_CHANNELS-1)
+     * @param buf_order   log2(total buffer size in bytes)
+     * @param msg_order   log2(per-message slot size in bytes)
+     * @param flags       Endpoint flags (currently unused, pass 0)
+     * @return            channel on success, negative on error
+     */
+    int config_recv_at(in int target_pe, in int ep_id, in int channel,
+                       in int buf_order, in int msg_order, in int flags);
+
+    /*
      * Configure a memory endpoint on a target PE.
      *
      * Maps to: kernel::DTU::config_mem_remote()
@@ -140,7 +158,7 @@ procedure VDTUConfig {
     /*
      * Query the number of endpoints per PE.
      *
-     * @return  EP_COUNT (16 in the current configuration)
+     * @return  EP_COUNT (32 in the current configuration)
      */
     int get_ep_count();
 };

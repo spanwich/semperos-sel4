@@ -53,7 +53,7 @@ static inline bool raft_cache_check_ancestry(uint64_t cap_id)
 #define PE_VPE0             1
 #define PE_VPE1             3
 
-/* Uniform channel pool: 16 channels per PE pair (gem5 EP_COUNT=16).
+/* Uniform channel pool: 16 channels per PE pair.
  * Channels 0-15:  kernel ↔ VPE0 (PE 2)
  * Channels 16-31: kernel ↔ VPE1 (PE 3)
  * No msg/mem split — type is tracked per-endpoint, not per-channel. */
@@ -222,6 +222,73 @@ int config_config_recv(int target_pe, int ep_id,
            target_pe, ep_id, ch, (int)slot_count, (int)slot_size);
 
     return ch;
+}
+
+int config_config_recv_at(int target_pe, int ep_id, int channel,
+                          int buf_order, int msg_order, int flags)
+{
+    if (target_pe < 0 || target_pe >= MAX_PES ||
+        ep_id < 0 || ep_id >= EP_PER_PE) {
+        printf("[vDTU] ERROR: config_recv_at invalid params (pe=%d, ep=%d)\n",
+               target_pe, ep_id);
+        return -1;
+    }
+
+    if (channel < 0 || channel >= TOTAL_CHANNELS) {
+        printf("[vDTU] ERROR: config_recv_at invalid channel %d\n", channel);
+        return -1;
+    }
+
+    if (pool.in_use[channel]) {
+        printf("[vDTU] ERROR: config_recv_at channel %d already in use\n", channel);
+        return -1;
+    }
+
+    /* Enforcement chain: check Raft cache for blocked ancestors (Lemma 1) */
+    if (raft_cache_check_ancestry((uint64_t)target_pe << 32 | (uint64_t)ep_id)) {
+        printf("[vDTU] EPERM: blocked ancestor for pe=%d ep=%d\n",
+               target_pe, ep_id);
+        return -1;
+    }
+
+    struct ep_desc *ep = &endpoints[target_pe][ep_id];
+    if (ep->type != EP_INVALID) {
+        printf("[vDTU] ERROR: config_recv_at pe=%d ep=%d already configured (type=%d)\n",
+               target_pe, ep_id, ep->type);
+        return -1;
+    }
+
+    /* Mark channel in-use (intentionally allows cross-pool assignment) */
+    pool.in_use[channel] = 1;
+    pool.assigned_pe[channel] = target_pe;
+    pool.assigned_ep[channel] = ep_id;
+
+    /* Compute slot parameters from orders */
+    uint32_t slot_size  = 1u << msg_order;
+    uint32_t slot_count = 1u << (buf_order - msg_order);
+
+    /* Cap to what fits in a 4 KiB dataport */
+    size_t needed = vdtu_ring_total_size(slot_count, slot_size);
+    if (needed > 4096) {
+        slot_count = (4096 - VDTU_RING_CTRL_SIZE) / slot_size;
+        uint32_t p = 1;
+        while (p * 2 <= slot_count) p *= 2;
+        slot_count = p;
+        if (slot_count < 2) slot_count = 2;
+    }
+
+    ep->type        = EP_RECEIVE;
+    ep->channel_idx = channel;
+    ep->buf_order   = buf_order;
+    ep->msg_order   = msg_order;
+    ep->slot_count  = (int)slot_count;
+    ep->slot_size   = (int)slot_size;
+    ep->flags       = flags;
+
+    printf("[vDTU] config_recv_at(pe=%d, ep=%d, ch=%d) -> (%d slots x %dB)\n",
+           target_pe, ep_id, channel, (int)slot_count, (int)slot_size);
+
+    return channel;
 }
 
 int config_config_send(int target_pe, int ep_id,

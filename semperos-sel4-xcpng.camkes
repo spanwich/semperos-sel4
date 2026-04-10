@@ -37,6 +37,8 @@ procedure VDTUConfig {
                     in int msg_size, in uint64_t label, in int credits);
     int config_recv(in int target_pe, in int ep_id,
                     in int buf_order, in int msg_order, in int flags);
+    int config_recv_at(in int target_pe, in int ep_id, in int channel,
+                       in int buf_order, in int msg_order, in int flags);
     int config_mem(in int target_pe, in int ep_id,
                    in int dest_pe, in uint64_t addr, in uint64_t size,
                    in int dest_vpe, in int perm);

@@ -39,7 +39,7 @@ static int send_chan = -1;
 
 static void init_channels(void)
 {
-    /* 16 uniform channels (gem5 EP_COUNT=16).
+    /* 16 uniform channels per PE pair.
      * Maps to kernel channels 16-31 (kernel ↔ VPE1 links). */
     volatile void *dataports[VDTU_CHANNELS_PER_PE] = {
         (volatile void *)dtu_ch_0,  (volatile void *)dtu_ch_1,
@@ -84,6 +84,17 @@ static int send_syscall(const void *payload, uint16_t len)
     if (send_chan < 0) return -1;
     struct vdtu_ring *ring = vdtu_channels_get_ring(&channels, send_chan);
     if (!ring) return -1;
+    /* Re-attach ring in case kernel initialized it after our first attach.
+     * Also dump first 16 bytes of the page to verify physical page content. */
+    if (ring->ctrl && ring->ctrl->slot_size == 0) {
+        volatile uint8_t *page = (volatile uint8_t *)channels.ch[send_chan];
+        vdtu_channels_attach_ring(&channels, send_chan);
+        printf("[VPE1] re-attach ch %d: slot_size=%u, page[0..7]=%02x %02x %02x %02x %02x %02x %02x %02x\n",
+               send_chan, ring->ctrl ? ring->ctrl->slot_size : 0,
+               page[0], page[1], page[2], page[3],
+               page[4], page[5], page[6], page[7]);
+    }
+
     int rc = vdtu_ring_send(ring, MY_PE, SYSC_EP, MY_VPE_ID,
                             DEF_RECVEP, 0, 0, 0, payload, len);
     if (rc != 0) return -1;
@@ -246,7 +257,7 @@ int run(void)
     {
         int ready = 0;
         uint64_t noop = 18;  /* SYSCALL_NOOP */
-        for (int attempt = 0; attempt < 50; attempt++) {
+        for (int attempt = 0; attempt < 500; attempt++) {
             if (send_syscall(&noop, sizeof(noop)) == 0) { ready = 1; break; }
             for (int y = 0; y < 100; y++) seL4_Yield();
         }

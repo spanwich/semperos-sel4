@@ -3,9 +3,9 @@
  *
  * Virtualises the gem5 DTU's per-PE endpoint model. Each channel is a
  * 4 KiB CAmkES shared memory dataport representing one NoC point-to-point
- * link. Every PE gets VDTU_CHANNELS_PER_PE (16) uniform channels, matching
- * gem5's EP_COUNT = 16. Channel type (send/recv/mem) is determined at
- * runtime by VDTUService, not by the channel table.
+ * link. Every PE gets VDTU_CHANNELS_PER_PE (16) uniform channels.
+ * Channel type (send/recv/mem) is determined at runtime by VDTUService,
+ * not by the channel table.
  */
 
 #ifndef VDTU_CHANNELS_H
@@ -13,7 +13,7 @@
 
 #include "vdtu_ring.h"
 
-/* Matches gem5 EP_COUNT = 16 (gem5/Config.h:31) */
+/* 16 physical channels per PE pair (CAmkES dataports) */
 #define VDTU_CHANNELS_PER_PE  16
 
 /* Total channels = per-PE channels × number of VPE links from kernel.

@@ -177,7 +177,8 @@ CAmkES forces `LibSel4MuslcSysMorecoreBytes=0`. The `CAmkESDefaultHeapSize` cmak
 | Component | Evidence |
 |---|---|
 | SPSC ring buffer (vdtu_ring.c) | 10/10 standalone tests |
-| VDTUService (config_send/recv/mem, invalidate/terminate_ep, wakeup_pe) | 9/9 on-target |
+| VDTUService (config_send/recv/recv_at/mem, invalidate/terminate_ep, wakeup_pe) | 11/11 on-target |
+| Uniform 16-channel PE pools + config_recv_at (FPT-178) | 15/15 standalone + 11/11 on-target |
 | ep_state in vdtu_ring_ctrl | vdtu_ring_send returns -3 on TERMINATED |
 | SemperOS arch/sel4/ DTU backend (DTU.cc, ~620 lines) | All ops |
 | WorkLoop + SyscallHandler (19 opcodes) | Fully dispatched |
@@ -217,7 +218,7 @@ CAmkES forces `LibSel4MuslcSysMorecoreBytes=0`. The `CAmkESDefaultHeapSize` cmak
 - **PING/PONG is kernel-level** — not VPE-initiated
 - **Legacy dataports retained** — dtu_out/dtu_in + DTUNetIPC still wired but unused
 - **Polling, not interrupt-driven** — seL4_Yield(); needs notification wakeup for multi-core
-- **1 SYSC_GATE** (not 6) — sufficient for dual-VPE prototype
+- **2 SYSC_GATEs** (of 6 available) — per-VPE recv via config_recv_at (FPT-178)
 - **128 KiB kernel stack** — `kernel0._stack_size = 131072`
 - **cmpxchg_mem stub** — unimplemented, not used
 - **VPE1 passive** — no data channels, only CapTable

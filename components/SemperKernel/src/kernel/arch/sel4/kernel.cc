@@ -12,8 +12,9 @@ extern "C" {
 #include <stdio.h>
 #include "vdtu_ring.h"
 #include "vdtu_channels.h"
-/* VDTUService RPC stub — needed for per-VPE SYSC recv EP allocation */
+/* VDTUService RPC stubs */
 int vdtu_config_recv(int target_pe, int ep_id, int buf_order, int msg_order, int flags);
+int vdtu_config_recv_at(int target_pe, int ep_id, int channel, int buf_order, int msg_order, int flags);
 }
 
 #include <base/log/Kernel.h>
@@ -58,25 +59,21 @@ static void configure_recv_endpoints(void)
     printf("[SemperKernel] Configured SYSC_GATE[0] for VPE0 (ep %zu)\n", sysch.epid(0));
 
     /* SYSC EP 1: for VPE1 syscalls.
-     * Allocate channel from VPE1's pool (PE 3 → channels 16-31) so the
-     * physical page is shared between kernel and VPE1. The kernel reads
-     * this channel via its local ep_channel table. This matches the gem5
-     * model: each VPE→kernel link is a separate NoC connection. */
-    /* SYSC EP 1: for VPE1 syscalls.
-     * Directly init on channel 16 (first channel of VPE1's pool).
-     * No VDTUService RPC — we know the channel layout statically.
-     * VPE1's config_send will target this channel directly. */
+     * Register recv EP at kernel PE 0 EP 1 on VPE1's channel 16 via
+     * config_recv_at. VDTUService knows the exact channel, so when VPE1
+     * calls config_send targeting PE 0 EP 1, it gets channel 16 — the
+     * correct shared page between kernel and VPE1. */
     {
         int sysc_ep1 = (int)sysch.epid(1);
-        int ch = VDTU_CHANNELS_PER_PE;  /* channel 16 = first VPE1 channel */
-        uint32_t slot_count = 1u << (buford - VPE::SYSC_CREDIT_ORD);
-        uint32_t slot_size = 1u << VPE::SYSC_CREDIT_ORD;
+        int vpe1_ch = VDTU_CHANNELS_PER_PE;  /* channel 16 */
+        vdtu_config_recv_at(0, sysc_ep1, vpe1_ch, buford, VPE::SYSC_CREDIT_ORD, 0);
+        uint32_t sc = 1u << (buford - VPE::SYSC_CREDIT_ORD);
+        uint32_t ss = 1u << VPE::SYSC_CREDIT_ORD;
         size_t avail = 4096 - VDTU_RING_CTRL_SIZE;
-        while (slot_count * slot_size > avail && slot_count > 2)
-            slot_count >>= 1;
-        DTU::get().init_recv_channel(sysc_ep1, ch, slot_count, slot_size);
-        printf("[SemperKernel] Configured SYSC_GATE[1] for VPE1 (ep %d, ch %d)\n",
-               sysc_ep1, ch);
+        while (sc * ss > avail && sc > 2) sc >>= 1;
+        DTU::get().init_recv_channel(sysc_ep1, vpe1_ch, sc, ss);
+        printf("[SemperKernel] Configured SYSC_GATE[1] for VPE1 (ep %d, ch=%d)\n",
+               sysc_ep1, vpe1_ch);
     }
 
     /* Configure service recv endpoint */
