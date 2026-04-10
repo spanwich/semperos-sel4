@@ -54,12 +54,15 @@ static void init_channels(void)
     vdtu_channels_init(&channels, dataports, VDTU_CHANNELS_PER_PE);
 }
 
-/* Wait for reply on any recv channel. Yields every iteration. */
+/* Wait for reply on any recv channel. Yields every iteration.
+ * Scans channels 1-15, skipping ch 0 which is the send channel — otherwise
+ * vdtu_ring_fetch() would read back our own sent message (head > tail on
+ * the same ring) and interpret the opcode as a spurious error code. */
 static int wait_for_reply(void)
 {
     int timeout = 50000;
     while (timeout-- > 0) {
-        for (int ch = 0; ch < 4; ch++) {
+        for (int ch = 1; ch < VDTU_CHANNELS_PER_PE; ch++) {
             if (!channels.ch[ch]) continue;
             if (!channels.rings[ch].ctrl)
                 vdtu_channels_attach_ring(&channels, ch);
