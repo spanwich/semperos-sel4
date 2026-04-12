@@ -127,16 +127,19 @@ static int register_service(void)
         printf("[VPE1] CREATEGATE(sel=5, ep=%d): OK\n", SRV_EP);
     }
 
-    /* Step 2: CREATESRV — register "testsrv" using the gate at selector 5.
-     * opcode=1, gatesel=5, srvsel=6, name="testsrv" */
+    /* Step 2: CREATESRV — register per-kernel service using the gate at sel 5.
+     * Service name is "testsrv-k<KERNEL_ID>" so each node's service is unique.
+     * This lets VPE0 on node X call createsess("testsrv-k<peer>") and exercise
+     * the remote (spanning) path. */
     {
         uint8_t payload[48];
+        memset(payload, 0, sizeof(payload));
         int off = 0;
 
         uint64_t opcode = SYSCALL_CREATESRV;
         memcpy(payload + off, &opcode, 8); off += 8;
 
-        /* gatesel = 5 (capsel_t = 4 bytes, padded to 8) */
+        /* gatesel = 5 */
         uint64_t gatesel = 5;
         memcpy(payload + off, &gatesel, 8); off += 8;
 
@@ -144,17 +147,24 @@ static int register_service(void)
         uint64_t srvsel = 6;
         memcpy(payload + off, &srvsel, 8); off += 8;
 
-        /* name = "testsrv" (size_t len + char data, 8-byte aligned) */
-        uint64_t namelen = 7;
+        /* name = "testsrv-k<KERNEL_ID>" (10 bytes, padded to 16) */
+        char srvname[11];
+        srvname[0] = 't'; srvname[1] = 'e'; srvname[2] = 's'; srvname[3] = 't';
+        srvname[4] = 's'; srvname[5] = 'r'; srvname[6] = 'v';
+        srvname[7] = '-'; srvname[8] = 'k';
+        srvname[9] = '0' + (SEMPER_KERNEL_ID & 0xF);
+        srvname[10] = '\0';
+
+        uint64_t namelen = 10;
         memcpy(payload + off, &namelen, 8); off += 8;
-        memcpy(payload + off, "testsrv", 7); off += 8;
+        memcpy(payload + off, srvname, 10); off += 16;  /* pad to 8 */
 
         err = send_syscall(payload, (uint16_t)off);
         if (err != 0) {
             printf("[VPE1] CREATESRV failed: %d\n", err);
             return err;
         }
-        printf("[VPE1] CREATESRV('testsrv', gate=5, srv=6): OK\n");
+        printf("[VPE1] CREATESRV('%s', gate=5, srv=6): OK\n", srvname);
     }
 
     return 0;
@@ -172,10 +182,11 @@ static int send_reply(struct vdtu_ring *ring, const struct vdtu_message *orig,
                           data, len);
 }
 
-/* Poll for service requests */
+/* Poll for service requests.
+ * Scan channels 1-15 (skip ch 0 = send channel, same as wait_for_reply). */
 static void service_poll(void)
 {
-    for (int ch = 0; ch < 4; ch++) {
+    for (int ch = 1; ch < VDTU_CHANNELS_PER_PE; ch++) {
         if (!channels.ch[ch]) continue;
         if (!channels.rings[ch].ctrl)
             vdtu_channels_attach_ring(&channels, ch);

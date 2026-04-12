@@ -48,6 +48,10 @@
 #define KENV_START          0x7000
 #define KENV_SIZE           0x5000
 
-#define SYNC_APP_START      0
-#define CASCADING_APP_START 0
+/* SYNC_APP_START and CASCADING_APP_START deliberately NOT defined on sel4.
+ * CAmkES components start independently — the gem5 #ifdef SYNC_APP_START
+ * synchronization protocol (startApps KRNLC exchange) hangs on sel4 because
+ * broadcastAnnounceSrv sends KRNLCs before DTUBridge hello exchange completes. */
+/* #define SYNC_APP_START */
+/* #define CASCADING_APP_START */
 #define KERNEL_STATISTICS   0

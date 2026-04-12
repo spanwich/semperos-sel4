@@ -276,6 +276,40 @@ static int send_exchange(uint64_t tcap, uint32_t own_start, uint32_t own_count,
     return send_syscall(&payload, sizeof(payload));
 }
 
+/*
+ * Send a CREATESESS syscall.
+ *
+ * Message format (m3 marshalling, 8-byte aligned):
+ *   [0]      opcode   = CREATESESS (2)
+ *   [1]      tvpe     = VPECapability selector (0 = self)
+ *   [2]      cap      = destination session-cap selector
+ *   [3]      namelen  = length of name (size_t = 8 bytes)
+ *   [4..]    name     = name bytes, padded to 8-byte alignment
+ *
+ * Returns kernel error code (0 = success). If the service is registered on
+ * a remote kernel, the local kernel forwards via Kernelcalls::createSessFwd
+ * (or broadcasts via Coordinator) and blocks the calling thread until reply.
+ */
+static int send_createsess(uint64_t dstcap, const char *name, size_t name_len)
+{
+    uint8_t payload[64];
+    int off = 0;
+    uint64_t val;
+
+    val = SYSCALL_CREATESESS; memcpy(payload + off, &val, 8); off += 8;
+    val = 0;                  memcpy(payload + off, &val, 8); off += 8;  /* tvpe = self */
+    val = dstcap;             memcpy(payload + off, &val, 8); off += 8;
+    val = name_len;           memcpy(payload + off, &val, 8); off += 8;
+
+    memcpy(payload + off, name, name_len);
+    /* Pad name to 8-byte alignment */
+    size_t padded = (name_len + 7) & ~(size_t)7;
+    memset(payload + off + name_len, 0, padded - name_len);
+    off += padded;
+
+    return send_syscall(payload, (uint16_t)off);
+}
+
 /* Benchmark variants that return kernel-measured cycles */
 static int send_exchange_ex(uint64_t tcap, uint32_t own_start, uint32_t own_count,
                              uint32_t other_start, uint32_t other_count, int obtain,
@@ -937,6 +971,56 @@ int run(void)
         if (ok) pass++; else fail++;
         printf("[VPE0] Test 11 (chain revoke depth %d): %s\n", depth, ok ? "PASS" : "FAIL");
     }
+
+#ifdef SEMPER_MULTI_NODE
+    /* ==============================================================
+     * Test 12: Cross-kernel CREATESESS (spanning session)
+     *
+     * VPE0 on kernel 0 creates a session to VPE1's service on kernel 1,
+     * and vice versa. This exercises the remote path in
+     * SyscallHandler::createsess():
+     *   VPE0 --createsess("testsrv-k<peer>")--> local kernel
+     *   local kernel: service not in ServiceList (it's remote)
+     *   local kernel: Coordinator::broadcastCreateSess()
+     *     --createSessFwd KRNLC--> remote kernel (via DTUBridge+CryptoTransport)
+     *   remote kernel: finds local "testsrv-k<self>", forwards OPEN to VPE1
+     *   VPE1: replies on service gate
+     *   remote kernel: createSessResp KRNLC <-- back to local kernel
+     *   local kernel: wakes blocked thread, installs SessionCapability
+     *   VPE0 <-- reply_vmsg(NO_ERROR)
+     *
+     * Test retries because remote VPE1 may still be registering when
+     * VPE0 finishes tests 1-11.
+     * ============================================================== */
+    {
+        /* Pick the PEER kernel's service name. Node 0 targets testsrv-k1;
+         * node 1 targets testsrv-k0. */
+        char remote_name[11];
+        remote_name[0] = 't'; remote_name[1] = 'e'; remote_name[2] = 's';
+        remote_name[3] = 't'; remote_name[4] = 's'; remote_name[5] = 'r';
+        remote_name[6] = 'v'; remote_name[7] = '-'; remote_name[8] = 'k';
+        remote_name[9] = (SEMPER_KERNEL_ID == 0) ? '1' : '0';
+        remote_name[10] = '\0';
+
+        int ok = 0;
+        int last_err = -1;
+        /* Give remote VPE1 time to register. Long backoff because the peer
+         * node might still be running its own 11 local tests. */
+        for (int attempt = 0; attempt < 50; attempt++) {
+            err = send_createsess(300, remote_name, 10);
+            last_err = err;
+            if (err == 0) { ok = 1; break; }
+            if (attempt % 10 == 0)
+                printf("[VPE0] Test 12: attempt %d, err=%d, retrying...\n",
+                       attempt, err);
+            for (int y = 0; y < 50000; y++) seL4_Yield();
+        }
+
+        if (ok) pass++; else fail++;
+        printf("[VPE0] Test 12 (cross-kernel CREATESESS -> %s): %s (err=%d)\n",
+               remote_name, ok ? "PASS" : "FAIL", last_err);
+    }
+#endif /* SEMPER_MULTI_NODE */
 
     printf("[VPE0] === %d passed, %d failed ===\n", pass, fail);
 
