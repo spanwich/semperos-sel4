@@ -239,6 +239,15 @@ CAmkES forces `LibSel4MuslcSysMorecoreBytes=0`. The `CAmkESDefaultHeapSize` cmak
 2. **Update this file:** move completed items, update file locations.
 3. **Write a task report** at `docs/TASKNN-REPORT.md`.
 
+### Jira Card Lifecycle (Claude Code drives DESIGN → REVIEW)
+1. **DESIGN**: Confirm approach with user. Enter plan mode if needed.
+2. **IN PROGRESS**: Implement, commit, run tests. Transition when implementation is complete.
+3. **EVALUATE**: Run benchmarks, deploy to XCP-ng via `/xcpng-deploy`, collect results. Transition when data collected.
+4. **WRITING**: Document results on Confluence, add thesis writing notes. Transition when documentation complete.
+5. **REVIEW**: Comment on Jira with summary + Confluence links. User reviews and moves to DONE.
+
+**Always** transition the Jira card at each phase boundary. Never leave cards stale. If blocked, transition to BLOCKED with a comment explaining why.
+
 ---
 
 ## Code Style

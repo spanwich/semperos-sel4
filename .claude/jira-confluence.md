@@ -88,11 +88,26 @@ FPT-165 (Raft membership + policy)            |
 ## Workflow
 
 ```
-TO DO -> DESIGN -> IN PROGRESS -> EVALUATE -> WRITING -> REVIEW -> DONE
+TO DO → DESIGN → IN PROGRESS → EVALUATE → WRITING → REVIEW → DONE
 ```
 
 Any of IN PROGRESS / EVALUATE / WRITING / REVIEW can transition to BLOCKED.
-BLOCKED -> DESIGN (re-design) or BLOCKED -> CANCEL (give up).
+BLOCKED → DESIGN (re-design) or BLOCKED → CANCEL (give up).
+
+### Claude Code Responsibility
+
+Claude Code drives cards from **DESIGN** through to **REVIEW**. The user reviews and moves to **DONE**.
+
+| Transition | Trigger | Who |
+|-----------|---------|-----|
+| TO DO → DESIGN | User picks card | User |
+| DESIGN → IN PROGRESS | Design confirmed, implementation starts | Claude Code |
+| IN PROGRESS → EVALUATE | Implementation complete, tests pass | Claude Code |
+| EVALUATE → WRITING | Evaluation done (benchmarks collected, XCP-ng deployed) | Claude Code |
+| WRITING → REVIEW | Results documented (Confluence pages, thesis notes) | Claude Code |
+| REVIEW → DONE | User reviews and approves | User |
+
+**Rule:** Always transition the Jira card as you complete each phase. Do not leave cards in a stale status. If blocked, transition to BLOCKED and explain in a comment.
 
 **Spike convention:** When a story is BLOCKED by a design question, create a
 Spike card (issue type: Spike), resolve it, update the Confluence Project
