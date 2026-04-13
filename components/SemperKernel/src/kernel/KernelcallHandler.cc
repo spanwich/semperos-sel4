@@ -390,6 +390,9 @@ void KernelcallHandler::createSessFwd(GateIStream &is) {
     LOG_KRNL(Coordinator::get().getKPE(is.label()), "kernelcall::createSessFwd(vpeID=" << vpeID <<
         ", srvname=" << srvname << ", cap=" << PRINT_HASH(cap) << ")");
     Service *srv = ServiceList::get().find(srvname);
+    printf("[createSessFwd] lookup '%s' (len=%zu) -> %s\n",
+           srvname.c_str(), (size_t)srvname.length(),
+           srv ? "FOUND" : "NOT FOUND");
     if(srv == nullptr || srv->closing) {
         Kernelcalls::get().createSessResp(Coordinator::get().getKPE(is.label()), vpeID, tid,
             m3::Errors::INV_ARGS, 0, 0);
@@ -415,8 +418,19 @@ void KernelcallHandler::createSessFwd(GateIStream &is) {
             else {
                 word_t sess;
                 reply >> sess;
+                printf("[createSessFwd-cb] OK: sess=%lu srv_sel=%d vpe_id=%zu\n",
+                       (unsigned long)sess, rsrv->selector(), rsrv->vpe().id());
                 Capability *srvcap = rsrv->vpe().objcaps().get(rsrv->selector(), Capability::SERVICE);
-                assert(srvcap != nullptr);
+                if(!srvcap) {
+                    printf("[createSessFwd-cb] ERROR: ServiceCap at sel=%d is NULL!\n",
+                           rsrv->selector());
+                    Kernelcalls::get().createSessResp(Coordinator::get().getKPE(sender), vpeID, tid,
+                        m3::Errors::INV_ARGS, 0, 0);
+                    RecvGate *rgatecpy = rgate;
+                    rgate->unsubscribe(s);
+                    delete rgatecpy;
+                    return;
+                }
                 // add child representing the session with the remote VPE
                 static_cast<ServiceCapability*>(srvcap)->addChild(cap);
                 // add a reference to service for the remote session
