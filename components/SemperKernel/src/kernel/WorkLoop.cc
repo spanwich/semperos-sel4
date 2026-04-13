@@ -151,6 +151,11 @@ void WorkLoop::run() {
                     RecvGate *gate = reinterpret_cast<RecvGate*>(msg->label);
                     GateIStream is(*gate, msg);
                     gate->notify_all(is);
+                    /* Ack on the SYSC EP (not the service EP in the RecvGate).
+                     * GateIStream::finish() would ack on gate->ep() = srvepid,
+                     * but the message was read from sysep[i]. Without this,
+                     * the SYSC ring slot leaks and eventually fills up. */
+                    dtu.mark_read(sysep[i], 0);
                     continue;
                 }
 #endif

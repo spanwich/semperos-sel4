@@ -157,9 +157,18 @@ void Coordinator::removeKPE(size_t id) {
 }
 
 uint Coordinator::broadcastCreateSess(int vpeID, m3::String& srvname, mht_key_t cap, GateOStream &args) {
-    for(auto it = _kpes.begin(); it != _kpes.end(); it++)
+    uint sent = 0;
+    for(auto it = _kpes.begin(); it != _kpes.end(); it++) {
+        /* Skip self — the local ServiceList was already checked by the
+         * createsess handler before reaching broadcastCreateSess. Sending
+         * to self wastes a KRNLC round-trip and inflates awaitedResp,
+         * which delays the thread wake until the self-response arrives. */
+        if(it->val->id() == _kid)
+            continue;
         Kernelcalls::get().createSessFwd(it->val, vpeID, srvname, cap, args);
-    return _kpes.size();
+        sent++;
+    }
+    return sent;
 }
 
 uint Coordinator::broadcastAnnounceSrv(m3::String& srvname, mht_key_t id) {
