@@ -141,6 +141,19 @@ void WorkLoop::run() {
         for(int i = 0; i < DTU::SYSC_GATES; i++) {
             msg = dtu.fetch_msg(sysep[i]);
             if(msg) {
+#if defined(__sel4__)
+                /* On sel4, VPE service replies arrive through the SYSC
+                 * channel (VPE1 can't write to the kernel's service recv
+                 * EP ring because SPSC is unidirectional). Detect replies
+                 * by VDTU_FLAG_REPLY and dispatch to the service callback
+                 * instead of the syscall handler. */
+                if((msg->flags & 0x01 /* VDTU_FLAG_REPLY */) && msg->label) {
+                    RecvGate *gate = reinterpret_cast<RecvGate*>(msg->label);
+                    GateIStream is(*gate, msg);
+                    gate->notify_all(is);
+                    continue;
+                }
+#endif
                 RecvGate *rgate = reinterpret_cast<RecvGate*>(msg->label);
 #if defined(__sel4__)
                 /* On sel4, VPE sends may not have the correct label

@@ -21,7 +21,7 @@ services:
       - ../../../build-node0/images:/sel4-image:ro
     network_mode: host
     environment:
-      TIMEOUT: "60"
+      TIMEOUT: "120"
     command:
       - -nic
       - none

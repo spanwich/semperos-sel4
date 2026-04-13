@@ -170,11 +170,22 @@ static int register_service(void)
     return 0;
 }
 
-/* Reply to service request on the same ring */
+/* Reply to service request via the SYSC send channel (ch 0).
+ * On gem5, the DTU hardware routes replies via reply_ep_id. On sel4,
+ * the SRV_EP ring (ch 2) is unidirectional kernel→VPE1. We can't write
+ * back to it without violating the SPSC invariant. Instead, send the
+ * reply through the SYSC channel (which the kernel already polls) with
+ * VDTU_FLAG_REPLY set so the kernel dispatches to the service callback. */
 static int send_reply(struct vdtu_ring *ring, const struct vdtu_message *orig,
                       const void *data, uint16_t len)
 {
-    return vdtu_ring_send(ring,
+    (void)ring;  /* unused — reply goes through send_chan, not the recv ring */
+    struct vdtu_ring *send_ring = vdtu_channels_get_ring(&channels, send_chan);
+    if (!send_ring) {
+        printf("[VPE1] send_reply: no send ring (send_chan=%d)\n", send_chan);
+        return -1;
+    }
+    return vdtu_ring_send(send_ring,
                           MY_PE, SRV_EP, MY_VPE_ID,
                           orig->hdr.reply_ep_id,
                           orig->hdr.replylabel, 0,

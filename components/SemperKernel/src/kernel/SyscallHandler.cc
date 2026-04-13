@@ -424,6 +424,18 @@ void SyscallHandler::creategate(GateIStream &is) {
         new MsgCapability(&vpe->objcaps(), dstcap, label, tcapobj->vpe->core(),
             tcapobj->vpe->id(), epid, credits,
             HashUtil::structured_hash(tcapobj->vpe->core(), tcapobj->vpe->id(), MSGOBJ, label), 0)); // TODO: capid
+
+#if defined(__sel4__)
+    /* sel4: configure a recv EP for the gate's endpoint on the target VPE.
+     * On gem5, the DTU hardware manages EP register files directly.
+     * On sel4, we need an explicit shared-memory channel so the kernel
+     * can later send_to() this EP (e.g., service OPEN/OBTAIN messages).
+     * Use buf_order=11 (2048B) / msg_order=9 (512B) = 4 slots. */
+    if(!RecvBufs::is_attached(tcapobj->vpe->core(), epid)) {
+        RecvBufs::attach(*tcapobj->vpe, epid, 0, 11, VPE::SYSC_CREDIT_ORD, 0);
+    }
+#endif
+
     reply_vmsg(is, m3::Errors::NO_ERROR);
 }
 

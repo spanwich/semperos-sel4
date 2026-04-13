@@ -412,10 +412,40 @@ void DTU::send_to(const VPEDesc &vpe, int ep, label_t label,
     }
 
     /* Local PE: use shared memory channel (translate global→local) */
-    int ch = find_send_channel_for(to_local_pe(vpe.core), ep);
+    int local_pe = to_local_pe(vpe.core);
+    int ch = find_send_channel_for(local_pe, ep);
     if (ch < 0) {
-        KLOG(ERR, "send_to(pe=" << vpe.core << " ep=" << ep << ") no send channel");
-        return;
+        /* Auto-configure send channel to target EP (sel4 only).
+         * On gem5, DTU hardware writes to EP registers directly.
+         * On sel4, we need an explicit send→recv channel pairing.
+         * Find a free EP slot and configure via VDTUService. */
+        int auto_ep = -1;
+        for (int i = kernel::DTU::FIRST_FREE_EP; i < EP_COUNT; i++) {
+            if (ep_type[i] == EP_NONE) {
+                auto_ep = i;
+                break;
+            }
+        }
+        if (auto_ep < 0) {
+            KLOG(ERR, "send_to(pe=" << vpe.core << " ep=" << ep << ") no free EP");
+            return;
+        }
+
+        ch = vdtu_config_send(MY_PE, auto_ep, local_pe, ep,
+                              vpe.id, (int)size, label, VDTU_CREDITS_UNLIM);
+        if (ch < 0) {
+            KLOG(ERR, "send_to(pe=" << vpe.core << " ep=" << ep
+                 << ") config_send failed (recv EP not configured?)");
+            return;
+        }
+
+        vdtu_channels_attach_ring(&channels, ch);
+        ep_channel[auto_ep] = ch;
+        ep_type[auto_ep] = EP_SEND;
+        ep_send_config[auto_ep].dest_pe = local_pe;
+        ep_send_config[auto_ep].dest_ep = ep;
+        ep_send_config[auto_ep].dest_vpe = vpe.id;
+        ep_send_config[auto_ep].label = label;
     }
 
     struct vdtu_ring *ring = vdtu_channels_get_ring(&channels, ch);

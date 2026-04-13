@@ -290,6 +290,39 @@ static int send_exchange(uint64_t tcap, uint32_t own_start, uint32_t own_count,
  * a remote kernel, the local kernel forwards via Kernelcalls::createSessFwd
  * (or broadcasts via Coordinator) and blocks the calling thread until reply.
  */
+/*
+ * Wait for reply with extended timeout (for cross-node operations
+ * where the kernel thread blocks waiting for a remote KRNLC round-trip).
+ */
+static int wait_for_reply_long(void)
+{
+    int timeout = 2000000;  /* ~40x normal timeout */
+    const struct vdtu_message *reply = NULL;
+    struct vdtu_ring *ring = NULL;
+
+    while (timeout-- > 0) {
+        for (int ch = 1; ch < VDTU_CHANNELS_PER_PE; ch++) {
+            if (!channels.ch[ch]) continue;
+            if (!channels.rings[ch].ctrl)
+                vdtu_channels_attach_ring(&channels, ch);
+            struct vdtu_ring *r = vdtu_channels_get_ring(&channels, ch);
+            if (r && !vdtu_ring_is_empty(r)) {
+                reply = vdtu_ring_fetch(r);
+                if (reply) { ring = r; break; }
+            }
+        }
+        if (reply) break;
+        seL4_Yield();
+    }
+
+    if (!reply) return -1;
+    int result = -1;
+    if (reply->hdr.length >= sizeof(uint64_t))
+        result = (int)(*(const uint64_t *)reply->data);
+    vdtu_ring_ack(ring);
+    return result;
+}
+
 static int send_createsess(uint64_t dstcap, const char *name, size_t name_len)
 {
     uint8_t payload[64];
@@ -302,12 +335,19 @@ static int send_createsess(uint64_t dstcap, const char *name, size_t name_len)
     val = name_len;           memcpy(payload + off, &val, 8); off += 8;
 
     memcpy(payload + off, name, name_len);
-    /* Pad name to 8-byte alignment */
     size_t padded = (name_len + 7) & ~(size_t)7;
     memset(payload + off + name_len, 0, padded - name_len);
     off += padded;
 
-    return send_syscall(payload, (uint16_t)off);
+    /* Use long timeout — cross-node createsess involves:
+     * kernel broadcast → DTUBridge → UDP → remote kernel → find service →
+     * OPEN to VPE1 → VPE1 reply → createSessResp KRNLC → reply to VPE0 */
+    struct vdtu_ring *ring = vdtu_channels_get_ring(&channels, send_chan);
+    if (!ring) return -1;
+    int rc = vdtu_ring_send(ring, MY_PE, SYSC_EP, MY_VPE_ID, DEF_RECVEP,
+                            0, 0, 0, payload, (uint16_t)off);
+    if (rc != 0) return -1;
+    return wait_for_reply_long();
 }
 
 /* Benchmark variants that return kernel-measured cycles */
@@ -1004,16 +1044,23 @@ int run(void)
 
         int ok = 0;
         int last_err = -1;
-        /* Give remote VPE1 time to register. Long backoff because the peer
-         * node might still be running its own 11 local tests. */
-        for (int attempt = 0; attempt < 50; attempt++) {
+        /* Wait for remote VPE1 to register its service before attempting.
+         * Each createsess that finds no remote service blocks a kernel
+         * thread in wait_for(). Rapid retries cause thread starvation
+         * (1 main + 3 workers = 4 threads). Use a long initial delay
+         * then a small number of widely-spaced attempts. */
+        /* Wait for remote VPE1 registration + DTUBridge HELLO exchange. */
+        printf("[VPE0] Test 12: waiting for remote VPE1 + network ready...\n");
+        for (int y = 0; y < 500000; y++) seL4_Yield();
+
+        for (int attempt = 0; attempt < 3; attempt++) {
+            printf("[VPE0] Test 12: attempt %d\n", attempt);
             err = send_createsess(300, remote_name, 10);
             last_err = err;
             if (err == 0) { ok = 1; break; }
-            if (attempt % 10 == 0)
-                printf("[VPE0] Test 12: attempt %d, err=%d, retrying...\n",
-                       attempt, err);
-            for (int y = 0; y < 50000; y++) seL4_Yield();
+            printf("[VPE0] Test 12: attempt %d, err=%d\n", attempt, err);
+            /* Long wait between retries to let kernel threads unblock */
+            for (int y = 0; y < 500000; y++) seL4_Yield();
         }
 
         if (ok) pass++; else fail++;
