@@ -1,13 +1,16 @@
 /*
  * sel4/Thread.h -- Thread primitives for SemperOS on seL4
  *
- * Mirrors thread/arch/gem5/Thread.h. On sel4 we run single-threaded
- * (cooperative threading is stubbed out), but we need compatible types.
+ * Uses setjmp/longjmp for cooperative context switching (same semantics
+ * as the gem5 backend but with musl's jmp_buf).
  */
 
 #pragma once
 
 #ifdef __cplusplus
+extern "C" {
+#include <setjmp.h>
+}
 #include <base/Types.h>
 
 namespace m3 {
@@ -15,15 +18,9 @@ namespace m3 {
 typedef void (*_thread_func)(void*);
 
 struct Regs {
-    word_t rbx;
-    word_t rsp;
-    word_t rbp;
-    word_t r12;
-    word_t r13;
-    word_t r14;
-    word_t r15;
-    word_t rflags;
-    word_t rdi;
+    jmp_buf jmpbuf;
+    word_t rsp;     /* initial stack pointer (set by thread_init) */
+    word_t rip;     /* initial entry point (set by thread_init) */
 };
 
 enum {

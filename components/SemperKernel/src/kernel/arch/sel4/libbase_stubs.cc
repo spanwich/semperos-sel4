@@ -526,109 +526,43 @@ Thread::~Thread() {
 /* ================================================================
  * thread_save / thread_resume -- cooperative context switch
  *
- * Declared in thread/arch/sel4/Thread.h as:
- *   extern "C" bool thread_save(Regs *regs);
- *   extern "C" bool thread_resume(Regs *regs);
+ * Uses setjmp/longjmp for reliable context switching on x86_64.
  *
- * Also need thread_init (declared in same header):
- *   void thread_init(_thread_func func, void *arg, Regs *regs, word_t *stack);
+ * switch_to checks: if(!_current->save()) { ... resume ... }
+ *   → save() must return false on first call, true on resume.
+ *   → setjmp returns 0 on first call, 1 on longjmp.
+ *   → (setjmp != 0): first call → false, resume → true.
  *
- * Regs layout (word_t = uint64_t):
- *   [0] rbx   [1] rsp   [2] rbp   [3] r12
- *   [4] r13   [5] r14   [6] r15   [7] rflags
- *   [8] rdi
- *
- * thread_save: saves callee-saved regs + return address into Regs.
- *   Returns true on first call (context saved).
- *   Returns false when resumed via thread_resume (longjmp path).
- *
- * thread_resume: restores callee-saved regs from Regs and jumps to
- *   the saved return address, making thread_save return false.
+ * New threads are bootstrapped via thread_init which sets up a
+ * jmp_buf that, when longjmp'd into, lands in thread_trampoline
+ * running on the new thread's stack.
  * ================================================================ */
 extern "C" {
 
-bool __attribute__((noinline)) thread_save(m3::Regs *regs) {
-    /*
-     * We use inline asm to save x86_64 callee-saved registers.
-     * The return address is already on the stack from the call to us;
-     * we read it and store it in regs->rflags (repurposed as RIP slot).
-     * rsp is saved AFTER the call frame (i.e., caller's rsp).
-     */
-    __asm__ volatile(
-        "movq %%rbx, 0(%[r])\n\t"     /* regs->rbx */
-        "leaq 8(%%rsp), %%rax\n\t"     /* caller's rsp = our rsp + 8 (return addr) */
-        "movq %%rax, 8(%[r])\n\t"      /* regs->rsp */
-        "movq %%rbp, 16(%[r])\n\t"     /* regs->rbp */
-        "movq %%r12, 24(%[r])\n\t"     /* regs->r12 */
-        "movq %%r13, 32(%[r])\n\t"     /* regs->r13 */
-        "movq %%r14, 40(%[r])\n\t"     /* regs->r14 */
-        "movq %%r15, 48(%[r])\n\t"     /* regs->r15 */
-        "movq (%%rsp), %%rax\n\t"      /* return address */
-        "movq %%rax, 56(%[r])\n\t"     /* regs->rflags (used as RIP) */
-        "movq %%rdi, 64(%[r])\n\t"     /* regs->rdi */
-        :
-        : [r] "r" (regs)
-        : "rax", "memory"
-    );
-    return true;  /* first return: context saved */
+bool thread_save(m3::Regs *regs) {
+    return setjmp(regs->jmpbuf) != 0;
 }
 
-/* thread_resume never returns to its caller -- it jumps to the
- * saved context (thread_save's return point). The return type bool
- * matches the header declaration but the function never returns. */
-bool __attribute__((noinline)) thread_resume(m3::Regs *regs) {
-    __asm__ volatile(
-        "movq 0(%[r]), %%rbx\n\t"      /* restore rbx */
-        "movq 8(%[r]), %%rsp\n\t"      /* restore rsp (caller's) */
-        "movq 16(%[r]), %%rbp\n\t"     /* restore rbp */
-        "movq 24(%[r]), %%r12\n\t"     /* restore r12 */
-        "movq 32(%[r]), %%r13\n\t"     /* restore r13 */
-        "movq 40(%[r]), %%r14\n\t"     /* restore r14 */
-        "movq 48(%[r]), %%r15\n\t"     /* restore r15 */
-        "movq 64(%[r]), %%rdi\n\t"     /* restore rdi */
-        "movq 56(%[r]), %%rcx\n\t"     /* saved return address */
-        "xorl %%eax, %%eax\n\t"        /* return false from thread_save */
-        "jmpq *%%rcx\n\t"              /* jump to saved return address */
-        :
-        : [r] "r" (regs)
-        : "memory"
-    );
-    /* Never reached -- jmpq above transfers control */
-    return false;
+bool thread_resume(m3::Regs *regs) {
+    longjmp(regs->jmpbuf, 1);
+    return false; /* never reached */
 }
 
 } /* extern "C" */
 
 /*
- * Thread startup data: stored on the new thread's stack by thread_init.
- * The trampoline reads it from a known location below the stack pointer.
+ * New thread bootstrap: thread_init stores func/arg here, then
+ * the trampoline reads them when the thread is first resumed.
+ * Only one thread_init runs at a time (cooperative threading),
+ * so a static variable is safe.
  */
-struct thread_startup_data {
-    m3::_thread_func func;
-    void *arg;
-};
+static m3::_thread_func _init_func;
+static void *_init_arg;
 
-/*
- * Trampoline for new threads. Entered via thread_resume (jmpq to this
- * address). At entry, rsp points to the new thread's stack where a
- * thread_startup_data struct was placed by thread_init.
- *
- * The startup data is at rsp (since thread_init set rsp to point just
- * past it). We pop it, call the function, then stop the thread.
- */
-static void __attribute__((used)) thread_trampoline(void) {
-    /* Read startup data from the stack. thread_init placed it at rsp. */
-    struct thread_startup_data sdata;
-    __asm__ volatile(
-        "popq %0\n\t"
-        "popq %1\n\t"
-        : "=r"(sdata.func), "=r"(sdata.arg)
-        :
-        : "memory"
-    );
-    sdata.func(sdata.arg);
-    /* Thread function returned -- stop this thread.
-     * stop() switches to another thread and never returns here. */
+static void __attribute__((used,noinline)) thread_trampoline(void) {
+    m3::_thread_func f = _init_func;
+    void *a = _init_arg;
+    f(a);
     m3::ThreadManager::get().stop();
     __builtin_unreachable();
 }
@@ -637,35 +571,31 @@ namespace m3 {
 
 void thread_init(_thread_func func, void *arg, Regs *regs, word_t *stack) {
     /*
-     * Set up the new thread's stack and register state.
+     * Set up jmp_buf for a new thread by calling setjmp, then patching
+     * RSP and RIP to point at the new stack and trampoline.
      *
-     * Stack layout (grows downward):
-     *   [top of allocated stack]
-     *     ... padding for 16-byte alignment ...
-     *   [startup_data.arg]         <- thread_trampoline pops this second
-     *   [startup_data.func]        <- thread_trampoline pops this first
-     *   rsp points here ->
-     *
-     * Regs:
-     *   rflags (RIP slot) = &thread_trampoline
-     *   rsp = points to top of startup data on stack
-     *   all others = 0
+     * musl's x86_64 jmp_buf layout (no pointer mangling):
+     *   [0] rbx  [1] rbp  [2] r12  [3] r13
+     *   [4] r14  [5] r15  [6] rsp  [7] rip
      */
+    _init_func = func;
+    _init_arg = arg;
+
     memset(regs, 0, sizeof(Regs));
 
-    /* Start at top of stack, align to 16 bytes */
     word_t *sp = stack + T_STACK_WORDS;
     sp = reinterpret_cast<word_t *>(
         reinterpret_cast<uintptr_t>(sp) & ~0xFUL);
+    /* ABI: RSP must be 16-byte aligned BEFORE call (8-byte misaligned
+     * at function entry due to pushed return address). Since longjmp
+     * restores RSP directly (no push), subtract 8. */
+    sp--;
 
-    /* Push startup data (arg first, then func -- pop order is func, arg) */
-    *(--sp) = reinterpret_cast<word_t>(arg);
-    *(--sp) = reinterpret_cast<word_t>(func);
-
-    regs->rsp = reinterpret_cast<word_t>(sp);
-    regs->rbp = 0;
-    /* rflags is used as the saved RIP by thread_resume */
-    regs->rflags = reinterpret_cast<word_t>(&thread_trampoline);
+    setjmp(regs->jmpbuf);
+    unsigned long *jb = reinterpret_cast<unsigned long *>(regs->jmpbuf);
+    jb[1] = 0;  /* rbp = 0 (no frame pointer) */
+    jb[6] = reinterpret_cast<unsigned long>(sp);
+    jb[7] = reinterpret_cast<unsigned long>(&thread_trampoline);
 }
 
 } /* namespace m3 */

@@ -180,8 +180,12 @@ void WorkLoop::run() {
         msg = dtu.fetch_msg(srvep);
         if(msg) {
             RecvGate *gate = reinterpret_cast<RecvGate*>(msg->label);
-            GateIStream is(*gate, msg);
-            gate->notify_all(is);
+            if(gate) {
+                GateIStream is(*gate, msg);
+                gate->notify_all(is);
+            } else {
+                printf("[WorkLoop] WARNING: srvep msg with null label, dropping\n");
+            }
         }
 
         tmng.yield();

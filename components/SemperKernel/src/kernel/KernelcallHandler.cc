@@ -387,20 +387,29 @@ void KernelcallHandler::createSessFwd(GateIStream &is) {
     mht_key_t cap;
     int tid, vpeID;
     is >> vpeID >> srvname >> cap >> tid;
-    LOG_KRNL(Coordinator::get().getKPE(is.label()), "kernelcall::createSessFwd(vpeID=" << vpeID <<
+    label_t sender = is.label();
+
+    KPE *senderKpe = Coordinator::get().tryGetKPE(sender);
+    printf("[createSessFwd] sender=%lu kpe=%p srvname='%s' (len=%zu)\n",
+           (unsigned long)sender, (void*)senderKpe,
+           srvname.c_str(), (size_t)srvname.length());
+    if(!senderKpe) {
+        printf("[createSessFwd] WARNING: unknown sender %lu, dropping\n",
+               (unsigned long)sender);
+        return;
+    }
+    LOG_KRNL(senderKpe, "kernelcall::createSessFwd(vpeID=" << vpeID <<
         ", srvname=" << srvname << ", cap=" << PRINT_HASH(cap) << ")");
     Service *srv = ServiceList::get().find(srvname);
-    printf("[createSessFwd] lookup '%s' (len=%zu) -> %s\n",
-           srvname.c_str(), (size_t)srvname.length(),
-           srv ? "FOUND" : "NOT FOUND");
+    printf("[createSessFwd] lookup '%s' -> %s\n",
+           srvname.c_str(), srv ? "FOUND" : "NOT FOUND");
     if(srv == nullptr || srv->closing) {
-        Kernelcalls::get().createSessResp(Coordinator::get().getKPE(is.label()), vpeID, tid,
+        Kernelcalls::get().createSessResp(senderKpe, vpeID, tid,
             m3::Errors::INV_ARGS, 0, 0);
         return;
     }
     else {
         // send request to service
-        label_t sender = is.label();
         m3::Reference<Service> rsrv(srv);
 
         RecvGate *rgate = new RecvGate(SyscallHandler::get().srvepid(), nullptr);
@@ -408,42 +417,55 @@ void KernelcallHandler::createSessFwd(GateIStream &is) {
             m3::Reference<Service> srvcpy = rsrv;
             srvcpy->received_reply();
 
+            KPE *kpe = Coordinator::get().tryGetKPE(sender);
+            if(!kpe) {
+                printf("[createSessFwd-cb] WARNING: sender %lu gone, dropping\n",
+                       (unsigned long)sender);
+                rgate->unsubscribe(s);
+                return;
+            }
+
             m3::Errors::Code res;
             reply >> res;
-            LOG_KRNL(Coordinator::get().getKPE(sender),"createSessFwd-cb(res=" << res << ")");
+            LOG_KRNL(kpe, "createSessFwd-cb(res=" << res << ")");
             if(res != m3::Errors::NO_ERROR) {
-                Kernelcalls::get().createSessResp(Coordinator::get().getKPE(sender), vpeID, tid,
+                Kernelcalls::get().createSessResp(kpe, vpeID, tid,
                     m3::Errors::INV_ARGS, 0, 0);
             }
             else {
                 word_t sess;
                 reply >> sess;
-                printf("[createSessFwd-cb] OK: sess=%lu srv_sel=%d vpe_id=%zu\n",
-                       (unsigned long)sess, rsrv->selector(), rsrv->vpe().id());
+                printf("[createSessFwd-cb] OK: sess=%lu srv_sel=%d vpe_id=%d\n",
+                       (unsigned long)sess, rsrv->selector(), (int)rsrv->vpe().id());
                 Capability *srvcap = rsrv->vpe().objcaps().get(rsrv->selector(), Capability::SERVICE);
                 if(!srvcap) {
                     printf("[createSessFwd-cb] ERROR: ServiceCap at sel=%d is NULL!\n",
                            rsrv->selector());
-                    Kernelcalls::get().createSessResp(Coordinator::get().getKPE(sender), vpeID, tid,
+                    Kernelcalls::get().createSessResp(kpe, vpeID, tid,
                         m3::Errors::INV_ARGS, 0, 0);
-                    RecvGate *rgatecpy = rgate;
                     rgate->unsubscribe(s);
-                    delete rgatecpy;
                     return;
                 }
                 // add child representing the session with the remote VPE
+                printf("[createSessFwd-cb] addChild cap=0x%lx\n",
+                       (unsigned long)cap);
                 static_cast<ServiceCapability*>(srvcap)->addChild(cap);
                 // add a reference to service for the remote session
                 srvcpy->add_ref();
 
-                Kernelcalls::get().createSessResp(Coordinator::get().getKPE(sender), vpeID, tid,
+                printf("[createSessFwd-cb] sending createSessResp to kpe=%p\n",
+                       (void*)kpe);
+                Kernelcalls::get().createSessResp(kpe, vpeID, tid,
                     m3::Errors::NO_ERROR, sess, srvcap->id());
+                printf("[createSessFwd-cb] createSessResp sent OK\n");
             }
 
-            // unsubscribe will delete the lambda
-            RecvGate *rgatecpy = rgate;
+            /* Unsubscribe only — do NOT delete the RecvGate here.
+             * We are inside notify_all's iteration over this gate's
+             * subscriber list. Deleting the gate would free the list
+             * while the iterator is still live, causing a use-after-free.
+             * The gate leaks (one 48-byte alloc per cross-kernel session). */
             rgate->unsubscribe(s);
-            delete rgatecpy;
         });
 
         AutoGateOStream msg(m3::vostreamsize(m3::ostreamsize<m3::KIF::Service::Command>(), is.remaining()));
@@ -462,10 +484,24 @@ void KernelcallHandler::createSessResp(GateIStream &is) {
     int vpeID, tid, res;
     is >> vpeID >> tid >> res;
     label_t sender = is.label();
-    LOG_KRNL(Coordinator::get().getKPE(sender), "kernelcall::createSessResp(vpeID=" << vpeID <<
+
+    KPE *kpe = Coordinator::get().tryGetKPE(sender);
+    printf("[createSessResp] sender=%lu kpe=%p vpeID=%d tid=%d res=%d\n",
+           (unsigned long)sender, (void*)kpe, vpeID, tid, res);
+    if(!kpe) {
+        printf("[createSessResp] WARNING: unknown sender %lu, dropping\n",
+               (unsigned long)sender);
+        return;
+    }
+    LOG_KRNL(kpe, "kernelcall::createSessResp(vpeID=" << vpeID <<
         ", tid=" << tid << ", res=" << res << ")");
 
     if(res != m3::Errors::INV_ARGS) {
+        if(!PEManager::get().exists(vpeID)) {
+            printf("[createSessResp] WARNING: vpeID %d not found, dropping\n", vpeID);
+            kpe->msg_received();
+            return;
+        }
         size_t sizeResult = m3::vostreamsize(m3::ostreamsize<label_t, m3::Errors::Code>(), is.remaining());
         void *resultBuf = m3::Heap::alloc(sizeResult);
         if(!resultBuf)
@@ -476,22 +512,33 @@ void KernelcallHandler::createSessResp(GateIStream &is) {
         PEManager::get().vpe(vpeID).srvLookupResult(data);
     }
 
+    if(!PEManager::get().exists(vpeID)) {
+        printf("[createSessResp] WARNING: vpeID %d not found for sessResp, dropping\n", vpeID);
+        kpe->msg_received();
+        return;
+    }
     VPE &vpe = PEManager::get().vpe(vpeID);
     if(!vpe.sessRespArrived()) {
         m3::ThreadManager::get().notify(reinterpret_cast<void*>(tid));
     }
-    Coordinator::get().getKPE(is.label())->msg_received();
+    kpe->msg_received();
 }
 
 void KernelcallHandler::createSessFail(GateIStream &is) {
     mht_key_t cap, srvCap;
     is >> cap >> srvCap;
-    LOG_KRNL(Coordinator::get().getKPE(is.label()), "kernelcall::createSessFail(cap=" <<
+    KPE *kpe = Coordinator::get().tryGetKPE(is.label());
+    if(!kpe) {
+        printf("[createSessFail] WARNING: unknown sender %lu, dropping\n",
+               (unsigned long)is.label());
+        return;
+    }
+    LOG_KRNL(kpe, "kernelcall::createSessFail(cap=" <<
         PRINT_HASH(cap) << ", srvCap=" << PRINT_HASH(srvCap) << ")");
     ServiceCapability *srv = MHTInstance::getInstance().get(srvCap).getData<ServiceCapability>();
     srv->removeChild(cap);
     srv->inst->rem_ref();
-    Kernelcalls::get().reply(Coordinator::get().getKPE(is.label()));
+    Kernelcalls::get().reply(kpe);
 }
 
 /**
@@ -823,12 +870,18 @@ void KernelcallHandler::announceSrv(GateIStream &is) {
     mht_key_t id;
     m3::String name;
     is >> id >> name;
-    LOG_KRNL(Coordinator::get().getKPE(is.label()), "kernelcall::announceSrv(id=" <<
+    KPE *kpe = Coordinator::get().tryGetKPE(is.label());
+    if(!kpe) {
+        printf("[announceSrv] WARNING: unknown sender %lu, dropping\n",
+               (unsigned long)is.label());
+        return;
+    }
+    LOG_KRNL(kpe, "kernelcall::announceSrv(id=" <<
         PRINT_HASH(id) << ", name=" << name << ")");
 
     RemoteServiceList::get().add(name, id);
     PEManager::get().start_pending(ServiceList::get(), RemoteServiceList::get());
-    Kernelcalls::get().reply(Coordinator::get().getKPE(is.label()));
+    Kernelcalls::get().reply(kpe);
 }
 
 /**
@@ -1151,15 +1204,27 @@ void KernelcallHandler::connect(GateIStream &is) {
 }
 
 void KernelcallHandler::reply(GateIStream &is) {
-    LOG_KRNL(Coordinator::get().getKPE(is.label()), "kernelcall::reply()");
-    Coordinator::get().getKPE(is.label())->msg_received();
+    KPE *kpe = Coordinator::get().tryGetKPE(is.label());
+    if(!kpe) {
+        printf("[krnlc::reply] WARNING: unknown sender %lu, dropping\n",
+               (unsigned long)is.label());
+        return;
+    }
+    LOG_KRNL(kpe, "kernelcall::reply()");
+    kpe->msg_received();
 }
 
 void KernelcallHandler::startApps(GateIStream &is) {
-    LOG_KRNL(Coordinator::get().getKPE(is.label()), "kernelcall::startApps()");
+    KPE *kpe = Coordinator::get().tryGetKPE(is.label());
+    if(!kpe) {
+        printf("[startApps] WARNING: unknown sender %lu, dropping\n",
+               (unsigned long)is.label());
+        return;
+    }
+    LOG_KRNL(kpe, "kernelcall::startApps()");
     Coordinator::get().startSignsAwaited--;
     PEManager::get().start_pending(ServiceList::get(), RemoteServiceList::get());
-    Kernelcalls::get().reply(Coordinator::get().getKPE(is.label()));
+    Kernelcalls::get().reply(kpe);
 #ifdef SYNC_APP_START
     // identify for runtime extraction script
     if(Coordinator::get().kid() != 0)
@@ -1171,19 +1236,25 @@ void KernelcallHandler::krnlcPing(GateIStream &is) {
     int tid;
     is >> tid;
 
+    KPE *kpe = Coordinator::get().tryGetKPE(is.label());
+    if(!kpe) {
+        printf("[KRNLC_PING] WARNING: unknown sender %lu, dropping\n",
+               (unsigned long)is.label());
+        return;
+    }
+
     if (tid < 0) {
         int orig_tid = -tid;
         printf("[KRNLC_PING] REPLY received, waking tid=%d\n", orig_tid);
         m3::ThreadManager::get().notify(reinterpret_cast<void*>(orig_tid));
-        Coordinator::get().getKPE(is.label())->msg_received();
+        kpe->msg_received();
     } else {
         printf("[KRNLC_PING] REQUEST from kernel %lu, tid=%d, replying\n",
                (unsigned long)is.label(), tid);
-        KPE *sender = Coordinator::get().getKPE(is.label());
         StaticGateOStream<m3::ostreamsize<Kernelcalls::Operation, int>()> reply;
         reply << Kernelcalls::KRNLC_PING << (-tid);
-        sender->reply(reply.bytes(), reply.total());
-        sender->msg_received();
+        kpe->reply(reply.bytes(), reply.total());
+        kpe->msg_received();
     }
 }
 
