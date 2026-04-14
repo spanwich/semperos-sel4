@@ -476,6 +476,11 @@ static void e1000_poll_rx_lwip(struct e1000_driver *drv)
         desc->length = 0;
         DMB();
 
+        /* Advance RDT. Writing idx (the just-processed index) means
+         * the newly-available descriptor appears one step behind in
+         * the ring (circular invariant: always one "reserve slot"
+         * between SW and HW). Writing idx+1 would make HEAD==RDT
+         * after every packet and HW stops. */
         drv->rx_tail = (idx + 1) % E1000_NUM_RX_DESC;
         e1000_wr(drv, E1000_RDT, idx);
     }
@@ -669,21 +674,22 @@ int net_net_send(int dest_node, int msg_len)
  * ============================================================
  */
 
-/* IRQ handler */
+/* IRQ handler — just acknowledge and clear ICR.
+ *
+ * RX polling is done exclusively by the main loop (e1000_poll_rx_lwip).
+ * If we also polled here, the main loop and IRQ handler could race
+ * on rx_tail / rx_pkts / descriptor state since IRQs fire asynchronously
+ * during the main loop's poll. The symptom was rx_tail and rx_pkts
+ * diverging (rx=14 but rx_tail=2) and HW stopping with RDH==RDT.
+ */
 void eth_irq_handle(void)
 {
     if (!driver_ready) {
         eth_irq_acknowledge();
         return;
     }
-
     g_drv.irq_count++;
-    uint32_t icr = e1000_rd(&g_drv, E1000_ICR);
-
-    if (icr & (E1000_ICR_RXT0 | E1000_ICR_RXDMT0 | E1000_ICR_RXO)) {
-        e1000_poll_rx_lwip(&g_drv);
-    }
-
+    (void)e1000_rd(&g_drv, E1000_ICR); /* read to clear */
     eth_irq_acknowledge();
 }
 
@@ -879,11 +885,17 @@ int run(void)
         /* Periodic status */
         loop_count++;
         if ((loop_count % 1000000) == 0) {
-            printf("[%s] irq=%u rx=%u tx=%u drop=%u hello=%s\n",
+            uint32_t rdh = driver_ready ? e1000_rd(&g_drv, E1000_RDH) : 0;
+            uint32_t rdt = driver_ready ? e1000_rd(&g_drv, E1000_RDT) : 0;
+            uint32_t rctl = driver_ready ? e1000_rd(&g_drv, E1000_RCTL) : 0;
+            uint32_t status = driver_ready ? e1000_rd(&g_drv, E1000_STATUS) : 0;
+            printf("[%s] irq=%u rx=%u tx=%u drop=%u hello=%s "
+                   "RDH=%u RDT=%u rx_tail=%u rctl=0x%x status=0x%x\n",
                    COMPONENT_NAME,
                    g_drv.irq_count, g_drv.rx_pkts,
                    g_drv.tx_pkts, g_drv.rx_dropped,
-                   hello_phase == HELLO_COMPLETE ? "YES" : "no");
+                   hello_phase == HELLO_COMPLETE ? "YES" : "no",
+                   rdh, rdt, g_drv.rx_tail, rctl, status);
         }
 
         if (!did_work) seL4_Yield();
