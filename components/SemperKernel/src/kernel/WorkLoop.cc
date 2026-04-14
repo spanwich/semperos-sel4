@@ -130,10 +130,25 @@ void WorkLoop::run() {
     while(has_items()) {
         m3::DTU::get().wait();
 
+#if defined(__sel4__)
+        /* Process network messages FIRST — dispatch_net_krnlc delivers
+         * cross-node KRNLC responses (createSessResp, PONG, connect).
+         * Must run before SYSC processing to avoid circular dependency:
+         * sendTo blocks on msgsInflight → needs msg_received from PONG →
+         * needs dispatch_net_krnlc → needs net_poll. */
+        net_poll();
+#endif
+
         for(int i = 0; i < DTU::KRNLC_GATES; i++) {
             msg = dtu.fetch_msg(krnlep[i]);
             if(msg) {
+#if defined(__sel4__)
+                dtu.mark_read(krnlep[i], 0); /* early ack — handler may block */
+#endif
                 GateIStream is(krnlch.rcvgate(i), msg);
+#if defined(__sel4__)
+                is.claim(); /* prevent double-ack from destructor */
+#endif
                 krnlch.handle_message(is, nullptr);
             }
         }
@@ -142,6 +157,13 @@ void WorkLoop::run() {
             msg = dtu.fetch_msg(sysep[i]);
             if(msg) {
 #if defined(__sel4__)
+                /* Ack the ring slot IMMEDIATELY before any handler call.
+                 * With cooperative threading, handlers can block in
+                 * wait_for(). Without early ack, another worker thread
+                 * running the WorkLoop would fetch+process the same
+                 * unacked message, causing duplicate syscall handling. */
+                dtu.mark_read(sysep[i], 0);
+
                 /* On sel4, VPE service replies arrive through the SYSC
                  * channel (VPE1 can't write to the kernel's service recv
                  * EP ring because SPSC is unidirectional). Detect replies
@@ -150,12 +172,8 @@ void WorkLoop::run() {
                 if((msg->flags & 0x01 /* VDTU_FLAG_REPLY */) && msg->label) {
                     RecvGate *gate = reinterpret_cast<RecvGate*>(msg->label);
                     GateIStream is(*gate, msg);
+                    is.claim();
                     gate->notify_all(is);
-                    /* Ack on the SYSC EP (not the service EP in the RecvGate).
-                     * GateIStream::finish() would ack on gate->ep() = srvepid,
-                     * but the message was read from sysep[i]. Without this,
-                     * the SYSC ring slot leaks and eventually fills up. */
-                    dtu.mark_read(sysep[i], 0);
                     continue;
                 }
 #endif
@@ -172,6 +190,7 @@ void WorkLoop::run() {
                 }
 #endif
                 GateIStream is(*rgate, msg);
+                is.claim(); /* prevent double-ack from destructor */
                 sysch.handle_message(is, nullptr);
                 EVENT_TRACE_FLUSH_LIGHT();
             }

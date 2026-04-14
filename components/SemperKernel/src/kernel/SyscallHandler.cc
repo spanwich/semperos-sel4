@@ -295,6 +295,15 @@ void SyscallHandler::createsess(GateIStream &is) {
         msg.claim();
     }
     else { // it might be a remote service
+        /* Reject if a session lookup is already pending for this VPE.
+         * VPE0 may retry CREATESESS while the first is still blocking
+         * on a cross-kernel response, which would corrupt the counter. */
+        if(vpe->sessAwaitingResp()) {
+            printf("[createsess] BUSY: session lookup already pending for vpe %zu\n",
+                   vpe->id());
+            SYS_ERROR(vpe, is, m3::Errors::INV_ARGS, "Session lookup already pending");
+        }
+
         AutoGateOStream msg(m3::vostreamsize(is.remaining()));
         msg.put(is);
         mht_key_t sessCapId = HashUtil::structured_hash(vpe->core(), vpe->id(), SESSCAP, cap);

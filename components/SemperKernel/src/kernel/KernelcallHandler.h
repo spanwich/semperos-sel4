@@ -30,7 +30,7 @@ class KernelcallHandler {
 public:
     using handler_func = void (KernelcallHandler::*)(GateIStream &is);
 
-    static const int MAX_MSG_INFLIGHT       = 4;
+    static const int MAX_MSG_INFLIGHT       = 8;
     static const int KRNLC_SLOTS            = (m3::DTU::MAX_MSG_SLOTS * DTU::KRNLC_GATES) / MAX_MSG_INFLIGHT;
 
     struct ConnectionRequest : m3::SListItem {

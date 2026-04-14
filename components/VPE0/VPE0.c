@@ -296,7 +296,7 @@ static int send_exchange(uint64_t tcap, uint32_t own_start, uint32_t own_count,
  */
 static int wait_for_reply_long(void)
 {
-    int timeout = 2000000;  /* ~40x normal timeout */
+    int timeout = 10000000; /* cross-node: kernel blocks for full KRNLC round-trip */
     const struct vdtu_message *reply = NULL;
     struct vdtu_ring *ring = NULL;
 
@@ -1044,24 +1044,17 @@ int run(void)
 
         int ok = 0;
         int last_err = -1;
-        /* Wait for remote VPE1 to register its service before attempting.
-         * Each createsess that finds no remote service blocks a kernel
-         * thread in wait_for(). Rapid retries cause thread starvation
-         * (1 main + 3 workers = 4 threads). Use a long initial delay
-         * then a small number of widely-spaced attempts. */
-        /* Wait for remote VPE1 registration + DTUBridge HELLO exchange. */
+        /* Wait for mutual HELLO + remote VPE1 service registration.
+         * Cross-kernel CREATESESS has a ~10-hop round-trip through two
+         * DTUBridges. Single attempt — retries cause BUSY errors because
+         * the kernel thread from the first attempt is still blocked. */
         printf("[VPE0] Test 12: waiting for remote VPE1 + network ready...\n");
-        for (int y = 0; y < 500000; y++) seL4_Yield();
+        for (int y = 0; y < 2000000; y++) seL4_Yield();
 
-        for (int attempt = 0; attempt < 3; attempt++) {
-            printf("[VPE0] Test 12: attempt %d\n", attempt);
-            err = send_createsess(300, remote_name, 10);
-            last_err = err;
-            if (err == 0) { ok = 1; break; }
-            printf("[VPE0] Test 12: attempt %d, err=%d\n", attempt, err);
-            /* Long wait between retries to let kernel threads unblock */
-            for (int y = 0; y < 500000; y++) seL4_Yield();
-        }
+        printf("[VPE0] Test 12: sending CREATESESS\n");
+        err = send_createsess(300, remote_name, 10);
+        last_err = err;
+        if (err == 0) ok = 1;
 
         if (ok) pass++; else fail++;
         printf("[VPE0] Test 12 (cross-kernel CREATESESS -> %s): %s (err=%d)\n",

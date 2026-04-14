@@ -183,10 +183,12 @@ extern "C" void net_init_rings(void);
  * We create NUM_WORKER_THREADS workers at startup so that nested
  * blocking (e.g., main blocks, worker handles a message that also
  * blocks) has a sleeping thread to switch to. Two workers is
- * Three workers needed for multi-node: one runs WorkLoop, one handles
- * blocking Kernelcalls (ping, createSessFwd), one sleeps as backup.
+ * Workers for multi-node: cross-kernel operations block threads for
+ * the full KRNLC round-trip. Each pending createsess, connect, or
+ * revoke consumes a thread. Need enough idle workers to keep the
+ * WorkLoop + net_poll running under concurrent cross-node load.
  */
-#define NUM_WORKER_THREADS 3
+#define NUM_WORKER_THREADS 10
 
 static kernel::WorkLoop *g_kworkloop = nullptr;
 

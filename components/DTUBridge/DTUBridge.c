@@ -217,7 +217,17 @@ static volatile bool driver_ready = false;
 static struct netif g_netif;
 static struct udp_pcb *g_udp_pcb;       /* DTU transport on port 7654 */
 static struct udp_pcb *g_hello_pcb;     /* Hello exchange on port 5000 */
-static volatile bool hello_received = false;
+/* Mutual HELLO state machine:
+ *   HELLO_INIT:     sending HELLO, waiting for peer's HELLO
+ *   HELLO_GOT_PEER: received peer's HELLO, now sending HELLO_ACK
+ *   HELLO_COMPLETE: received peer's HELLO_ACK, exchange done
+ * Both sides must reach COMPLETE before KRNLC traffic flows.
+ * After COMPLETE, keep sending HELLO_ACKs for a grace period
+ * so the peer also receives our ACK. */
+enum hello_state { HELLO_INIT = 0, HELLO_GOT_PEER = 1, HELLO_COMPLETE = 2 };
+static volatile enum hello_state hello_phase = HELLO_INIT;
+static int hello_grace_rounds = 0;  /* ACK rounds remaining after COMPLETE */
+#define HELLO_GRACE_COUNT 10
 
 /* Network ring buffers for kernel <-> DTUBridge transport (07e) */
 static struct vdtu_ring g_net_out_ring;  /* consumer: bridge reads kernel's outbound */
@@ -478,8 +488,18 @@ static void e1000_poll_rx_lwip(struct e1000_driver *drv)
  */
 
 /*
- * Hello exchange — UDP port 5000
- * Both nodes send "HELLO FROM NODE X" and print received hellos.
+ * Mutual HELLO exchange — UDP port 5000
+ *
+ * Protocol:
+ *   HELLO     = "HELLO FROM NODE X (ip)"     — initial announcement
+ *   HELLO_ACK = "HELLO_ACK FROM NODE X (ip)" — confirms peer's HELLO received
+ *
+ * State machine per node:
+ *   HELLO_INIT     → send HELLO;     on recv HELLO → HELLO_GOT_PEER
+ *   HELLO_GOT_PEER → send HELLO_ACK; on recv HELLO_ACK → HELLO_COMPLETE
+ *   HELLO_COMPLETE → stop sending
+ *
+ * Future: HELLO becomes CERT_OFFER, HELLO_ACK becomes CERT_VERIFY (FPT-157).
  */
 static void hello_udp_recv_cb(void *arg, struct udp_pcb *pcb,
                                struct pbuf *p, const ip_addr_t *addr, u16_t port)
@@ -487,7 +507,6 @@ static void hello_udp_recv_cb(void *arg, struct udp_pcb *pcb,
     (void)arg; (void)pcb; (void)port;
     if (!p) return;
 
-    /* Extract text from UDP payload */
     char msg[128];
     uint16_t len = p->tot_len;
     if (len >= sizeof(msg)) len = sizeof(msg) - 1;
@@ -495,20 +514,36 @@ static void hello_udp_recv_cb(void *arg, struct udp_pcb *pcb,
     msg[len] = '\0';
     pbuf_free(p);
 
-    printf("[%s] HELLO RX from %d.%d.%d.%d:%u: \"%s\"\n",
-           COMPONENT_NAME,
-           ip4_addr1(ip_2_ip4(addr)), ip4_addr2(ip_2_ip4(addr)),
-           ip4_addr3(ip_2_ip4(addr)), ip4_addr4(ip_2_ip4(addr)),
-           port, msg);
+    int is_ack = (len >= 9 && msg[0] == 'H' && msg[5] == '_');
 
-    hello_received = true;
+    if (is_ack) {
+        /* Received HELLO_ACK — peer has seen our HELLO */
+        if (hello_phase < HELLO_COMPLETE) {
+            printf("[%s] HELLO_ACK RX from %d.%d.%d.%d → exchange COMPLETE\n",
+                   COMPONENT_NAME,
+                   ip4_addr1(ip_2_ip4(addr)), ip4_addr2(ip_2_ip4(addr)),
+                   ip4_addr3(ip_2_ip4(addr)), ip4_addr4(ip_2_ip4(addr)));
+            hello_phase = HELLO_COMPLETE;
+            hello_grace_rounds = HELLO_GRACE_COUNT;
+        }
+    } else {
+        /* Received HELLO — peer exists, advance to GOT_PEER (at minimum) */
+        if (hello_phase < HELLO_GOT_PEER) {
+            printf("[%s] HELLO RX from %d.%d.%d.%d → sending ACKs\n",
+                   COMPONENT_NAME,
+                   ip4_addr1(ip_2_ip4(addr)), ip4_addr2(ip_2_ip4(addr)),
+                   ip4_addr3(ip_2_ip4(addr)), ip4_addr4(ip_2_ip4(addr)));
+            hello_phase = HELLO_GOT_PEER;
+        }
+    }
 }
 
 static void send_hello(void)
 {
+    const char *prefix = (hello_phase >= HELLO_GOT_PEER) ? "HELLO_ACK" : "HELLO";
     char msg[64];
-    int len = snprintf(msg, sizeof(msg), "HELLO FROM NODE %u (%s)",
-                       my_node_id, DTUB_SELF_IP);
+    int len = snprintf(msg, sizeof(msg), "%s FROM NODE %u (%s)",
+                       prefix, my_node_id, DTUB_SELF_IP);
 
     for (int i = 0; i < NUM_PEERS; i++) {
         struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (uint16_t)len, PBUF_RAM);
@@ -521,8 +556,8 @@ static void send_hello(void)
         err_t err = udp_sendto(g_hello_pcb, p, &dest, HELLO_UDP_PORT);
         pbuf_free(p);
 
-        printf("[%s] HELLO TX to peer %d:%u: \"%s\" (err=%d)\n",
-               COMPONENT_NAME, i, HELLO_UDP_PORT, msg, err);
+        printf("[%s] %s TX to peer %d (err=%d)\n",
+               COMPONENT_NAME, prefix, i, err);
     }
 }
 
@@ -781,23 +816,26 @@ int run(void)
         /* Pump lwIP timers (ARP, etc.) */
         sys_check_timeouts();
 
-        /* Hello exchange: prioritize connection establishment.
-         * Send early and repeat until hello_received. ARP needs a few
-         * round-trips to resolve, so space attempts every 100K loops. */
-        if (driver_ready && !hello_received && (loop_count % 100000) == 50000) {
+        /* Mutual HELLO exchange: keep sending until COMPLETE + grace.
+         * HELLO_INIT → send HELLO; HELLO_GOT_PEER/COMPLETE → send HELLO_ACK.
+         * Grace rounds after COMPLETE ensure the peer also gets our ACK. */
+        if (driver_ready && (hello_phase < HELLO_COMPLETE || hello_grace_rounds > 0)
+            && (loop_count % 100000) == 50000) {
             send_hello();
             hello_send_attempts++;
             hello_sent = 1;
+            if (hello_phase == HELLO_COMPLETE && hello_grace_rounds > 0)
+                hello_grace_rounds--;
         }
 
-        /* Report hello exchange result once */
-        if (hello_sent && !hello_received && loop_count == 800000) {
-            if (hello_received) {
-                printf("[%s] === HELLO EXCHANGE: SUCCESS ===\n", COMPONENT_NAME);
-            } else {
-                printf("[%s] === HELLO EXCHANGE: no reply yet (peer may be slower) ===\n",
-                       COMPONENT_NAME);
-            }
+        /* Report hello exchange status once */
+        if (hello_sent && hello_phase < HELLO_COMPLETE && loop_count == 800000) {
+            printf("[%s] === HELLO EXCHANGE: no reply yet (peer may be slower, phase=%d) ===\n",
+                   COMPONENT_NAME, (int)hello_phase);
+        }
+        if (hello_phase == HELLO_COMPLETE && hello_sent) {
+            printf("[%s] === HELLO EXCHANGE: COMPLETE (mutual) ===\n", COMPONENT_NAME);
+            hello_sent = 0;  /* print once */
         }
 
         /* Poll outbound ring: kernel → network (07e)
@@ -845,7 +883,7 @@ int run(void)
                    COMPONENT_NAME,
                    g_drv.irq_count, g_drv.rx_pkts,
                    g_drv.tx_pkts, g_drv.rx_dropped,
-                   hello_received ? "YES" : "no");
+                   hello_phase == HELLO_COMPLETE ? "YES" : "no");
         }
 
         if (!did_work) seL4_Yield();
