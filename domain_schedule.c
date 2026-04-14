@@ -5,12 +5,11 @@
  *   Domain 0: SemperKernel, VDTUService, VPE0, VPE1
  *   Domain 1: DTUBridge (E1000 + lwIP network I/O)
  *
- * Ratio: 2:2 (D0 gets 50%, D1 gets 50%)
- * Each slot = KernelTimerTickMS (default 2ms, so 4ms D0 + 4ms D1 = 8ms cycle)
- *
- * DTUBridge needs enough CPU for E1000 IRQ servicing, lwIP timers,
- * and HELLO exchange. With cooperative threading (setjmp), kernel
- * threads block properly, so D0 doesn't need extra slots.
+ * Ratio: 1:1 (D0 gets 50%, D1 gets 50%)
+ * Each slot = 1 tick = KernelTimerTickMS (2ms). Cycle = 4ms.
+ * Max freeze per domain = 2ms. Faster interleaving reduces E1000
+ * packet loss from domain-0 idle spinning while kernel threads
+ * are blocked in wait_for.
  */
 
 #include <config.h>
@@ -18,8 +17,8 @@
 #include <model/statedata.h>
 
 const dschedule_t ksDomSchedule[] = {
-    { .domain = 0, .length = 2 },
-    { .domain = 1, .length = 2 },
+    { .domain = 0, .length = 1 },
+    { .domain = 1, .length = 1 },
 };
 
 const word_t ksDomScheduleLength = sizeof(ksDomSchedule) / sizeof(dschedule_t);

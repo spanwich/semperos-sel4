@@ -1049,7 +1049,7 @@ int run(void)
          * DTUBridges. Single attempt — retries cause BUSY errors because
          * the kernel thread from the first attempt is still blocked. */
         printf("[VPE0] Test 12: waiting for remote VPE1 + network ready...\n");
-        for (int y = 0; y < 2000000; y++) seL4_Yield();
+        for (int y = 0; y < 500000; y++) seL4_Yield();
 
         printf("[VPE0] Test 12: sending CREATESESS\n");
         err = send_createsess(300, remote_name, 10);

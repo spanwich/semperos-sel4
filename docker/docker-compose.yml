@@ -37,7 +37,7 @@ services:
       - ../../../build-node1/images:/sel4-image:ro
     network_mode: host
     environment:
-      TIMEOUT: "60"
+      TIMEOUT: "120"
     depends_on:
       - node-a
     entrypoint: ["sh", "-c", "sleep 3 && /run-qemu.sh -nic none -device e1000,netdev=eth0,mac=52:54:00:00:00:02 -netdev socket,id=eth0,connect=127.0.0.1:10001"]
