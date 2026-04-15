@@ -400,8 +400,12 @@ assembly {
         /* SemperKernel gets PE ID 0 — needs large stack for revocation + logging */
         kernel0.priority = 200;
         kernel0._stack_size = 131072;  /* 128 KiB stack for cross-VPE revocation */
-        /* VPE0 gets PE ID 2 — same priority as kernel for seL4_Yield() scheduling */
+        /* VPE0 gets PE ID 2 — same priority as kernel for seL4_Yield() scheduling.
+         * 128 KiB stack: bench_all() has deep call chains and run() accumulates
+         * many test fixture variables. Default 4 KiB overflows during memset
+         * in bench_mem_access (post Test 12). */
         vpe0.priority = 200;
+        vpe0._stack_size = 131072;
         /* VPE1 gets PE ID 3 — passive EXCHANGE target, same priority for seL4_Yield() */
         vpe1.priority = 200;
         /* VPE1 service mode (FPT-175): needs heap for channel init */

@@ -69,6 +69,14 @@ int vdtu_ring_send(struct vdtu_ring *ring,
     if (next_head == ring->ctrl->tail)
         return -1;  /* full */
 
+    /* Sanity check: slot_size should be small (<= 4 KiB).
+     * Corruption of ctrl (e.g., from repeated re-init or race) could
+     * leave slot_size as a huge garbage value, which would cause the
+     * memset below to fault with a non-canonical address. */
+    if (ring->ctrl->slot_size == 0 || ring->ctrl->slot_size > 4096) {
+        return -4;  /* corrupt ring state */
+    }
+
     /* Get pointer to the slot */
     uint8_t *slot = ring->slots + (size_t)head * ring->ctrl->slot_size;
 
