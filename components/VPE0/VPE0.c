@@ -323,6 +323,46 @@ static int wait_for_reply_long(void)
     return result;
 }
 
+/*
+ * Send OBTAIN syscall (opcode 12) — obtain capabilities through a session.
+ *
+ * Message format (m3 marshalling, 8-byte aligned):
+ *   [0]      opcode   = OBTAIN (12)
+ *   [1]      tvpe     = VPECapability selector (0 = self)
+ *   [2]      sesscap  = session-cap selector (to obtain from)
+ *   [3..5]   caps     = CapRngDesc (12 bytes + 4 pad)
+ *
+ * Uses wait_for_reply_long because cross-kernel sessions require
+ * a full KRNLC round-trip (kernel → peer kernel → VPE1 → back).
+ */
+static int send_obtain(uint64_t sesscap, uint32_t own_start, uint32_t own_count)
+{
+    struct __attribute__((packed)) {
+        uint64_t opcode;
+        uint64_t tvpe;
+        uint64_t sesscap;
+        uint32_t caps_type;
+        uint32_t caps_start;
+        uint32_t caps_count;
+        uint32_t _pad;
+    } payload;
+
+    payload.opcode     = SYSCALL_OBTAIN;
+    payload.tvpe       = 0;         /* self */
+    payload.sesscap    = sesscap;
+    payload.caps_type  = CAP_TYPE_OBJ;
+    payload.caps_start = own_start;
+    payload.caps_count = own_count;
+    payload._pad       = 0;
+
+    struct vdtu_ring *ring = vdtu_channels_get_ring(&channels, send_chan);
+    if (!ring) return -1;
+    int rc = vdtu_ring_send(ring, MY_PE, SYSC_EP, MY_VPE_ID, DEF_RECVEP,
+                            0, 0, 0, &payload, (uint16_t)sizeof(payload));
+    if (rc != 0) return -1;
+    return wait_for_reply_long();
+}
+
 static int send_createsess(uint64_t dstcap, const char *name, size_t name_len)
 {
     uint8_t payload[64];
@@ -1059,6 +1099,30 @@ int run(void)
         if (ok) pass++; else fail++;
         printf("[VPE0] Test 12 (cross-kernel CREATESESS -> %s): %s (err=%d)\n",
                remote_name, ok ? "PASS" : "FAIL", last_err);
+    }
+
+    /* ==============================================================
+     * Test 13: Cross-kernel OBTAIN through session (Layer 5)
+     *
+     * Requires Test 12 to have succeeded (session cap at sel 300).
+     * VPE0 calls OBTAIN on the session, which routes through:
+     *   kernel → exchangeOverSession KRNLC → peer kernel →
+     *   OBTAIN cmd to VPE1 → VPE1 reply (srvcaps) → peer kernel
+     *   serializes cap data → exchangeOverSessionReply KRNLC →
+     *   origin kernel inserts into VPE0's CapTable → reply to VPE0
+     *
+     * Destination: sel 400 (must be unused).
+     * ============================================================== */
+    {
+        printf("[VPE0] Test 13: waiting before OBTAIN...\n");
+        for (int y = 0; y < 500000; y++) seL4_Yield();
+
+        printf("[VPE0] Test 13: sending OBTAIN (sess=300 -> cap=400)\n");
+        int obt_err = send_obtain(300, 400, 1);
+        int obt_ok = (obt_err == 0);
+        if (obt_ok) pass++; else fail++;
+        printf("[VPE0] Test 13 (cross-kernel OBTAIN via session): %s (err=%d)\n",
+               obt_ok ? "PASS" : "FAIL", obt_err);
     }
 #endif /* SEMPER_MULTI_NODE */
 

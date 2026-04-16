@@ -1244,17 +1244,23 @@ void KernelcallHandler::krnlcPing(GateIStream &is) {
     }
 
     if (tid < 0) {
+        /* This is a PONG — we sent a PING, this is the reply.
+         * Decrement inflight (we sent, now we got the reply back). */
         int orig_tid = -tid;
         printf("[KRNLC_PING] REPLY received, waking tid=%d\n", orig_tid);
         m3::ThreadManager::get().notify(reinterpret_cast<void*>(orig_tid));
         kpe->msg_received();
     } else {
+        /* This is an incoming PING — the peer sent it.
+         * We send a PONG back via kpe->reply() which does NOT track
+         * inflight. Do NOT call msg_received here: we never sent
+         * anything that needs ack'ing, so decrementing would drive
+         * the counter negative over time. */
         printf("[KRNLC_PING] REQUEST from kernel %lu, tid=%d, replying\n",
                (unsigned long)is.label(), tid);
         StaticGateOStream<m3::ostreamsize<Kernelcalls::Operation, int>()> reply;
         reply << Kernelcalls::KRNLC_PING << (-tid);
         kpe->reply(reply.bytes(), reply.total());
-        kpe->msg_received();
     }
 }
 
