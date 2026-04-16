@@ -60,8 +60,6 @@ void KPE::sendTo(const void* data, size_t size) {
     // Use one slot less for normal sending in order to be able to receive replies
     // and another slot less for revocations to prevent deadlocks
     while(_msgsInflight >= KernelcallHandler::MAX_MSG_INFLIGHT - 2) {
-        printf("[KPE::sendTo] BLOCKED: msgsInflight=%d >= %d\n",
-               _msgsInflight, KernelcallHandler::MAX_MSG_INFLIGHT - 2);
         KLOG(KPES, "Sending to kernel #" << _id << " delayed due to msg slot shortage");
 #ifdef KERNEL_STATISTICS
         delayedNormalMsgs++;

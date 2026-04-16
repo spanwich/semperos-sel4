@@ -390,19 +390,11 @@ void KernelcallHandler::createSessFwd(GateIStream &is) {
     label_t sender = is.label();
 
     KPE *senderKpe = Coordinator::get().tryGetKPE(sender);
-    printf("[createSessFwd] sender=%lu kpe=%p srvname='%s' (len=%zu)\n",
-           (unsigned long)sender, (void*)senderKpe,
-           srvname.c_str(), (size_t)srvname.length());
-    if(!senderKpe) {
-        printf("[createSessFwd] WARNING: unknown sender %lu, dropping\n",
-               (unsigned long)sender);
+    if(!senderKpe)
         return;
-    }
     LOG_KRNL(senderKpe, "kernelcall::createSessFwd(vpeID=" << vpeID <<
         ", srvname=" << srvname << ", cap=" << PRINT_HASH(cap) << ")");
     Service *srv = ServiceList::get().find(srvname);
-    printf("[createSessFwd] lookup '%s' -> %s\n",
-           srvname.c_str(), srv ? "FOUND" : "NOT FOUND");
     if(srv == nullptr || srv->closing) {
         Kernelcalls::get().createSessResp(senderKpe, vpeID, tid,
             m3::Errors::INV_ARGS, 0, 0);
@@ -419,8 +411,6 @@ void KernelcallHandler::createSessFwd(GateIStream &is) {
 
             KPE *kpe = Coordinator::get().tryGetKPE(sender);
             if(!kpe) {
-                printf("[createSessFwd-cb] WARNING: sender %lu gone, dropping\n",
-                       (unsigned long)sender);
                 rgate->unsubscribe(s);
                 return;
             }
@@ -435,29 +425,18 @@ void KernelcallHandler::createSessFwd(GateIStream &is) {
             else {
                 word_t sess;
                 reply >> sess;
-                printf("[createSessFwd-cb] OK: sess=%lu srv_sel=%d vpe_id=%d\n",
-                       (unsigned long)sess, rsrv->selector(), (int)rsrv->vpe().id());
                 Capability *srvcap = rsrv->vpe().objcaps().get(rsrv->selector(), Capability::SERVICE);
                 if(!srvcap) {
-                    printf("[createSessFwd-cb] ERROR: ServiceCap at sel=%d is NULL!\n",
-                           rsrv->selector());
                     Kernelcalls::get().createSessResp(kpe, vpeID, tid,
                         m3::Errors::INV_ARGS, 0, 0);
                     rgate->unsubscribe(s);
                     return;
                 }
-                // add child representing the session with the remote VPE
-                printf("[createSessFwd-cb] addChild cap=0x%lx\n",
-                       (unsigned long)cap);
                 static_cast<ServiceCapability*>(srvcap)->addChild(cap);
-                // add a reference to service for the remote session
                 srvcpy->add_ref();
 
-                printf("[createSessFwd-cb] sending createSessResp to kpe=%p\n",
-                       (void*)kpe);
                 Kernelcalls::get().createSessResp(kpe, vpeID, tid,
                     m3::Errors::NO_ERROR, sess, srvcap->id());
-                printf("[createSessFwd-cb] createSessResp sent OK\n");
             }
 
             /* Unsubscribe only — do NOT delete the RecvGate here.
@@ -486,19 +465,13 @@ void KernelcallHandler::createSessResp(GateIStream &is) {
     label_t sender = is.label();
 
     KPE *kpe = Coordinator::get().tryGetKPE(sender);
-    printf("[createSessResp] sender=%lu kpe=%p vpeID=%d tid=%d res=%d\n",
-           (unsigned long)sender, (void*)kpe, vpeID, tid, res);
-    if(!kpe) {
-        printf("[createSessResp] WARNING: unknown sender %lu, dropping\n",
-               (unsigned long)sender);
+    if(!kpe)
         return;
-    }
     LOG_KRNL(kpe, "kernelcall::createSessResp(vpeID=" << vpeID <<
         ", tid=" << tid << ", res=" << res << ")");
 
     if(res != m3::Errors::INV_ARGS) {
         if(!PEManager::get().exists(vpeID)) {
-            printf("[createSessResp] WARNING: vpeID %d not found, dropping\n", vpeID);
             kpe->msg_received();
             return;
         }
@@ -513,7 +486,6 @@ void KernelcallHandler::createSessResp(GateIStream &is) {
     }
 
     if(!PEManager::get().exists(vpeID)) {
-        printf("[createSessResp] WARNING: vpeID %d not found for sessResp, dropping\n", vpeID);
         kpe->msg_received();
         return;
     }
@@ -528,11 +500,8 @@ void KernelcallHandler::createSessFail(GateIStream &is) {
     mht_key_t cap, srvCap;
     is >> cap >> srvCap;
     KPE *kpe = Coordinator::get().tryGetKPE(is.label());
-    if(!kpe) {
-        printf("[createSessFail] WARNING: unknown sender %lu, dropping\n",
-               (unsigned long)is.label());
+    if(!kpe)
         return;
-    }
     LOG_KRNL(kpe, "kernelcall::createSessFail(cap=" <<
         PRINT_HASH(cap) << ", srvCap=" << PRINT_HASH(srvCap) << ")");
     ServiceCapability *srv = MHTInstance::getInstance().get(srvCap).getData<ServiceCapability>();
@@ -885,8 +854,6 @@ void KernelcallHandler::announceSrv(GateIStream &is) {
     is >> id >> name;
     KPE *kpe = Coordinator::get().tryGetKPE(is.label());
     if(!kpe) {
-        printf("[announceSrv] WARNING: unknown sender %lu, dropping\n",
-               (unsigned long)is.label());
         return;
     }
     LOG_KRNL(kpe, "kernelcall::announceSrv(id=" <<
@@ -1219,8 +1186,7 @@ void KernelcallHandler::connect(GateIStream &is) {
 void KernelcallHandler::reply(GateIStream &is) {
     KPE *kpe = Coordinator::get().tryGetKPE(is.label());
     if(!kpe) {
-        printf("[krnlc::reply] WARNING: unknown sender %lu, dropping\n",
-               (unsigned long)is.label());
+        /* unknown sender — silently drop */
         return;
     }
     LOG_KRNL(kpe, "kernelcall::reply()");
@@ -1230,8 +1196,7 @@ void KernelcallHandler::reply(GateIStream &is) {
 void KernelcallHandler::startApps(GateIStream &is) {
     KPE *kpe = Coordinator::get().tryGetKPE(is.label());
     if(!kpe) {
-        printf("[startApps] WARNING: unknown sender %lu, dropping\n",
-               (unsigned long)is.label());
+        /* unknown sender — silently drop */
         return;
     }
     LOG_KRNL(kpe, "kernelcall::startApps()");
@@ -1251,8 +1216,7 @@ void KernelcallHandler::krnlcPing(GateIStream &is) {
 
     KPE *kpe = Coordinator::get().tryGetKPE(is.label());
     if(!kpe) {
-        printf("[KRNLC_PING] WARNING: unknown sender %lu, dropping\n",
-               (unsigned long)is.label());
+        /* unknown sender — silently drop */
         return;
     }
 
@@ -1260,7 +1224,7 @@ void KernelcallHandler::krnlcPing(GateIStream &is) {
         /* This is a PONG — we sent a PING, this is the reply.
          * Decrement inflight (we sent, now we got the reply back). */
         int orig_tid = -tid;
-        printf("[KRNLC_PING] REPLY received, waking tid=%d\n", orig_tid);
+        /* PONG received — wake the thread that sent the PING */
         m3::ThreadManager::get().notify(reinterpret_cast<void*>(orig_tid));
         kpe->msg_received();
     } else {
@@ -1269,8 +1233,7 @@ void KernelcallHandler::krnlcPing(GateIStream &is) {
          * inflight. Do NOT call msg_received here: we never sent
          * anything that needs ack'ing, so decrementing would drive
          * the counter negative over time. */
-        printf("[KRNLC_PING] REQUEST from kernel %lu, tid=%d, replying\n",
-               (unsigned long)is.label(), tid);
+        /* Incoming PING request — send PONG back */
         StaticGateOStream<m3::ostreamsize<Kernelcalls::Operation, int>()> reply;
         reply << Kernelcalls::KRNLC_PING << (-tid);
         kpe->reply(reply.bytes(), reply.total());

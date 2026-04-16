@@ -19,9 +19,6 @@
 
 #pragma once
 
-extern "C" {
-#include <stdio.h>
-}
 #include <thread/Thread.h>
 
 #include <base/log/Lib.h>
@@ -59,17 +56,11 @@ public:
         assert(_sleep.length() > 0);
         _current->subscribe(event);
         _blocked.append(_current);
-        printf("[TMgr] T%d wait_for event=%p (sleep=%zu ready=%zu blocked=%zu)\n",
-               _current->id(), event, _sleep.length(), _ready.length(),
-               _blocked.length());
         LLOG(THREAD, "Thread " << _current->id() << " waits for " << event);
         if(_ready.length())
             switch_to(_ready.remove_first());
         else
             switch_to(_sleep.remove_first());
-        /* After switch_to returns, this thread was resumed */
-        printf("[TMgr] T%d RESUMED from wait_for (was event=%p)\n",
-               _current->id(), event);
     }
 
     void yield() {
@@ -86,8 +77,6 @@ public:
             if(old->trigger_event(event)) {
                 Thread* t = &(*old);
                 t->set_msg(msg, size);
-                printf("[TMgr] NOTIFY T%d for event=%p (cur=T%d)\n",
-                       t->id(), event, _current->id());
                 LLOG(THREAD, "Waking up thread " << t->id() << " for event " << event);
                 _blocked.remove(t);
                 _ready.append(t);

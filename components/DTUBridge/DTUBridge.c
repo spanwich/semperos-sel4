@@ -558,11 +558,8 @@ static void send_hello(void)
         ip_addr_t dest;
         ip_addr_copy_from_ip4(dest, peer_addrs[i]);
 
-        err_t err = udp_sendto(g_hello_pcb, p, &dest, HELLO_UDP_PORT);
+        udp_sendto(g_hello_pcb, p, &dest, HELLO_UDP_PORT);
         pbuf_free(p);
-
-        printf("[%s] %s TX to peer %d (err=%d)\n",
-               COMPONENT_NAME, prefix, i, err);
     }
 }
 
@@ -885,17 +882,11 @@ int run(void)
         /* Periodic status */
         loop_count++;
         if ((loop_count % 1000000) == 0) {
-            uint32_t rdh = driver_ready ? e1000_rd(&g_drv, E1000_RDH) : 0;
-            uint32_t rdt = driver_ready ? e1000_rd(&g_drv, E1000_RDT) : 0;
-            uint32_t rctl = driver_ready ? e1000_rd(&g_drv, E1000_RCTL) : 0;
-            uint32_t status = driver_ready ? e1000_rd(&g_drv, E1000_STATUS) : 0;
-            printf("[%s] irq=%u rx=%u tx=%u drop=%u hello=%s "
-                   "RDH=%u RDT=%u rx_tail=%u rctl=0x%x status=0x%x\n",
+            printf("[%s] irq=%u rx=%u tx=%u drop=%u hello=%s\n",
                    COMPONENT_NAME,
                    g_drv.irq_count, g_drv.rx_pkts,
                    g_drv.tx_pkts, g_drv.rx_dropped,
-                   hello_phase == HELLO_COMPLETE ? "YES" : "no",
-                   rdh, rdt, g_drv.rx_tail, rctl, status);
+                   hello_phase == HELLO_COMPLETE ? "YES" : "no");
         }
 
         if (!did_work) seL4_Yield();

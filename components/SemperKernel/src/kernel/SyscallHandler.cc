@@ -15,9 +15,6 @@
  * General Public License version 2 for more details.
  */
 
-extern "C" {
-#include <stdio.h>
-}
 #include <base/tracing/Tracing.h>
 #include <base/log/Kernel.h>
 #include <base/Init.h>
@@ -298,11 +295,8 @@ void SyscallHandler::createsess(GateIStream &is) {
         /* Reject if a session lookup is already pending for this VPE.
          * VPE0 may retry CREATESESS while the first is still blocking
          * on a cross-kernel response, which would corrupt the counter. */
-        if(vpe->sessAwaitingResp()) {
-            printf("[createsess] BUSY: session lookup already pending for vpe %zu\n",
-                   vpe->id());
+        if(vpe->sessAwaitingResp())
             SYS_ERROR(vpe, is, m3::Errors::INV_ARGS, "Session lookup already pending");
-        }
 
         AutoGateOStream msg(m3::vostreamsize(is.remaining()));
         msg.put(is);
@@ -313,26 +307,16 @@ void SyscallHandler::createsess(GateIStream &is) {
         vpe->srvLookupResult(nullptr);
         // check if service has been announced before
         RemoteServiceList::RemoteService *remoteSrv = RemoteServiceList::get().find(name);
-        printf("[createsess] vpe=%zu remote lookup '%s' -> %s\n",
-               vpe->id(), name.c_str(), remoteSrv ? "FOUND" : "NOT_FOUND");
         if(remoteSrv) {
-            printf("[createsess] direct forward to KPE for member %lu\n",
-                   (unsigned long)MHTInstance::getInstance().responsibleMember(remoteSrv->id));
             Kernelcalls::get().createSessFwd(Coordinator::get().getKPE(
                 MHTInstance::getInstance().responsibleMember(remoteSrv->id)),
                 vpe->id(), name, sessCapId, msg);
 
             vpe->sessAwaitingResp(1);
-            // wait for the response
-            int tid = m3::ThreadManager::get().current()->id();
-            printf("[createsess] waiting for response (tid=%d)\n", tid);
-            m3::ThreadManager::get().wait_for(reinterpret_cast<void*>(tid));
-            printf("[createsess] woke up, srvLookupResult=%p\n",
-                   (void*)vpe->srvLookupResult());
+            m3::ThreadManager::get().wait_for(reinterpret_cast<void*>(m3::ThreadManager::get().current()->id()));
         }
         else if(!vpe->srvLookupResult()) {
             uint awaitedResp = Coordinator::get().broadcastCreateSess(vpe->id(), name, sessCapId, msg);
-            printf("[createsess] broadcast sent=%u\n", awaitedResp);
             // if no other kernels in the system the service isn't existing
             if(!awaitedResp)
                 SYS_ERROR(vpe, is, m3::Errors::INV_ARGS, "Unknown service");
@@ -340,18 +324,12 @@ void SyscallHandler::createsess(GateIStream &is) {
             vpe->sessAwaitingResp(awaitedResp);
 
             // when all responses arrived we will be woken up
-            int tid = m3::ThreadManager::get().current()->id();
-            printf("[createsess] waiting for %u responses (tid=%d)\n", awaitedResp, tid);
-            m3::ThreadManager::get().wait_for(reinterpret_cast<void*>(tid));
-            printf("[createsess] woke up, srvLookupResult=%p\n",
-                   (void*)vpe->srvLookupResult());
+            m3::ThreadManager::get().wait_for(reinterpret_cast<void*>(m3::ThreadManager::get().current()->id()));
         }
 
         GateOStream *resp = vpe->srvLookupResult();
-        if(!resp) {
-            printf("[createsess] ERROR: srvLookupResult is NULL after wait\n");
+        if(!resp)
             SYS_ERROR(vpe, is, m3::Errors::INV_ARGS, "Unknown service");
-        }
 
         m3::Unmarshaller srvRes(resp->bytes(), resp->total());
         srvRes >> srvLocation >> res;

@@ -51,14 +51,6 @@ extern "C" void dispatch_net_krnlc(const void *raw_msg, uint16_t len) {
      * net_poll() via vdtu_ring_ack(). Letting GateIStream's destructor
      * call mark_read() would ack the wrong (KRNLC) ring. */
     is.claim();  /* sets _ack = false */
-    /* Debug: print opcode for network-delivered KRNLC messages */
-    {
-        const unsigned char *d = msg->data;
-        uint64_t op = 0;
-        if (len >= 25 + 8) memcpy(&op, d, 8);
-        printf("[dispatch_net_krnlc] len=%u op=%lu label=0x%lx\n",
-               len, (unsigned long)op, (unsigned long)msg->label);
-    }
     krnlch.handle_message(is, nullptr);
 }
 #endif /* !SEMPEROS_NO_NETWORK */
@@ -114,18 +106,6 @@ void WorkLoop::run() {
         sysep[i] = sysch.epid(i);
     int srvep = sysch.srvepid();
     const m3::DTU::Message *msg;
-    /* Debug: print EP→channel mapping once */
-    static int ep_map_printed = 0;
-    if (!ep_map_printed) {
-        printf("[WorkLoop] SYSC EPs: ");
-        for (int i = 0; i < DTU::SYSC_GATES; i++)
-            printf("sysep[%d]=%d ", i, sysep[i]);
-        printf("\n[WorkLoop] KRNLC EPs: ");
-        for (int i = 0; i < DTU::KRNLC_GATES; i++)
-            printf("krnlep[%d]=%d ", i, krnlep[i]);
-        printf("\nsrvep=%d\n", srvep);
-        ep_map_printed = 1;
-    }
 
     while(has_items()) {
         m3::DTU::get().wait();
@@ -202,8 +182,6 @@ void WorkLoop::run() {
             if(gate) {
                 GateIStream is(*gate, msg);
                 gate->notify_all(is);
-            } else {
-                printf("[WorkLoop] WARNING: srvep msg with null label, dropping\n");
             }
         }
 
