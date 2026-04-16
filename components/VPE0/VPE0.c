@@ -1188,6 +1188,44 @@ int run(void)
                    del_ok ? "PASS" : "FAIL", del_err);
         }
     }
+
+    /* ==============================================================
+     * Test 15: Spanning REVOKE (Layer 6 — thesis contribution)
+     *
+     * Revokes a capability (sel 400) that was obtained cross-kernel
+     * in Test 13. The obtained cap at sel 400 on node-a has a parent
+     * on node-b (VPE1's cap at sel 10, linked via addChild during
+     * the OBTAIN). Revoking sel 400 should trigger:
+     *
+     *   VPE0 REVOKE(sel=400) → kernel revoke_rec → removes local cap
+     *
+     * The more interesting spanning case: revoke the SESSION at 300
+     * which has children on the remote kernel (the service cap child
+     * added during createSessFwd). Revoking the session invalidates
+     * all remote children via REVOKE/REVOKEBATCH KRNLC.
+     *
+     * We test both:
+     *   15a: REVOKE sel 400 (obtained cap — local revoke, simple)
+     *   15b: REVOKE sel 300 (session cap — spanning, triggers KRNLC)
+     * ============================================================== */
+    {
+        /* 15a: revoke the obtained cap */
+        printf("[VPE0] Test 15a: REVOKE obtained cap at sel 400\n");
+        int rev_err = send_revoke(400);
+        int rev_ok = (rev_err == 0);
+        if (rev_ok) pass++; else fail++;
+        printf("[VPE0] Test 15a (revoke obtained cap): %s (err=%d)\n",
+               rev_ok ? "PASS" : "FAIL", rev_err);
+
+        /* 15b: revoke the session cap — this has remote children */
+        for (int y = 0; y < 500000; y++) seL4_Yield();
+        printf("[VPE0] Test 15b: REVOKE session cap at sel 300 (spanning)\n");
+        rev_err = send_revoke(300);
+        rev_ok = (rev_err == 0);
+        if (rev_ok) pass++; else fail++;
+        printf("[VPE0] Test 15b (spanning revoke session): %s (err=%d)\n",
+               rev_ok ? "PASS" : "FAIL", rev_err);
+    }
 #endif /* SEMPER_MULTI_NODE */
 
     printf("[VPE0] === %d passed, %d failed ===\n", pass, fail);

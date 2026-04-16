@@ -148,6 +148,11 @@ void MemObject::revokeAction() {
 }
 
 void SessionObject::close() {
+    /* For remote sessions (cross-kernel via createSessFwd), srv is null
+     * because the service lives on the peer kernel. Skip the CLOSE
+     * message — the remote kernel handles cleanup via REVOKE KRNLC. */
+    if(&*srv == nullptr)
+        return;
     // only send the close message, if the service has not exited yet
     if(srv->vpe().state() == VPE::RUNNING) {
         AutoGateOStream msg(m3::ostreamsize<m3::KIF::Service::Command, word_t>());
