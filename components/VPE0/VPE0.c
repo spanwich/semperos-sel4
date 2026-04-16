@@ -335,6 +335,38 @@ static int wait_for_reply_long(void)
  * Uses wait_for_reply_long because cross-kernel sessions require
  * a full KRNLC round-trip (kernel → peer kernel → VPE1 → back).
  */
+/*
+ * Send DELEGATE syscall (opcode 11) — delegate our capabilities
+ * to a session. Marshalling is identical to OBTAIN.
+ */
+static int send_delegate(uint64_t sesscap, uint32_t own_start, uint32_t own_count)
+{
+    struct __attribute__((packed)) {
+        uint64_t opcode;
+        uint64_t tvpe;
+        uint64_t sesscap;
+        uint32_t caps_type;
+        uint32_t caps_start;
+        uint32_t caps_count;
+        uint32_t _pad;
+    } payload;
+
+    payload.opcode     = SYSCALL_DELEGATE;
+    payload.tvpe       = 0;         /* self */
+    payload.sesscap    = sesscap;
+    payload.caps_type  = CAP_TYPE_OBJ;
+    payload.caps_start = own_start;
+    payload.caps_count = own_count;
+    payload._pad       = 0;
+
+    struct vdtu_ring *ring = vdtu_channels_get_ring(&channels, send_chan);
+    if (!ring) return -1;
+    int rc = vdtu_ring_send(ring, MY_PE, SYSC_EP, MY_VPE_ID, DEF_RECVEP,
+                            0, 0, 0, &payload, (uint16_t)sizeof(payload));
+    if (rc != 0) return -1;
+    return wait_for_reply_long();
+}
+
 static int send_obtain(uint64_t sesscap, uint32_t own_start, uint32_t own_count)
 {
     struct __attribute__((packed)) {
@@ -1123,6 +1155,38 @@ int run(void)
         if (obt_ok) pass++; else fail++;
         printf("[VPE0] Test 13 (cross-kernel OBTAIN via session): %s (err=%d)\n",
                obt_ok ? "PASS" : "FAIL", obt_err);
+    }
+
+    /* ==============================================================
+     * Test 14: Cross-kernel DELEGATE through session (Layer 5)
+     *
+     * Symmetric to Test 13 but reverse direction: VPE0 on node-a
+     * creates a local gate at sel 500, then DELEGATEs it to VPE1
+     * on node-b through the session at sel 300.
+     *
+     * Kernel path (mirror of OBTAIN):
+     *   VPE0 DELEGATE → kernel exchange_over_sess(obtain=false) →
+     *   exchangeOverSession KRNLC to peer → peer sends DELEGATE cmd
+     *   to VPE1 → VPE1 replies with target slot range → peer reserves
+     *   slots, sends exchangeOverSessionReply back → origin kernel
+     *   serializes local caps, sends exchangeOverSessionAck KRNLC →
+     *   peer kernel inserts caps into VPE1's CapTable → reply to VPE0
+     * ============================================================== */
+    {
+        printf("[VPE0] Test 14: creating local gate at sel 500\n");
+        int cg_err = send_creategate(500, 0xDE1E, 9, 32);
+        if (cg_err != 0) {
+            printf("[VPE0] Test 14: CREATEGATE sel 500 FAILED (err=%d)\n", cg_err);
+            fail++;
+        } else {
+            for (int y = 0; y < 500000; y++) seL4_Yield();
+            printf("[VPE0] Test 14: sending DELEGATE (cap=500 -> sess=300)\n");
+            int del_err = send_delegate(300, 500, 1);
+            int del_ok = (del_err == 0);
+            if (del_ok) pass++; else fail++;
+            printf("[VPE0] Test 14 (cross-kernel DELEGATE via session): %s (err=%d)\n",
+                   del_ok ? "PASS" : "FAIL", del_err);
+        }
     }
 #endif /* SEMPER_MULTI_NODE */
 

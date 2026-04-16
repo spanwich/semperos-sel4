@@ -629,7 +629,13 @@ void KernelcallHandler::exchangeOverSession(GateIStream &is) {
             }
             CapTable &srvTbl = srvcaps.type() == m3::CapRngDesc::OBJ ?
                         srvcpy->vpe().objcaps() : srvcpy->vpe().mapcaps();
-            if(!obtain && srvTbl.range_unused(srvcaps)) {
+            /* For DELEGATE: destination slots must be unused (empty) so we can
+             * reserve them and insert the delegated caps. The original check
+             * was inverted — it errored when slots were empty (the correct
+             * state) instead of when they were occupied. Compare with the
+             * LOCAL path's do_exchange which has the correct check:
+             *   if(!dst.objcaps().range_unused(dstrng)) return INV_ARGS; */
+            if(!obtain && !srvTbl.range_unused(srvcaps)) {
                 KLOG(ERR, "Invalid destination caps (" << m3::Errors::INV_ARGS << ")");
                 StaticGateOStream<0> empty;
                 Kernelcalls::get().exchangeOverSessionReply(Coordinator::get().getKPE(sender),
@@ -678,10 +684,17 @@ void KernelcallHandler::exchangeOverSession(GateIStream &is) {
                 }
             }
 
-            // send reply to krnl
+            // send reply to krnl.
+            // For OBTAIN: serialize the server's source caps so origin kernel
+            //             can clone them into the requesting VPE.
+            // For DELEGATE: the slots are freshly reserved and empty — nothing
+            //             to serialize. Origin will send caps via the ACK.
             AutoGateOStream remain(m3::vostreamsize(serializedSize + reply.remaining()));
-            for(capsel_t i = 0; i < srvcaps.count(); i++) {
-                Capability::serializeTyped(remain, srvcapsPtr[i]);
+            if(obtain) {
+                for(capsel_t i = 0; i < srvcaps.count(); i++) {
+                    if(srvcapsPtr[i] != nullptr)
+                        Capability::serializeTyped(remain, srvcapsPtr[i]);
+                }
             }
             remain.put(reply);
             Kernelcalls::get().exchangeOverSessionReply(Coordinator::get().getKPE(sender),

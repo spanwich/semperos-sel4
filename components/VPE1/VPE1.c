@@ -227,10 +227,19 @@ static void service_poll(void)
         case SRV_CMD_OBTAIN:
         case SRV_CMD_DELEGATE: {
             printf("[VPE1] %s\n", cmd == SRV_CMD_OBTAIN ? "OBTAIN" : "DELEGATE");
+            /* OBTAIN: reply with source range — caller reads FROM VPE1:10
+             * DELEGATE: reply with destination range — caller writes TO VPE1:20
+             * Separate ranges so a delegate after an obtain doesn't collide. */
             struct __attribute__((packed)) {
                 uint64_t error;
                 uint32_t type, start, count, pad;
-            } reply = { 0, CAP_TYPE_OBJ, 10, 1, 0 };
+            } reply = {
+                0,
+                CAP_TYPE_OBJ,
+                (cmd == SRV_CMD_OBTAIN) ? 10u : 20u,
+                1,
+                0
+            };
             send_reply(ring, msg, &reply, sizeof(reply));
             break;
         }
