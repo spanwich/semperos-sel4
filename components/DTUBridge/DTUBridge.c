@@ -217,16 +217,17 @@ static volatile bool driver_ready = false;
 static struct netif g_netif;
 static struct udp_pcb *g_udp_pcb;       /* DTU transport on port 7654 */
 static struct udp_pcb *g_hello_pcb;     /* Hello exchange on port 5000 */
-/* Mutual HELLO state machine:
+/* Per-peer mutual HELLO state machine (FPT-179 Stage 3):
  *   HELLO_INIT:     sending HELLO, waiting for peer's HELLO
  *   HELLO_GOT_PEER: received peer's HELLO, now sending HELLO_ACK
  *   HELLO_COMPLETE: received peer's HELLO_ACK, exchange done
- * Both sides must reach COMPLETE before KRNLC traffic flows.
- * After COMPLETE, keep sending HELLO_ACKs for a grace period
- * so the peer also receives our ACK. */
+ * Each peer has its own state + grace counter. We must drive every
+ * peer to COMPLETE independently — a global state machine only worked
+ * for 2-node because the first completed pair silenced the sender
+ * before the second peer could hear back. */
 enum hello_state { HELLO_INIT = 0, HELLO_GOT_PEER = 1, HELLO_COMPLETE = 2 };
-static volatile enum hello_state hello_phase = HELLO_INIT;
-static int hello_grace_rounds = 0;  /* ACK rounds remaining after COMPLETE */
+static volatile enum hello_state peer_hello_phase[NUM_PEERS];
+static int peer_hello_grace[NUM_PEERS];  /* ACK rounds remaining per-peer */
 #define HELLO_GRACE_COUNT 10
 
 /* Network ring buffers for kernel <-> DTUBridge transport (07e) */
@@ -554,6 +555,19 @@ static void e1000_poll_rx_lwip(struct e1000_driver *drv)
  *
  * Future: HELLO becomes CERT_OFFER, HELLO_ACK becomes CERT_VERIFY (FPT-157).
  */
+/* Identify which peer an incoming packet came from, by source IP.
+ * Returns index into peer_addrs[] / peer_hello_phase[], or -1 if unknown. */
+static int peer_index_of(const ip_addr_t *addr)
+{
+    if (!addr) return -1;
+    const ip4_addr_t *src = ip_2_ip4(addr);
+    for (int i = 0; i < NUM_PEERS; i++) {
+        if (ip4_addr_cmp(src, &peer_addrs[i]))
+            return i;
+    }
+    return -1;
+}
+
 static void hello_udp_recv_cb(void *arg, struct udp_pcb *pcb,
                                struct pbuf *p, const ip_addr_t *addr, u16_t port)
 {
@@ -567,38 +581,53 @@ static void hello_udp_recv_cb(void *arg, struct udp_pcb *pcb,
     msg[len] = '\0';
     pbuf_free(p);
 
+    int peer = peer_index_of(addr);
+    if (peer < 0) {
+        /* Unknown source IP — ignore. */
+        return;
+    }
+
     int is_ack = (len >= 9 && msg[0] == 'H' && msg[5] == '_');
 
     if (is_ack) {
-        /* Received HELLO_ACK — peer has seen our HELLO */
-        if (hello_phase < HELLO_COMPLETE) {
-            printf("[%s] HELLO_ACK RX from %d.%d.%d.%d → exchange COMPLETE\n",
+        /* Received HELLO_ACK from peer i — that pair is complete */
+        if (peer_hello_phase[peer] < HELLO_COMPLETE) {
+            printf("[%s] HELLO_ACK RX from %d.%d.%d.%d (peer %d) → peer COMPLETE\n",
                    COMPONENT_NAME,
                    ip4_addr1(ip_2_ip4(addr)), ip4_addr2(ip_2_ip4(addr)),
-                   ip4_addr3(ip_2_ip4(addr)), ip4_addr4(ip_2_ip4(addr)));
-            hello_phase = HELLO_COMPLETE;
-            hello_grace_rounds = HELLO_GRACE_COUNT;
+                   ip4_addr3(ip_2_ip4(addr)), ip4_addr4(ip_2_ip4(addr)),
+                   peer);
+            peer_hello_phase[peer] = HELLO_COMPLETE;
+            peer_hello_grace[peer] = HELLO_GRACE_COUNT;
         }
     } else {
-        /* Received HELLO — peer exists, advance to GOT_PEER (at minimum) */
-        if (hello_phase < HELLO_GOT_PEER) {
-            printf("[%s] HELLO RX from %d.%d.%d.%d → sending ACKs\n",
+        /* Received HELLO from peer i — at minimum, advance to GOT_PEER */
+        if (peer_hello_phase[peer] < HELLO_GOT_PEER) {
+            printf("[%s] HELLO RX from %d.%d.%d.%d (peer %d) → sending ACKs\n",
                    COMPONENT_NAME,
                    ip4_addr1(ip_2_ip4(addr)), ip4_addr2(ip_2_ip4(addr)),
-                   ip4_addr3(ip_2_ip4(addr)), ip4_addr4(ip_2_ip4(addr)));
-            hello_phase = HELLO_GOT_PEER;
+                   ip4_addr3(ip_2_ip4(addr)), ip4_addr4(ip_2_ip4(addr)),
+                   peer);
+            peer_hello_phase[peer] = HELLO_GOT_PEER;
         }
     }
 }
 
+/* Per-peer HELLO send. Each peer gets HELLO if we haven't heard from them
+ * yet, or HELLO_ACK if we have (and remain in grace). Peers fully in
+ * COMPLETE with grace=0 are skipped. */
 static void send_hello(void)
 {
-    const char *prefix = (hello_phase >= HELLO_GOT_PEER) ? "HELLO_ACK" : "HELLO";
-    char msg[64];
-    int len = snprintf(msg, sizeof(msg), "%s FROM NODE %u (%s)",
-                       prefix, my_node_id, DTUB_SELF_IP);
-
     for (int i = 0; i < NUM_PEERS; i++) {
+        enum hello_state st = peer_hello_phase[i];
+        if (st == HELLO_COMPLETE && peer_hello_grace[i] <= 0)
+            continue;
+
+        const char *prefix = (st >= HELLO_GOT_PEER) ? "HELLO_ACK" : "HELLO";
+        char msg[64];
+        int len = snprintf(msg, sizeof(msg), "%s FROM NODE %u (%s)",
+                           prefix, my_node_id, DTUB_SELF_IP);
+
         struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (uint16_t)len, PBUF_RAM);
         if (!p) continue;
         memcpy(p->payload, msg, len);
@@ -608,7 +637,30 @@ static void send_hello(void)
 
         udp_sendto(g_hello_pcb, p, &dest, HELLO_UDP_PORT);
         pbuf_free(p);
+
+        if (st == HELLO_COMPLETE && peer_hello_grace[i] > 0)
+            peer_hello_grace[i]--;
     }
+}
+
+/* True iff all peer handshakes have reached HELLO_COMPLETE. */
+static bool all_peers_complete(void)
+{
+    for (int i = 0; i < NUM_PEERS; i++) {
+        if (peer_hello_phase[i] != HELLO_COMPLETE)
+            return false;
+    }
+    return true;
+}
+
+/* True iff any peer still needs a HELLO or HELLO_ACK (incomplete OR in grace). */
+static bool any_peer_pending(void)
+{
+    for (int i = 0; i < NUM_PEERS; i++) {
+        if (peer_hello_phase[i] != HELLO_COMPLETE || peer_hello_grace[i] > 0)
+            return true;
+    }
+    return false;
 }
 
 /*
@@ -890,25 +942,25 @@ int run(void)
         /* Pump lwIP timers (ARP, etc.) */
         sys_check_timeouts();
 
-        /* Mutual HELLO exchange: keep sending until COMPLETE + grace.
-         * HELLO_INIT → send HELLO; HELLO_GOT_PEER/COMPLETE → send HELLO_ACK.
-         * Grace rounds after COMPLETE ensure the peer also gets our ACK. */
-        if (driver_ready && (hello_phase < HELLO_COMPLETE || hello_grace_rounds > 0)
+        /* Per-peer mutual HELLO exchange (FPT-179 Stage 3).
+         * send_hello() iterates peers and emits HELLO/HELLO_ACK per-peer,
+         * decrementing each peer's grace when sent from COMPLETE. */
+        if (driver_ready && any_peer_pending()
             && (loop_count % 100000) == 50000) {
             send_hello();
             hello_send_attempts++;
             hello_sent = 1;
-            if (hello_phase == HELLO_COMPLETE && hello_grace_rounds > 0)
-                hello_grace_rounds--;
         }
 
         /* Report hello exchange status once */
-        if (hello_sent && hello_phase < HELLO_COMPLETE && loop_count == 800000) {
-            printf("[%s] === HELLO EXCHANGE: no reply yet (peer may be slower, phase=%d) ===\n",
-                   COMPONENT_NAME, (int)hello_phase);
+        if (hello_sent && !all_peers_complete() && loop_count == 800000) {
+            printf("[%s] === HELLO EXCHANGE: not all peers yet (peer0=%d peer1=%d) ===\n",
+                   COMPONENT_NAME,
+                   (int)peer_hello_phase[0], (int)peer_hello_phase[1]);
         }
-        if (hello_phase == HELLO_COMPLETE && hello_sent) {
-            printf("[%s] === HELLO EXCHANGE: COMPLETE (mutual) ===\n", COMPONENT_NAME);
+        if (all_peers_complete() && hello_sent) {
+            printf("[%s] === HELLO EXCHANGE: COMPLETE (all %d peers) ===\n",
+                   COMPONENT_NAME, NUM_PEERS);
             hello_sent = 0;  /* print once */
         }
 
@@ -953,11 +1005,12 @@ int run(void)
         /* Periodic status */
         loop_count++;
         if ((loop_count % 1000000) == 0) {
-            printf("[%s] irq=%u rx=%u tx=%u drop=%u hello=%s\n",
+            printf("[%s] irq=%u rx=%u tx=%u drop=%u hello=%s (p0=%d p1=%d)\n",
                    COMPONENT_NAME,
                    g_drv.irq_count, g_drv.rx_pkts,
                    g_drv.tx_pkts, g_drv.rx_dropped,
-                   hello_phase == HELLO_COMPLETE ? "YES" : "no");
+                   all_peers_complete() ? "YES" : "no",
+                   (int)peer_hello_phase[0], (int)peer_hello_phase[1]);
             /* FPT-179: periodic register dump — check if descriptor-ring state
              * advances (RDH moves on RX). If RDH stays at 0 and ICR=0 both
              * always, either IRQ path or MMIO mapping is broken. */
