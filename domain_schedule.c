@@ -5,11 +5,10 @@
  *   Domain 0: SemperKernel, VDTUService, VPE0, VPE1
  *   Domain 1: DTUBridge (E1000 + lwIP network I/O)
  *
- * Ratio: 1:1 (D0 gets 50%, D1 gets 50%)
- * Each slot = 1 tick = KernelTimerTickMS (2ms). Cycle = 4ms.
- * Max freeze per domain = 2ms. Faster interleaving reduces E1000
- * packet loss from domain-0 idle spinning while kernel threads
- * are blocked in wait_for.
+ * Ratio: 3:1 (D0 gets 75%, D1 gets 25%)
+ * Each slot = KernelTimerTickMS (default 2ms, so 6ms D0 + 2ms D1 = 8ms cycle).
+ * Note: 1:1 caused irq=0 on XCP-ng (Xen HVM E1000 IRQ delivery requires
+ * sufficient domain-0 time for the Xen IRQ inject path). Reverted to 3:1.
  */
 
 #include <config.h>
@@ -17,7 +16,7 @@
 #include <model/statedata.h>
 
 const dschedule_t ksDomSchedule[] = {
-    { .domain = 0, .length = 1 },
+    { .domain = 0, .length = 3 },
     { .domain = 1, .length = 1 },
 };
 

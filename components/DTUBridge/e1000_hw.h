@@ -289,8 +289,8 @@ struct e1000_tx_desc {
 /*
  * Driver Configuration Constants
  */
-#define E1000_NUM_RX_DESC   256         /* Number of RX descriptors (Linux default) */
-#define E1000_NUM_TX_DESC   256         /* Number of TX descriptors (Linux default) */
+#define E1000_NUM_RX_DESC   64          /* Number of RX descriptors */
+#define E1000_NUM_TX_DESC   64          /* Number of TX descriptors */
 #define E1000_RX_BUF_SIZE   2048        /* RX buffer size */
 #define E1000_TX_BUF_SIZE   2048        /* TX buffer size */
 

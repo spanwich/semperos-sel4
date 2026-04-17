@@ -1,0 +1,40 @@
+{
+  "timestamp": "2026-04-17T12:00:00+13:00",
+  "branch": "master",
+  "commit": "pending",
+  "platform": "XCP-ng 8.2.1, Xen HVM, Intel x86_64, 3-node cluster",
+  "tsc_mhz": {"node0": 2100, "node1": 2100, "node2": 2100},
+  "build_flags": "-DPLATFORM=pc99 -DSEMPEROS_NO_NETWORK=OFF -DSEMPER_BENCH_MODE=ON -DSEMPER_MULTI_NODE=ON -DKERNEL_ID=N",
+  "domain_schedule": "3:1 (D0: 3 slots x 2ms = 6ms, D1: 1 slot x 2ms = 2ms, cycle 8ms)",
+  "e1000_descriptors": "64 RX + 64 TX",
+  "test_results": {
+    "node0": "13 passed, 3 failed",
+    "node1": "13 passed, 3 failed",
+    "node2": "13 passed, 3 failed"
+  },
+  "failures": {
+    "cross_kernel": [
+      "Test 12 (cross-kernel CREATESESS): err=-1 (timeout)",
+      "Test 13 (cross-kernel OBTAIN): err=5 (cascades from Test 12)",
+      "Test 14 (cross-kernel DELEGATE): err=5 (cascades from Test 12)"
+    ],
+    "root_cause": "E1000 RX interrupts do not fire on XCP-ng (irq=0 rx=0 on all nodes). The IRQ handler is never invoked by the CAmkES IRQ connector. HELLO exchange therefore never completes, and cross-kernel KRNLC traffic cannot flow. Local tests (1-11, 15a, 15b) pass on all 3 nodes because they do not require the network.",
+    "hypothesis": "Xen HVM E1000 emulation may require different IRQ setup sequence than upstream QEMU, or the CAmkES IRQ connector on XCP-ng does not receive the interrupt notifications. Needs investigation with a simpler polling-only test."
+  },
+  "passing_tests_on_all_nodes": [
+    "Test 1: NOOP x3",
+    "Test 2: CREATEGATE",
+    "Test 3: REVOKE",
+    "Test 4: REVOKE non-existent",
+    "Test 5: CREATE+REVOKE x3",
+    "Test 6: EXCHANGE delegate to VPE1",
+    "Test 7: cross-VPE REVOKE",
+    "Test 8: EXCHANGE+REVOKE x3 cycle",
+    "Test 9: Remote DTU ping (local routing)",
+    "Test 10: EXCHANGE obtain from VPE1",
+    "Test 11: chain revoke depth 10",
+    "Test 15a: revoke obtained cap (local)",
+    "Test 15b: spanning revoke (no remote children since sessions failed)"
+  ],
+  "note": "On 2-node QEMU (docker), all 16 tests PASS (verified in commit 74a53a0). The XCP-ng result differs only in the E1000 IRQ issue — protocol correctness is confirmed by QEMU."
+}

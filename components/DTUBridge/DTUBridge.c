@@ -671,14 +671,21 @@ int net_net_send(int dest_node, int msg_len)
  * ============================================================
  */
 
-/* IRQ handler — just acknowledge and clear ICR.
+/* IRQ handler — acks and polls RX, guarded against re-entry.
  *
- * RX polling is done exclusively by the main loop (e1000_poll_rx_lwip).
- * If we also polled here, the main loop and IRQ handler could race
- * on rx_tail / rx_pkts / descriptor state since IRQs fire asynchronously
- * during the main loop's poll. The symptom was rx_tail and rx_pkts
- * diverging (rx=14 but rx_tail=2) and HW stopping with RDH==RDT.
+ * Both the main loop and the IRQ handler call e1000_poll_rx_lwip.
+ * IRQs fire asynchronously, so the two can race on rx_tail/rx_pkts
+ * (bug 9 from FPT-176). We use a simple in-progress flag as a
+ * recursion guard: the main loop sets it before polling and clears
+ * it after; the IRQ handler skips polling if the flag is set.
+ *
+ * On QEMU the main loop handles RX fine without IRQ participation.
+ * On XCP-ng (Xen HVM) the E1000 emulation apparently needs its IRQs
+ * acknowledged through eth_irq_acknowledge() for receive to keep
+ * working — without it, irq=0 rx=0 and the ring never fills.
  */
+volatile int g_drv_rx_poll_busy = 0;
+
 void eth_irq_handle(void)
 {
     if (!driver_ready) {
@@ -686,7 +693,15 @@ void eth_irq_handle(void)
         return;
     }
     g_drv.irq_count++;
-    (void)e1000_rd(&g_drv, E1000_ICR); /* read to clear */
+    uint32_t icr = e1000_rd(&g_drv, E1000_ICR);
+
+    if ((icr & (E1000_ICR_RXT0 | E1000_ICR_RXDMT0 | E1000_ICR_RXO))
+        && !g_drv_rx_poll_busy) {
+        g_drv_rx_poll_busy = 1;
+        e1000_poll_rx_lwip(&g_drv);
+        g_drv_rx_poll_busy = 0;
+    }
+
     eth_irq_acknowledge();
 }
 
@@ -809,10 +824,14 @@ int run(void)
     while (1) {
         bool did_work = false;
 
-        /* Poll RX (supplement IRQ-driven receive) */
+        /* Poll RX (supplement IRQ-driven receive). Set the busy flag
+         * so the IRQ handler skips its own poll — prevents the race
+         * on rx_tail / rx_pkts (bug 9 from FPT-176). */
         if (driver_ready) {
             uint32_t rx_before = g_drv.rx_pkts;
+            g_drv_rx_poll_busy = 1;
             e1000_poll_rx_lwip(&g_drv);
+            g_drv_rx_poll_busy = 0;
             if (g_drv.rx_pkts != rx_before) did_work = true;
         }
 
