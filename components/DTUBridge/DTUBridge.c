@@ -253,6 +253,54 @@ static inline void e1000_wr(struct e1000_driver *drv, uint32_t reg, uint32_t val
     e1000_write_reg(drv->mmio, reg, val);
 }
 
+/* FPT-179 diagnostics: dump PCI configuration values that matter for IRQ/BAR
+ * routing under Xen HVM. Called once from post_init() after e1000_hw_init().
+ * The pre-mapped eth_mmio paddr (0xfeb80000 in .camkes) must match BAR0 or the
+ * driver talks to dead memory. The IRQ_LINE gives us the vector Xen assigned. */
+static void e1000_pci_debug_dump(void)
+{
+    uint32_t bar0  = pci_cfg_read32(e1000_pci_bus, e1000_pci_dev, e1000_pci_fun, 0x10);
+    uint32_t bar1  = pci_cfg_read32(e1000_pci_bus, e1000_pci_dev, e1000_pci_fun, 0x14);
+    uint32_t bar2  = pci_cfg_read32(e1000_pci_bus, e1000_pci_dev, e1000_pci_fun, 0x18);
+    uint16_t cmd   = pci_cfg_read16(e1000_pci_bus, e1000_pci_dev, e1000_pci_fun, 0x04);
+    uint16_t stat  = pci_cfg_read16(e1000_pci_bus, e1000_pci_dev, e1000_pci_fun, 0x06);
+    uint32_t intr  = pci_cfg_read32(e1000_pci_bus, e1000_pci_dev, e1000_pci_fun, 0x3C);
+    uint8_t  iline = (uint8_t)(intr & 0xFF);
+    uint8_t  ipin  = (uint8_t)((intr >> 8) & 0xFF);
+
+    printf("[%s] FPT-179 PCI DUMP: BAR0=0x%08x BAR1=0x%08x BAR2=0x%08x\n",
+           COMPONENT_NAME, bar0, bar1, bar2);
+    printf("[%s] FPT-179 PCI DUMP: CMD=0x%04x STATUS=0x%04x IntrLine=0x%02x IntrPin=0x%02x\n",
+           COMPONENT_NAME, cmd, stat, iline, ipin);
+    printf("[%s] FPT-179 PCI DUMP: pre-mapped eth_mmio paddr (.camkes) = 0xfeb80000\n",
+           COMPONENT_NAME);
+    printf("[%s] FPT-179 PCI DUMP: configured IRQ ioapic_pin=11 vector=11 (.camkes)\n",
+           COMPONENT_NAME);
+}
+
+static void e1000_reg_debug_dump(struct e1000_driver *drv, const char *tag)
+{
+    uint32_t ctrl   = e1000_rd(drv, E1000_CTRL);
+    uint32_t status = e1000_rd(drv, E1000_STATUS);
+    uint32_t ims    = e1000_rd(drv, E1000_IMS);
+    uint32_t icr    = e1000_rd(drv, E1000_ICR);  /* NB: read clears pending */
+    uint32_t rctl   = e1000_rd(drv, E1000_RCTL);
+    uint32_t tctl   = e1000_rd(drv, E1000_TCTL);
+    uint32_t rdh    = e1000_rd(drv, E1000_RDH);
+    uint32_t rdt    = e1000_rd(drv, E1000_RDT);
+    uint32_t rdbal  = e1000_rd(drv, E1000_RDBAL);
+    uint32_t rdbah  = e1000_rd(drv, E1000_RDBAH);
+    uint32_t tdh    = e1000_rd(drv, E1000_TDH);
+    uint32_t tdt    = e1000_rd(drv, E1000_TDT);
+
+    printf("[%s] FPT-179 REG[%s]: CTRL=0x%08x STATUS=0x%08x IMS=0x%08x ICR=0x%08x\n",
+           COMPONENT_NAME, tag, ctrl, status, ims, icr);
+    printf("[%s] FPT-179 REG[%s]: RCTL=0x%08x TCTL=0x%08x\n",
+           COMPONENT_NAME, tag, rctl, tctl);
+    printf("[%s] FPT-179 REG[%s]: RDH=%u RDT=%u RDBA=0x%08x%08x TDH=%u TDT=%u\n",
+           COMPONENT_NAME, tag, rdh, rdt, rdbah, rdbal, tdh, tdt);
+}
+
 static void e1000_read_mac(struct e1000_driver *drv)
 {
     uint32_t ral = e1000_rd(drv, E1000_RAL);
@@ -802,6 +850,10 @@ void post_init(void)
 
     driver_ready = true;
 
+    /* FPT-179: one-shot diagnostics after HW init. */
+    e1000_pci_debug_dump();
+    e1000_reg_debug_dump(&g_drv, "post_init");
+
     /* Initialize network ring buffers (07e).
      * DTUBridge inits both rings; kernel attaches later in kernel_start().
      * post_init runs before any run(), so kernel_start() sees initialized rings. */
@@ -906,6 +958,11 @@ int run(void)
                    g_drv.irq_count, g_drv.rx_pkts,
                    g_drv.tx_pkts, g_drv.rx_dropped,
                    hello_phase == HELLO_COMPLETE ? "YES" : "no");
+            /* FPT-179: periodic register dump — check if descriptor-ring state
+             * advances (RDH moves on RX). If RDH stays at 0 and ICR=0 both
+             * always, either IRQ path or MMIO mapping is broken. */
+            if (driver_ready)
+                e1000_reg_debug_dump(&g_drv, "periodic");
         }
 
         if (!did_work) seL4_Yield();
