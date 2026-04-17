@@ -81,9 +81,18 @@ struct __attribute__((packed)) vdtu_message {
 #define VDTU_DEFAULT_SLOT_COUNT 4
 #define VDTU_DEFAULT_SLOT_SIZE  VDTU_SYSC_MSG_SIZE
 
-/* Message header flags */
+/* Message header flags — low nibble is real flags, high nibble carries
+ * the destination kernel ID for outbound ring messages (FPT-179 Stage 4).
+ * Receivers MUST mask off the high nibble before testing REPLY/GRANT_CREDITS. */
 #define VDTU_FLAG_REPLY         (1 << 0)
 #define VDTU_FLAG_GRANT_CREDITS (1 << 1)
+#define VDTU_FLAG_MASK          0x0F
+#define VDTU_FLAG_DEST_SHIFT    4
+#define VDTU_FLAG_DEST_MASK     0xF0
+#define VDTU_FLAGS_WITH_DEST(flags, dest_kid) \
+    (((uint8_t)((flags) & VDTU_FLAG_MASK)) | \
+     (((uint8_t)((dest_kid) & 0x0F)) << VDTU_FLAG_DEST_SHIFT))
+#define VDTU_FLAGS_GET_DEST(flags) (((uint8_t)(flags) >> VDTU_FLAG_DEST_SHIFT) & 0x0F)
 
 /* Credits */
 #define VDTU_CREDITS_UNLIM      0xFFFF

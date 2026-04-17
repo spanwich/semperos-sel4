@@ -390,6 +390,13 @@ extern "C" {
                       uint16_t sender_vpe, uint8_t reply_ep,
                       uint64_t label, uint64_t replylabel, uint8_t flags,
                       const void *payload, uint16_t payload_len);
+    /* FPT-179 Stage 4: routed variant. dest_kernel_id is which remote kernel
+     * to forward this message to (DTUBridge picks the right peer). */
+    int net_ring_send_to(uint8_t dest_kernel_id,
+                         uint16_t sender_pe, uint8_t sender_ep,
+                         uint16_t sender_vpe, uint8_t reply_ep,
+                         uint64_t label, uint64_t replylabel, uint8_t flags,
+                         const void *payload, uint16_t payload_len);
 }
 
 void DTU::send_to(const VPEDesc &vpe, int ep, label_t label,
@@ -399,14 +406,19 @@ void DTU::send_to(const VPEDesc &vpe, int ep, label_t label,
 
     /* Route remote PEs via DTUBridge ring buffer → UDP */
     if (!is_local_pe(vpe.core)) {
-        KLOG(KRNLC, "Routing PE " << vpe.core << " to remote via ring (" << size << "B)");
+        /* Derive destination kernel ID from the global PE ID: PEs are
+         * allocated in NUM_LOCAL_PES-sized blocks per kernel. */
+        uint8_t dest_kid = (uint8_t)(vpe.core / NUM_LOCAL_PES);
+        KLOG(KRNLC, "Routing PE " << vpe.core << " (kid=" << (int)dest_kid
+                                  << ") to remote via ring (" << size << "B)");
 
-        int rc = net_ring_send(MY_PE, (uint8_t)ep,
-                               Platform::kernelId(), (uint8_t)replyep,
-                               label, replylbl, 0,
-                               msg, (uint16_t)size);
+        int rc = net_ring_send_to(dest_kid,
+                                  MY_PE, (uint8_t)ep,
+                                  Platform::kernelId(), (uint8_t)replyep,
+                                  label, replylbl, 0,
+                                  msg, (uint16_t)size);
         if (rc != 0) {
-            KLOG(ERR, "net_ring_send failed: " << rc);
+            KLOG(ERR, "net_ring_send_to failed: " << rc);
         }
         return;
     }

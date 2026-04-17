@@ -65,6 +65,12 @@ void sel4_yield_wrapper(void)
 #include <string.h>
 #include "vdtu_ring.h"
 
+/* Must match Platform.h's NUM_LOCAL_PES. PEs are allocated per kernel in
+ * contiguous blocks of this size; sender_kernel = sender_pe / NUM_LOCAL_PES. */
+#ifndef NUM_LOCAL_PES
+#define NUM_LOCAL_PES 4
+#endif
+
 static volatile int net_msg_pending = 0;
 static uint8_t net_msg_buf[2048];
 static uint16_t net_msg_len = 0;
@@ -268,18 +274,24 @@ void net_init_rings(void)
 
 /* C wrapper for DTU.cc to write to outbound ring.
  * Implements vDTU delivery guarantee: never returns failure to kernel.
- * In DISCONNECTED/RETRYING state, messages are cached and drained later. */
-int net_ring_send(uint16_t sender_pe, uint8_t sender_ep,
-                  uint16_t sender_vpe, uint8_t reply_ep,
-                  uint64_t label, uint64_t replylabel, uint8_t flags,
-                  const void *payload, uint16_t payload_len)
+ * In DISCONNECTED/RETRYING state, messages are cached and drained later.
+ *
+ * FPT-179 Stage 4: dest_kernel_id tells DTUBridge which peer to route the
+ * message to. Encoded in the high nibble of `flags` for wire compatibility. */
+int net_ring_send_to(uint8_t dest_kernel_id,
+                     uint16_t sender_pe, uint8_t sender_ep,
+                     uint16_t sender_vpe, uint8_t reply_ep,
+                     uint64_t label, uint64_t replylabel, uint8_t flags,
+                     const void *payload, uint16_t payload_len)
 {
     if (!net_rings_attached) return -1;
+
+    uint8_t encoded_flags = VDTU_FLAGS_WITH_DEST(flags, dest_kernel_id);
 
     if (g_net_state == NET_CONNECTED) {
         int rc = vdtu_ring_send(&g_net_out_ring,
                                 sender_pe, sender_ep, sender_vpe, reply_ep,
-                                label, replylabel, flags,
+                                label, replylabel, encoded_flags,
                                 payload, payload_len);
         if (rc == 0) return 0;
         /* Ring full — cache and retry later */
@@ -288,7 +300,19 @@ int net_ring_send(uint16_t sender_pe, uint8_t sender_ep,
 
     /* DISCONNECTED or RETRYING: cache the message */
     return net_cache_push(sender_pe, sender_ep, sender_vpe, reply_ep,
-                          label, replylabel, flags, payload, payload_len);
+                          label, replylabel, encoded_flags, payload, payload_len);
+}
+
+/* Backward-compat wrapper: default to peer 0 (for PING link probes). */
+int net_ring_send(uint16_t sender_pe, uint8_t sender_ep,
+                  uint16_t sender_vpe, uint8_t reply_ep,
+                  uint64_t label, uint64_t replylabel, uint8_t flags,
+                  const void *payload, uint16_t payload_len)
+{
+    /* dest_kernel_id=0xFF means "broadcast to peer 0" (link-layer fallback).
+     * DTUBridge interprets 0xFF as "use peer 0 / first peer". */
+    return net_ring_send_to(0xFF, sender_pe, sender_ep, sender_vpe, reply_ep,
+                            label, replylabel, flags, payload, payload_len);
 }
 
 /* Called from WorkLoop every iteration to handle network I/O */
@@ -335,14 +359,24 @@ void net_poll(void)
             net_link_connected();
         }
 
-        if (msg->hdr.label == NET_LABEL_PING && !net_pong_sent) {
-            /* Received PING -> send PONG back (through state machine) */
-            const char *pong = "PONG from kernel";
-            net_ring_send(0, 0, 0, 0,
-                          NET_LABEL_PONG, 0, 0,
-                          pong, (uint16_t)strlen(pong));
-            net_pong_sent = 1;
-            printf("[SemperKernel] NET: Sent PONG reply\n");
+        if (msg->hdr.label == NET_LABEL_PING) {
+            /* FPT-179 Stage 4: reply once per sender-kernel, not globally.
+             * Globally-once broke 3-node (only first peer ever saw PONG).
+             * Every-time floods the network. Per-sender is the right grain:
+             * each peer's PING stops once its PONG arrives. */
+            #define MAX_SRC_KID 8
+            static int pong_sent_to[MAX_SRC_KID];  /* indexed by src_kid */
+            uint8_t src_kid = (uint8_t)(msg->hdr.sender_core_id / NUM_LOCAL_PES);
+            if (src_kid < MAX_SRC_KID && !pong_sent_to[src_kid]) {
+                const char *pong = "PONG from kernel";
+                net_ring_send_to(src_kid, 0, 0, 0, 0,
+                                 NET_LABEL_PONG, 0, 0,
+                                 pong, (uint16_t)strlen(pong));
+                pong_sent_to[src_kid] = 1;
+                net_pong_sent = 1;
+                printf("[SemperKernel] NET: Sent PONG reply to kid=%u\n",
+                       (unsigned)src_kid);
+            }
         } else if (msg->hdr.label == NET_LABEL_PONG) {
             net_pong_received = 1;
             printf("[SemperKernel] NET: === PONG RECEIVED -- round trip complete! ===\n");

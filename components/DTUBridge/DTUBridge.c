@@ -228,7 +228,12 @@ static struct udp_pcb *g_hello_pcb;     /* Hello exchange on port 5000 */
 enum hello_state { HELLO_INIT = 0, HELLO_GOT_PEER = 1, HELLO_COMPLETE = 2 };
 static volatile enum hello_state peer_hello_phase[NUM_PEERS];
 static int peer_hello_grace[NUM_PEERS];  /* ACK rounds remaining per-peer */
-#define HELLO_GRACE_COUNT 10
+/* HELLO_GRACE_COUNT is the number of HELLO_ACK rounds we send after going
+ * COMPLETE. It was 10, but with 3+ nodes contending for NIC bandwidth that
+ * window is too narrow — all 10 ACKs could be dropped and the peer would
+ * never converge. Bumping to 100 (≈10s at the 100k-iter send cadence) plus
+ * grace-refresh-on-RX covers straggler peers. */
+#define HELLO_GRACE_COUNT 100
 
 /* Network ring buffers for kernel <-> DTUBridge transport (07e) */
 static struct vdtu_ring g_net_out_ring;  /* consumer: bridge reads kernel's outbound */
@@ -600,6 +605,11 @@ static void hello_udp_recv_cb(void *arg, struct udp_pcb *pcb,
             peer_hello_phase[peer] = HELLO_COMPLETE;
             peer_hello_grace[peer] = HELLO_GRACE_COUNT;
         }
+        /* Even if already COMPLETE, refresh grace — the peer is telling us it
+         * wants more HELLO_ACKs, presumably because its own transitions got
+         * lost. This is the key fix for 3+ node convergence. */
+        if (peer_hello_grace[peer] < HELLO_GRACE_COUNT)
+            peer_hello_grace[peer] = HELLO_GRACE_COUNT;
     } else {
         /* Received HELLO from peer i — at minimum, advance to GOT_PEER */
         if (peer_hello_phase[peer] < HELLO_GOT_PEER) {
@@ -610,6 +620,11 @@ static void hello_udp_recv_cb(void *arg, struct udp_pcb *pcb,
                    peer);
             peer_hello_phase[peer] = HELLO_GOT_PEER;
         }
+        /* If already COMPLETE, the peer is still sending HELLO — it likely
+         * didn't see our HELLO_ACK yet. Refresh grace so we keep ACKing. */
+        if (peer_hello_phase[peer] == HELLO_COMPLETE
+            && peer_hello_grace[peer] < HELLO_GRACE_COUNT)
+            peer_hello_grace[peer] = HELLO_GRACE_COUNT;
     }
 }
 
@@ -965,20 +980,30 @@ int run(void)
         }
 
         /* Poll outbound ring: kernel → network (07e)
-         * No gate here — the vDTU state machine in camkes_entry.c handles
-         * buffering pre-connection messages. DTUBridge is a dumb pipe:
-         * if there's a message in the ring, encrypt and send it.
-         * If ARP isn't resolved yet, lwIP buffers the packet internally. */
+         * FPT-179 Stage 4: route to the peer whose KERNEL_ID matches the
+         * dest_kid encoded in the flags high-nibble by the kernel. If the
+         * dest doesn't match any known peer (e.g. 0xF sentinel for pre-link
+         * PING probes), fall back to peer 0. Encrypt outmsg directly — the
+         * dest-kid bits ride along in flags on the wire; receivers only
+         * test bits 0-1 and ignore higher bits. */
         if (net_rings_ready && !vdtu_ring_is_empty(&g_net_out_ring)) {
             const struct vdtu_message *outmsg = vdtu_ring_fetch(&g_net_out_ring);
             if (outmsg) {
                 uint16_t plaintext_len = VDTU_HEADER_SIZE + outmsg->hdr.length;
 
-                /* CryptoTransport: encrypt before sending.
-                 * Route to peer_addrs[0] (first peer). peer_kernel_id[0]
-                 * maps to that peer's KERNEL_ID for PSK selection. */
-                uint8_t ct_buf[700];
-                int ct_len = ct_encrypt(peer_kernel_id[0],
+                /* Decode dest kernel id, then look up which peer slot owns it. */
+                uint8_t dest_kid = VDTU_FLAGS_GET_DEST(outmsg->hdr.flags);
+                int peer_idx = 0;  /* default fallback */
+                for (int pi = 0; pi < NUM_PEERS; pi++) {
+                    if (peer_kernel_id[pi] == dest_kid) {
+                        peer_idx = pi;
+                        break;
+                    }
+                }
+
+                /* ct_buf sized for KRNLC max (2048) + VDTU_HEADER_SIZE + CT_OVERHEAD. */
+                uint8_t ct_buf[2200];
+                int ct_len = ct_encrypt(peer_kernel_id[peer_idx],
                                         (const uint8_t *)outmsg, plaintext_len,
                                         ct_buf, sizeof(ct_buf));
                 if (ct_len > 0) {
@@ -986,16 +1011,17 @@ int run(void)
                     if (p) {
                         memcpy(p->payload, ct_buf, ct_len);
                         ip_addr_t dest_ip;
-                        ip_addr_copy_from_ip4(dest_ip, peer_addrs[0]);
+                        ip_addr_copy_from_ip4(dest_ip, peer_addrs[peer_idx]);
                         err_t err = udp_sendto(g_udp_pcb, p, &dest_ip, DTU_UDP_PORT);
                         pbuf_free(p);
-                        printf("[%s] NET TX: %u->%d bytes to peer 0 (label=0x%lx, err=%d)\n",
+                        printf("[%s] NET TX: %u->%d bytes to peer %d (kid=%u, label=0x%lx, err=%d)\n",
                                COMPONENT_NAME, plaintext_len, ct_len,
+                               peer_idx, (unsigned)dest_kid,
                                (unsigned long)outmsg->hdr.label, err);
                     }
                 } else {
-                    printf("[%s] NET TX: encrypt failed for %u bytes\n",
-                           COMPONENT_NAME, plaintext_len);
+                    printf("[%s] NET TX: encrypt failed for %u bytes (pt_len=%u ct_max=%zu)\n",
+                           COMPONENT_NAME, plaintext_len, plaintext_len, sizeof(ct_buf));
                 }
                 vdtu_ring_ack(&g_net_out_ring);
                 did_work = true;

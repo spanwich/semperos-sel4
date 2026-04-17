@@ -229,24 +229,26 @@ extern "C" void kernel_start(void) {
     printf("[SemperKernel] PEManager created\n");
 
 #ifdef SEMPER_MULTI_NODE
-    /* FPT-175: Register peer kernel for 2-node spanning protocol.
-     * Each kernel statically knows the other's PE range and registers
-     * a KPE handle so Kernelcalls can route messages to it. */
+    /* FPT-175 / FPT-179 Stage 4: Register ALL peer kernels for spanning
+     * protocol (N-node, not just 2). Each kernel statically knows every
+     * other kernel's PE range and registers MHT + KPE entries so that
+     * Kernelcalls can route messages to any of them. NUM_KERNELS is
+     * NUM_PEERS + 1 (kernels are peers of each other plus self). */
     {
         size_t my_kid = Platform::kernelId();
-        size_t my_base = Platform::pe_base();
+        (void)Platform::pe_base();  /* referenced by macros below */
 
-        /* For a 2-node topology: node 0 peers with node 1, node 1 peers with node 0.
-         * Generalize later for 3+ nodes. */
-        size_t peer_kid = (my_kid == 0) ? 1 : 0;
-        size_t peer_base = peer_kid * NUM_LOCAL_PES;
+        /* 3-node XCP-ng topology. See DTUBridge NUM_PEERS. */
+        const size_t NUM_KERNELS = 3;
 
-        /* Update MHT: mark peer's PE range as belonging to peer kernel.
-         * Cannot use updateMembership(start, krnl, ...) because it calls
-         * Platform::pe_by_core() which only knows local PEs. Instead,
-         * construct PEDesc array with peer's global PE IDs and use the
-         * array overload directly. */
-        {
+        for (size_t peer_kid = 0; peer_kid < NUM_KERNELS; peer_kid++) {
+            if (peer_kid == my_kid) continue;
+            size_t peer_base = peer_kid * NUM_LOCAL_PES;
+
+            /* Update MHT: mark peer's PE range as belonging to peer kernel.
+             * Cannot use updateMembership(start, krnl, ...) because it calls
+             * Platform::pe_by_core() which only knows local PEs. Instead,
+             * construct PEDesc array with peer's global PE IDs. */
             m3::PEDesc peer_pes[NUM_LOCAL_PES];
             for (int i = 0; i < NUM_LOCAL_PES; i++) {
                 peer_pes[i] = m3::PEDesc(
@@ -259,20 +261,20 @@ extern "C" void kernel_start(void) {
                 static_cast<membership_entry::pe_id_t>(peer_base),
                 MembershipFlags::NONE,
                 false /* don't broadcast — static config */);
-        }
-        printf("[SemperKernel] MHT: registered peer kernel %zu (PEs %zu-%zu)\n",
-               peer_kid, peer_base, peer_base + NUM_LOCAL_PES - 1);
-        MHTInstance::getInstance().printMembership();
+            printf("[SemperKernel] MHT: registered peer kernel %zu (PEs %zu-%zu)\n",
+                   peer_kid, peer_base, peer_base + NUM_LOCAL_PES - 1);
 
-        /* Register KPE for peer kernel so Coordinator::getKPE() succeeds */
-        Coordinator::get().addKPE(
-            m3::String("kernel"),
-            peer_kid,
-            peer_base, /* peer's kernel core (global PE) */
-            DTU::KRNLC_EP,
-            DTU::KRNLC_EP);
-        printf("[SemperKernel] Registered KPE for peer kernel %zu (core %zu)\n",
-               peer_kid, peer_base);
+            /* Register KPE for peer kernel so Coordinator::getKPE() succeeds */
+            Coordinator::get().addKPE(
+                m3::String("kernel"),
+                peer_kid,
+                peer_base, /* peer's kernel core (global PE) */
+                DTU::KRNLC_EP,
+                DTU::KRNLC_EP);
+            printf("[SemperKernel] Registered KPE for peer kernel %zu (core %zu)\n",
+                   peer_kid, peer_base);
+        }
+        MHTInstance::getInstance().printMembership();
     }
 #endif
 
