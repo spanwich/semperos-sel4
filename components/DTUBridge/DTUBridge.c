@@ -471,6 +471,61 @@ static int e1000_tx(struct e1000_driver *drv, const void *data, uint16_t len)
  * ============================================================
  */
 
+/* FPT-179 Stage 4 fix-8: Pre-populate peers' ARP caches via directed
+ * gratuitous ARP REPLY. Each node broadcasts an ARP REPLY with
+ * spa=self_ip, sha=self_mac, tpa=peer_ip. The receiver's lwIP sees
+ * dipaddr==own_ip → for_us=TRUE → TRY_HARD flag → unconditionally adds
+ * the (spa, sha) mapping to the cache. No resolution query needed.
+ *
+ * This kills the ARP storm (previously 13000+ arp_reqs/node with <0.2%
+ * delivery through Xen's virtual-switch/tap bottleneck).
+ *
+ * Root cause evidence (Xen host tap stats):
+ *   tap148.0 TX dropped=93295  (node 0)
+ *   tap149.0 TX dropped=98487  (node 2)
+ *   tap150.0 TX dropped=94858  (node 1)
+ * Only ~170 packets per tap actually reach qemu-dm in 3 minutes. */
+static void send_directed_garp(int peer_idx)
+{
+    uint8_t frame[42];
+    /* Ethernet header */
+    memset(frame, 0xff, 6);                 /* L2 dst = broadcast */
+    memcpy(frame + 6, g_drv.mac_addr, 6);   /* L2 src = our MAC */
+    frame[12] = 0x08; frame[13] = 0x06;     /* EtherType = ARP */
+    /* ARP body */
+    frame[14] = 0x00; frame[15] = 0x01;     /* htype = Ethernet */
+    frame[16] = 0x08; frame[17] = 0x00;     /* ptype = IPv4 */
+    frame[18] = 0x06;                        /* hlen = 6 */
+    frame[19] = 0x04;                        /* plen = 4 */
+    frame[20] = 0x00; frame[21] = 0x02;     /* op = REPLY */
+    memcpy(frame + 22, g_drv.mac_addr, 6);  /* sha = our MAC */
+    uint32_t ours = ip4_addr_get_u32(&self_ip_addr);
+    memcpy(frame + 28, &ours, 4);           /* spa = our IP */
+    memset(frame + 32, 0xff, 6);            /* tha = broadcast (unknown) */
+    uint32_t them = ip4_addr_get_u32(&peer_addrs[peer_idx]);
+    memcpy(frame + 38, &them, 4);           /* tpa = peer IP */
+    e1000_tx(&g_drv, frame, 42);
+}
+
+static void send_directed_garp_all(void)
+{
+    for (int i = 0; i < NUM_PEERS; i++)
+        send_directed_garp(i);
+}
+
+/* FPT-179 Stage 4 fix-7: L2 TX/RX packet counters by type, for
+ * diagnosing the 3-node HELLO convergence failure. */
+static uint32_t g_tx_arp_req = 0;
+static uint32_t g_tx_arp_rep = 0;
+static uint32_t g_tx_ip_unicast = 0;
+static uint32_t g_tx_ip_mcast = 0;
+static uint32_t g_rx_arp_req = 0;
+static uint32_t g_rx_arp_rep = 0;
+static uint32_t g_rx_ip_to_us = 0;
+static uint32_t g_rx_ip_not_us = 0;
+static uint32_t g_rx_bcast = 0;
+static uint32_t g_rx_other = 0;
+
 /* lwIP netif linkoutput: called when lwIP wants to send an Ethernet frame */
 static err_t e1000_linkoutput(struct netif *netif, struct pbuf *p)
 {
@@ -480,6 +535,43 @@ static err_t e1000_linkoutput(struct netif *netif, struct pbuf *p)
     /* Linearize if chained */
     uint8_t frame_buf[FRAME_MTU];
     pbuf_copy_partial(p, frame_buf, p->tot_len, 0);
+
+    /* Classify and log first N L2 TX frames for diagnostics. */
+    if (p->tot_len >= 14) {
+        uint16_t eth_type = ((uint16_t)frame_buf[12] << 8) | frame_buf[13];
+        int is_bcast = (frame_buf[0] == 0xff && frame_buf[1] == 0xff);
+        if (eth_type == 0x0806 && p->tot_len >= 28+14) {  /* ARP */
+            uint16_t op = ((uint16_t)frame_buf[14+6] << 8) | frame_buf[14+7];
+            if (op == 1) g_tx_arp_req++;
+            else if (op == 2) g_tx_arp_rep++;
+        } else if (eth_type == 0x0800) {
+            if (is_bcast) g_tx_ip_mcast++;
+            else g_tx_ip_unicast++;
+        }
+        static int tx_log_count = 0;
+        if (tx_log_count < 12) {
+            printf("[%s] L2 TX #%d: dst=%02x:%02x:%02x:%02x:%02x:%02x type=0x%04x len=%u\n",
+                   COMPONENT_NAME, tx_log_count,
+                   frame_buf[0], frame_buf[1], frame_buf[2],
+                   frame_buf[3], frame_buf[4], frame_buf[5],
+                   eth_type, p->tot_len);
+            if (eth_type == 0x0806 && p->tot_len >= 42) {
+                /* ARP body offsets: op at 6, sha at 8, spa at 14, tha at 18, tpa at 24 */
+                const uint8_t *arp = frame_buf + 14;
+                printf("[%s] L2 TX #%d ARP op=%u spa=%u.%u.%u.%u tpa=%u.%u.%u.%u\n",
+                       COMPONENT_NAME, tx_log_count,
+                       ((uint16_t)arp[6]<<8)|arp[7],
+                       arp[14], arp[15], arp[16], arp[17],
+                       arp[24], arp[25], arp[26], arp[27]);
+            } else if (eth_type == 0x0800 && p->tot_len >= 14+20) {
+                const uint8_t *ip = frame_buf + 14;
+                printf("[%s] L2 TX #%d IP dst=%u.%u.%u.%u proto=%u\n",
+                       COMPONENT_NAME, tx_log_count,
+                       ip[16], ip[17], ip[18], ip[19], ip[9]);
+            }
+            tx_log_count++;
+        }
+    }
 
     int rc = e1000_tx(&g_drv, frame_buf, (uint16_t)p->tot_len);
     return (rc == 0) ? ERR_OK : ERR_IF;
@@ -513,6 +605,72 @@ static void e1000_poll_rx_lwip(struct e1000_driver *drv)
         if (!desc->errors && (desc->status & E1000_RXD_STAT_EOP)) {
             uint16_t len = desc->length;
             if (len >= 14 && len <= FRAME_MTU) {
+                /* FPT-179 Stage 4 fix-7: classify/log L2 RX frames. */
+                const uint8_t *frame = drv->rx_bufs[idx];
+                uint16_t eth_type = ((uint16_t)frame[12] << 8) | frame[13];
+                int is_bcast = (frame[0] == 0xff && frame[1] == 0xff);
+                int is_to_us = (memcmp(frame, drv->mac_addr, 6) == 0);
+                if (eth_type == 0x0806 && len >= 42) {
+                    uint16_t op = ((uint16_t)frame[14+6] << 8) | frame[14+7];
+                    if (op == 1) g_rx_arp_req++;
+                    else if (op == 2) g_rx_arp_rep++;
+                    /* FPT-179 Stage 4 fix-9: passive MAC learning from ANY
+                     * incoming ARP frame. lwIP's etharp_input only caches
+                     * for_us frames; we learn from all. Static entries
+                     * never age out, so once learned, HELLOs flow forever. */
+                    const uint8_t *arp = frame + 14;
+                    ip4_addr_t spa_addr;
+                    IP4_ADDR(&spa_addr, arp[14], arp[15], arp[16], arp[17]);
+                    for (int pi = 0; pi < NUM_PEERS; pi++) {
+                        if (ip4_addr_cmp(&spa_addr, &peer_addrs[pi])) {
+                            struct eth_addr sha;
+                            memcpy(&sha, arp + 8, 6);
+                            err_t rc = etharp_add_static_entry(&spa_addr, &sha);
+                            static int learned_log = 0;
+                            if (learned_log < 6) {
+                                printf("[%s] ARP LEARN: %u.%u.%u.%u -> %02x:%02x:%02x:%02x:%02x:%02x (rc=%d)\n",
+                                       COMPONENT_NAME,
+                                       arp[14], arp[15], arp[16], arp[17],
+                                       arp[8], arp[9], arp[10], arp[11], arp[12], arp[13],
+                                       rc);
+                                learned_log++;
+                            }
+                            break;
+                        }
+                    }
+                } else if (eth_type == 0x0800 && len >= 14+20) {
+                    const uint8_t *ip = frame + 14;
+                    ip4_addr_t dst; IP4_ADDR(&dst, ip[16], ip[17], ip[18], ip[19]);
+                    if (ip4_addr_cmp(&dst, &self_ip_addr)) g_rx_ip_to_us++;
+                    else if (is_bcast) g_rx_bcast++;
+                    else g_rx_ip_not_us++;
+                } else {
+                    g_rx_other++;
+                }
+                static int rx_log_count = 0;
+                if (rx_log_count < 15) {
+                    printf("[%s] L2 RX #%d: dst=%02x:%02x:%02x:%02x:%02x:%02x src=%02x:%02x:%02x:%02x:%02x:%02x type=0x%04x len=%u to_us=%d\n",
+                           COMPONENT_NAME, rx_log_count,
+                           frame[0], frame[1], frame[2], frame[3], frame[4], frame[5],
+                           frame[6], frame[7], frame[8], frame[9], frame[10], frame[11],
+                           eth_type, len, is_to_us);
+                    if (eth_type == 0x0806 && len >= 42) {
+                        const uint8_t *arp = frame + 14;
+                        printf("[%s] L2 RX #%d ARP op=%u spa=%u.%u.%u.%u tpa=%u.%u.%u.%u sha=%02x:%02x:%02x:%02x:%02x:%02x\n",
+                               COMPONENT_NAME, rx_log_count,
+                               ((uint16_t)arp[6]<<8)|arp[7],
+                               arp[14], arp[15], arp[16], arp[17],
+                               arp[24], arp[25], arp[26], arp[27],
+                               arp[8], arp[9], arp[10], arp[11], arp[12], arp[13]);
+                    } else if (eth_type == 0x0800 && len >= 14+20) {
+                        const uint8_t *ip = frame + 14;
+                        printf("[%s] L2 RX #%d IP src=%u.%u.%u.%u dst=%u.%u.%u.%u proto=%u\n",
+                               COMPONENT_NAME, rx_log_count,
+                               ip[12], ip[13], ip[14], ip[15],
+                               ip[16], ip[17], ip[18], ip[19], ip[9]);
+                    }
+                    rx_log_count++;
+                }
                 /* Create pbuf and pass to lwIP */
                 struct pbuf *p = pbuf_alloc(PBUF_RAW, len, PBUF_RAM);
                 if (p) {
@@ -948,6 +1106,18 @@ void post_init(void)
 
     driver_ready = true;
 
+    /* FPT-179 Stage 4 fix-9: announce ourselves and also learn peers.
+     * 20 rounds at init (40 frames) maximises the chance at least one
+     * gets through the lossy tap path. In combination with passive MAC
+     * learning in e1000_poll_rx_lwip (calls etharp_add_static_entry on
+     * any peer's ARP frame), this bootstraps peer caches from very few
+     * successful packet deliveries. */
+    for (int r = 0; r < 20; r++) {
+        send_directed_garp_all();
+    }
+    printf("[%s] Sent %d directed gratuitous ARP rounds to %d peers at init\n",
+           COMPONENT_NAME, 20, NUM_PEERS);
+
     /* FPT-179: one-shot diagnostics after HW init. */
     e1000_pci_debug_dump();
     e1000_reg_debug_dump(&g_drv, "post_init");
@@ -987,6 +1157,18 @@ int run(void)
 
         /* Pump lwIP timers (ARP, etc.) */
         sys_check_timeouts();
+
+        /* FPT-179 Stage 4 fix-9: aggressive gratuitous ARP while not
+         * converged. Every 100K iters until all peers COMPLETE, plus
+         * periodic steady-state (every 1M) after. */
+        if (driver_ready) {
+            bool converged = all_peers_complete();
+            if (!converged && (loop_count % 100000) == 75000) {
+                send_directed_garp_all();
+            } else if (converged && (loop_count % 1000000) == 750000) {
+                send_directed_garp_all();
+            }
+        }
 
         /* Per-peer mutual HELLO exchange (FPT-179 Stage 3).
          * send_hello() iterates peers and emits HELLO/HELLO_ACK per-peer,
@@ -1068,6 +1250,12 @@ int run(void)
                    g_drv.tx_pkts, g_drv.rx_dropped,
                    all_peers_complete() ? "YES" : "no",
                    (int)peer_hello_phase[0], (int)peer_hello_phase[1]);
+            /* FPT-179 Stage 4 fix-7: L2/L3 packet class counters. */
+            printf("[%s] L2/3: TX[arp_req=%u arp_rep=%u ip_uc=%u ip_mc=%u] RX[arp_req=%u arp_rep=%u ip_to_us=%u ip_not_us=%u bcast=%u other=%u]\n",
+                   COMPONENT_NAME,
+                   g_tx_arp_req, g_tx_arp_rep, g_tx_ip_unicast, g_tx_ip_mcast,
+                   g_rx_arp_req, g_rx_arp_rep, g_rx_ip_to_us, g_rx_ip_not_us,
+                   g_rx_bcast, g_rx_other);
             /* FPT-179: periodic register dump — check if descriptor-ring state
              * advances (RDH moves on RX). If RDH stays at 0 and ICR=0 both
              * always, either IRQ path or MMIO mapping is broken. */
