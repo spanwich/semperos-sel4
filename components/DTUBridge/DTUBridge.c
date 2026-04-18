@@ -45,8 +45,12 @@
 /* DTU transport UDP port */
 #define DTU_UDP_PORT   7654
 
-/* Hello exchange UDP port */
-#define HELLO_UDP_PORT 5000
+/* Hello exchange UDP port. Was 5000, but port-5000 packets appeared to be
+ * dropped for reasons outside our code (tested across all 3 pairs; only
+ * .10→.12 reached the destination callback at port 5000 in Stage 4 fix-5
+ * diagnostics, even though port-7654 packets between the same IPs worked
+ * fine). Switching to 7655 to test if port 5000 is filtered. */
+#define HELLO_UDP_PORT 7655
 
 /*
  * Network identity — compile-time constants from cmake.
@@ -587,6 +591,21 @@ static void hello_udp_recv_cb(void *arg, struct udp_pcb *pcb,
     pbuf_free(p);
 
     int peer = peer_index_of(addr);
+    /* Log every HELLO-port arrival at least once so we can prove the
+     * packet reached lwIP → our callback. FPT-179 Stage 4 fix-5. */
+    {
+        static int hello_rx_logged = 0;
+        if (hello_rx_logged < 6) {
+            printf("[%s] HELLO RAW RX from %d.%d.%d.%d (peer_idx=%d, msg[0]=%c%c%c%c%c)\n",
+                   COMPONENT_NAME,
+                   ip4_addr1(ip_2_ip4(addr)), ip4_addr2(ip_2_ip4(addr)),
+                   ip4_addr3(ip_2_ip4(addr)), ip4_addr4(ip_2_ip4(addr)),
+                   peer,
+                   len>0?msg[0]:'?', len>1?msg[1]:'?', len>2?msg[2]:'?',
+                   len>3?msg[3]:'?', len>4?msg[4]:'?');
+            hello_rx_logged++;
+        }
+    }
     if (peer < 0) {
         /* Unknown source IP — ignore. */
         return;
@@ -633,6 +652,7 @@ static void hello_udp_recv_cb(void *arg, struct udp_pcb *pcb,
  * COMPLETE with grace=0 are skipped. */
 static void send_hello(void)
 {
+    static uint32_t send_count[NUM_PEERS] = {0};  /* per-peer send counter */
     for (int i = 0; i < NUM_PEERS; i++) {
         enum hello_state st = peer_hello_phase[i];
         if (st == HELLO_COMPLETE && peer_hello_grace[i] <= 0)
@@ -650,8 +670,19 @@ static void send_hello(void)
         ip_addr_t dest;
         ip_addr_copy_from_ip4(dest, peer_addrs[i]);
 
-        udp_sendto(g_hello_pcb, p, &dest, HELLO_UDP_PORT);
+        err_t err = udp_sendto(g_hello_pcb, p, &dest, HELLO_UDP_PORT);
         pbuf_free(p);
+
+        /* Log first 3 sends per peer and then every 200th, so we can tell
+         * what's being sent without flooding the log. */
+        send_count[i]++;
+        if (send_count[i] <= 3 || (send_count[i] % 200) == 0) {
+            printf("[%s] HELLO TX #%u to peer %d (%d.%d.%d.%d) %s err=%d state=%d grace=%d\n",
+                   COMPONENT_NAME, send_count[i], i,
+                   ip4_addr1(&peer_addrs[i]), ip4_addr2(&peer_addrs[i]),
+                   ip4_addr3(&peer_addrs[i]), ip4_addr4(&peer_addrs[i]),
+                   prefix, err, (int)st, peer_hello_grace[i]);
+        }
 
         if (st == HELLO_COMPLETE && peer_hello_grace[i] > 0)
             peer_hello_grace[i]--;

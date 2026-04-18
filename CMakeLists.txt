@@ -131,6 +131,7 @@ DeclareCAmkESComponent(SemperKernel
         ${SK_INCLUDE}
         ${SK_KERNEL}
     C_FLAGS
+        -DKERNEL_ID=${KERNEL_ID}
         ${SEMPEROS_NO_NET_FLAG}
         ${SEMPER_MULTI_NODE_FLAG}
     CXX_FLAGS

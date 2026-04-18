@@ -326,11 +326,17 @@ void net_poll(void)
      * PING is a link probe — it's OK if it fails before hello completes.
      * When the PONG comes back on the inbound ring, the state machine
      * transitions to CONNECTED and drains the SPSC cache.
-     * Retry PING periodically until PONG received. */
+     * Retry PING periodically until PONG received.
+     *
+     * FPT-179 Stage 4 fix-4: sender_pe MUST be this kernel's global PE
+     * ID (KERNEL_ID * NUM_LOCAL_PES), NOT 0. The PONG responder derives
+     * src_kid from sender_core_id/NUM_LOCAL_PES — if sender_pe=0, every
+     * PING looks like it came from kid=0 and PONGs get misrouted. */
     if (!net_pong_received && (net_poll_count % 500000) == 100000) {
         const char *payload = "PING from kernel";
+        uint16_t my_pe = (uint16_t)(KERNEL_ID * NUM_LOCAL_PES);
         int rc = vdtu_ring_send(&g_net_out_ring,
-                                0, 0, 0, 0,
+                                my_pe, 0, 0, 0,
                                 NET_LABEL_PING, 0, 0,
                                 payload, (uint16_t)strlen(payload));
         if (rc == 0 && !net_ping_sent) {
@@ -367,15 +373,22 @@ void net_poll(void)
             #define MAX_SRC_KID 8
             static int pong_sent_to[MAX_SRC_KID];  /* indexed by src_kid */
             uint8_t src_kid = (uint8_t)(msg->hdr.sender_core_id / NUM_LOCAL_PES);
-            if (src_kid < MAX_SRC_KID && !pong_sent_to[src_kid]) {
+            uint16_t my_pe = (uint16_t)(KERNEL_ID * NUM_LOCAL_PES);
+            printf("[SemperKernel] NET: PING RX from global_pe=%u → src_kid=%u (my kid=%u)\n",
+                   (unsigned)msg->hdr.sender_core_id, (unsigned)src_kid,
+                   (unsigned)KERNEL_ID);
+            if (src_kid < MAX_SRC_KID && src_kid != KERNEL_ID
+                && !pong_sent_to[src_kid]) {
                 const char *pong = "PONG from kernel";
-                net_ring_send_to(src_kid, 0, 0, 0, 0,
+                /* sender_pe MUST be our global PE ID so the PONG receiver
+                 * correctly identifies us as the source (symmetric fix). */
+                net_ring_send_to(src_kid, my_pe, 0, 0, 0,
                                  NET_LABEL_PONG, 0, 0,
                                  pong, (uint16_t)strlen(pong));
                 pong_sent_to[src_kid] = 1;
                 net_pong_sent = 1;
-                printf("[SemperKernel] NET: Sent PONG reply to kid=%u\n",
-                       (unsigned)src_kid);
+                printf("[SemperKernel] NET: Sent PONG reply to kid=%u (my kid=%u)\n",
+                       (unsigned)src_kid, (unsigned)KERNEL_ID);
             }
         } else if (msg->hdr.label == NET_LABEL_PONG) {
             net_pong_received = 1;
