@@ -232,6 +232,25 @@ static struct udp_pcb *g_hello_pcb;     /* Hello exchange on port 5000 */
 enum hello_state { HELLO_INIT = 0, HELLO_GOT_PEER = 1, HELLO_COMPLETE = 2 };
 static volatile enum hello_state peer_hello_phase[NUM_PEERS];
 static int peer_hello_grace[NUM_PEERS];  /* ACK rounds remaining per-peer */
+
+/* FPT-179: session epoch for peer-reboot detection.
+ *
+ * The "zombie handshake" bug: once peer_hello_phase[peer] reaches
+ * HELLO_COMPLETE, there is no backward transition. Combined with
+ * CryptoTransport's monotonic rx_seq_max (never reset after boot), an
+ * unchanged VM holds stale state for a peer that reboots: the peer's new
+ * tx_seq=1 packets are rejected as replay for N attempts, while HELLO is
+ * never re-entered. Swap test (FPT-179 comment 10500) confirmed this
+ * manifests as apparent L2 isolation on the unchanged VM.
+ *
+ * Fix: every HELLO/HELLO_ACK carries a 32-bit epoch chosen once at
+ * DTUBridge init (rdtsc-seeded, unique per boot). On receiving a HELLO
+ * with an epoch different from the last-seen epoch for that peer, we
+ * treat it as a peer reboot: reset HELLO phase to INIT, clear CT replay
+ * window for that peer, refresh peer_kernel_id from the HELLO payload. */
+static uint32_t g_my_epoch = 0;                  /* our epoch — set once at init */
+static uint32_t peer_epoch[NUM_PEERS];           /* peers' last-seen epochs (0 = unknown) */
+static uint32_t g_peer_reboots_detected = 0;    /* diagnostic */
 /* HELLO_GRACE_COUNT is the number of HELLO_ACK rounds we send after going
  * COMPLETE. It was 10, but with 3+ nodes contending for NIC bandwidth that
  * window is too narrow — all 10 ACKs could be dropped and the peer would
@@ -526,6 +545,47 @@ static uint32_t g_rx_ip_not_us = 0;
 static uint32_t g_rx_bcast = 0;
 static uint32_t g_rx_other = 0;
 
+/* FPT-179 Stage-5: RX-path stage counters + per-peer attribution. One
+ * counter per hop lets us locate exactly where inbound traffic disappears
+ * (nic -> ipu -> udpc -> ctok -> ring). Per-peer attribution discriminates
+ * routing bugs (H1) from crypto/filter drops. */
+static uint32_t g_rx_nic_raw     = 0;  /* raw NIC RX, EOP+no err, post-length-check */
+static uint32_t g_rx_udp_cb      = 0;  /* dtu_udp_recv_cb entries (port 7654) */
+static uint32_t g_rx_udp_trunc   = 0;  /* UDP payload > ct_buf[600], silently clipped */
+static uint32_t g_rx_ct_ok       = 0;  /* ct_decrypt returned >= 0 */
+static uint32_t g_rx_ring_send   = 0;  /* vdtu_ring_send(net_in) returned 0 */
+static uint32_t g_rx_ring_full   = 0;  /* vdtu_ring_send(net_in) returned != 0 */
+static uint32_t g_rx_from_peer[NUM_PEERS] = {0};
+static uint32_t g_tx_to_peer[NUM_PEERS]   = {0};
+
+/* FPT-179 guest-starvation diagnostics. If XCP-ng drops packets at the tap
+ * because our driver fails to refill the E1000 RX ring fast enough, these
+ * counters will show it: rx_poll_empty should dominate in a healthy system
+ * (ring is usually empty); rx_mpc_total growing means the HW signaled a
+ * missed-packet (no descriptor available). Peak batch close to RX ring size
+ * means we just caught the ring near full — at risk of overrun next time. */
+static uint32_t g_rx_poll_count     = 0;  /* invocations of e1000_poll_rx_lwip */
+static uint32_t g_rx_poll_descs     = 0;  /* total descriptors drained */
+static uint32_t g_rx_poll_empty     = 0;  /* polls that saw ring empty at entry */
+static uint32_t g_rx_poll_max_batch = 0;  /* peak descriptors drained in one call */
+static uint32_t g_rx_mpc_total      = 0;  /* cumulative E1000 MPC (HW missed-packet) */
+/* Loop-rate proxy: rdtsc delta between status prints. Combined with the
+ * 2100 MHz XCP-ng TSC constant this gives us rough loops-per-second,
+ * exposing whether the VM is CPU-starved at the seL4 vCPU level. */
+static uint64_t g_last_status_tsc   = 0;
+
+/* FPT-179 driver → lwIP handoff diagnostics. Checks whether every
+ * descriptor drained from the E1000 RX ring actually makes it into
+ * lwIP's input path. Invariant: g_rx_poll_descs == g_rx_eth_input_ok
+ *                               + g_rx_eth_input_fail
+ *                               + g_rx_pbuf_alloc_fail
+ *                               + (frames with desc->errors or !EOP or bad len)
+ * The last bucket is silently accounted; we're splitting out the three
+ * paths where a valid frame is dropped AFTER reaching the ring. */
+static uint32_t g_rx_eth_input_called = 0;  /* calls to g_netif.input */
+static uint32_t g_rx_eth_input_fail   = 0;  /* g_netif.input returned != ERR_OK */
+static uint32_t g_rx_pbuf_alloc_fail  = 0;  /* pbuf_alloc(PBUF_RAW, PBUF_RAM) -> NULL */
+
 /* lwIP netif linkoutput: called when lwIP wants to send an Ethernet frame */
 static err_t e1000_linkoutput(struct netif *netif, struct pbuf *p)
 {
@@ -596,15 +656,19 @@ static err_t e1000_netif_init(struct netif *netif)
  */
 static void e1000_poll_rx_lwip(struct e1000_driver *drv)
 {
+    uint32_t batch = 0;
+    g_rx_poll_count++;
     while (1) {
         uint32_t idx = drv->rx_tail;
         struct e1000_rx_desc *desc = &drv->rx_ring[idx];
 
         if (!(desc->status & E1000_RXD_STAT_DD)) break;
+        batch++;
 
         if (!desc->errors && (desc->status & E1000_RXD_STAT_EOP)) {
             uint16_t len = desc->length;
             if (len >= 14 && len <= FRAME_MTU) {
+                g_rx_nic_raw++;
                 /* FPT-179 Stage 4 fix-7: classify/log L2 RX frames. */
                 const uint8_t *frame = drv->rx_bufs[idx];
                 uint16_t eth_type = ((uint16_t)frame[12] << 8) | frame[13];
@@ -641,7 +705,17 @@ static void e1000_poll_rx_lwip(struct e1000_driver *drv)
                 } else if (eth_type == 0x0800 && len >= 14+20) {
                     const uint8_t *ip = frame + 14;
                     ip4_addr_t dst; IP4_ADDR(&dst, ip[16], ip[17], ip[18], ip[19]);
-                    if (ip4_addr_cmp(&dst, &self_ip_addr)) g_rx_ip_to_us++;
+                    if (ip4_addr_cmp(&dst, &self_ip_addr)) {
+                        g_rx_ip_to_us++;
+                        /* FPT-179 Stage-5: attribute inbound IP unicast to peer. */
+                        ip4_addr_t src; IP4_ADDR(&src, ip[12], ip[13], ip[14], ip[15]);
+                        for (int pi = 0; pi < NUM_PEERS; pi++) {
+                            if (ip4_addr_cmp(&src, &peer_addrs[pi])) {
+                                g_rx_from_peer[pi]++;
+                                break;
+                            }
+                        }
+                    }
                     else if (is_bcast) g_rx_bcast++;
                     else g_rx_ip_not_us++;
                 } else {
@@ -675,14 +749,17 @@ static void e1000_poll_rx_lwip(struct e1000_driver *drv)
                 struct pbuf *p = pbuf_alloc(PBUF_RAW, len, PBUF_RAM);
                 if (p) {
                     memcpy(p->payload, drv->rx_bufs[idx], len);
+                    g_rx_eth_input_called++;
                     if (g_netif.input(p, &g_netif) != ERR_OK) {
                         pbuf_free(p);
                         drv->rx_dropped++;
+                        g_rx_eth_input_fail++;
                     } else {
                         drv->rx_pkts++;
                     }
                 } else {
                     drv->rx_dropped++;
+                    g_rx_pbuf_alloc_fail++;
                 }
             }
         }
@@ -699,6 +776,14 @@ static void e1000_poll_rx_lwip(struct e1000_driver *drv)
          * after every packet and HW stops. */
         drv->rx_tail = (idx + 1) % E1000_NUM_RX_DESC;
         e1000_wr(drv, E1000_RDT, idx);
+    }
+    /* FPT-179 guest-starvation accounting. */
+    if (batch == 0) {
+        g_rx_poll_empty++;
+    } else {
+        g_rx_poll_descs += batch;
+        if (batch > g_rx_poll_max_batch)
+            g_rx_poll_max_batch = batch;
     }
 }
 
@@ -735,6 +820,31 @@ static int peer_index_of(const ip_addr_t *addr)
     return -1;
 }
 
+/* FPT-179: reset all per-peer state when we observe a peer-reboot via
+ * HELLO epoch change. Re-enters HELLO_INIT so the normal handshake runs
+ * from scratch, clears CT replay window so the peer's fresh tx_seq=1
+ * packets are accepted, and refreshes peer_kernel_id from HELLO payload
+ * in case the peer's KERNEL_ID changed (e.g., ISO swap). */
+static void peer_reboot_reset(int peer, uint32_t new_epoch, uint8_t new_kid)
+{
+    uint8_t old_kid = peer_kernel_id[peer];
+    printf("[%s] PEER REBOOT: peer %d epoch %08x->%08x, kid %u->%u — reset\n",
+           COMPONENT_NAME, peer,
+           peer_epoch[peer], new_epoch,
+           old_kid, new_kid);
+    peer_hello_phase[peer] = HELLO_INIT;
+    peer_hello_grace[peer] = 0;
+    peer_epoch[peer] = new_epoch;
+    g_peer_reboots_detected++;
+    if (new_kid != old_kid) {
+        /* Old kid may still have stale seq state that would reject any
+         * late-arriving packets from the old instance. Clear both. */
+        ct_reset_peer(old_kid);
+        peer_kernel_id[peer] = new_kid;
+    }
+    ct_reset_peer(new_kid);
+}
+
 static void hello_udp_recv_cb(void *arg, struct udp_pcb *pcb,
                                struct pbuf *p, const ip_addr_t *addr, u16_t port)
 {
@@ -767,6 +877,28 @@ static void hello_udp_recv_cb(void *arg, struct udp_pcb *pcb,
     if (peer < 0) {
         /* Unknown source IP — ignore. */
         return;
+    }
+
+    /* FPT-179: parse EPOCH and sender kid from HELLO payload. Payload
+     * format is "<PREFIX> FROM NODE <kid> EPOCH <hex> (<ip>)". Missing
+     * EPOCH (e.g., pre-fix peer) leaves rx_epoch=0 which disables the
+     * reboot-detection path for that peer — backward compatible. */
+    uint32_t rx_epoch = 0;
+    uint32_t rx_kid_u32 = (uint32_t)peer_kernel_id[peer];  /* default = cached */
+    {
+        const char *ep = strstr(msg, "EPOCH ");
+        if (ep) (void)sscanf(ep, "EPOCH %x", &rx_epoch);
+        const char *np = strstr(msg, "NODE ");
+        if (np) (void)sscanf(np, "NODE %u", &rx_kid_u32);
+    }
+    if (rx_epoch != 0) {
+        if (peer_epoch[peer] == 0) {
+            /* First HELLO ever from this peer — record epoch, no reset
+             * needed (CT state for this kid is already pristine). */
+            peer_epoch[peer] = rx_epoch;
+        } else if (peer_epoch[peer] != rx_epoch) {
+            peer_reboot_reset(peer, rx_epoch, (uint8_t)rx_kid_u32);
+        }
     }
 
     int is_ack = (len >= 9 && msg[0] == 'H' && msg[5] == '_');
@@ -817,9 +949,12 @@ static void send_hello(void)
             continue;
 
         const char *prefix = (st >= HELLO_GOT_PEER) ? "HELLO_ACK" : "HELLO";
-        char msg[64];
-        int len = snprintf(msg, sizeof(msg), "%s FROM NODE %u (%s)",
-                           prefix, my_node_id, DTUB_SELF_IP);
+        /* FPT-179: include EPOCH so peers can detect our reboot and reset
+         * their per-peer state for us. Format extension is additive —
+         * pre-fix receivers ignore the extra tokens. */
+        char msg[96];
+        int len = snprintf(msg, sizeof(msg), "%s FROM NODE %u EPOCH %08x (%s)",
+                           prefix, my_node_id, g_my_epoch, DTUB_SELF_IP);
 
         struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (uint16_t)len, PBUF_RAM);
         if (!p) continue;
@@ -875,6 +1010,7 @@ static void dtu_udp_recv_cb(void *arg, struct udp_pcb *pcb,
                              struct pbuf *p, const ip_addr_t *addr, u16_t port)
 {
     (void)arg; (void)pcb; (void)port;
+    g_rx_udp_cb++;
 
     if (!p || p->tot_len < CT_OVERHEAD) {
         if (p) pbuf_free(p);
@@ -886,8 +1022,10 @@ static void dtu_udp_recv_cb(void *arg, struct udp_pcb *pcb,
      * Plaintext is the original DTU message: [vdtu_msg_header][payload]. */
     uint8_t ct_buf[600];
     uint16_t ct_len = p->tot_len;
-    if (ct_len > sizeof(ct_buf))
+    if (ct_len > sizeof(ct_buf)) {
         ct_len = sizeof(ct_buf);
+        g_rx_udp_trunc++;
+    }
     pbuf_copy_partial(p, ct_buf, ct_len, 0);
     pbuf_free(p);
 
@@ -899,6 +1037,7 @@ static void dtu_udp_recv_cb(void *arg, struct udp_pcb *pcb,
         /* Auth failure, replay, or wrong receiver — drop silently */
         return;
     }
+    g_rx_ct_ok++;
 
     if (pt_len < VDTU_HEADER_SIZE) {
         printf("[%s] NET RX: decrypted too short (%d)\n", COMPONENT_NAME, pt_len);
@@ -928,7 +1067,10 @@ static void dtu_udp_recv_cb(void *arg, struct udp_pcb *pcb,
                                 hdr.label, hdr.replylabel, hdr.flags,
                                 payload_buf, payload_len);
         if (rc != 0) {
+            g_rx_ring_full++;
             printf("[%s] NET RX: inbound ring full!\n", COMPONENT_NAME);
+        } else {
+            g_rx_ring_send++;
         }
     }
 }
@@ -1066,6 +1208,18 @@ void post_init(void)
            COMPONENT_NAME, my_node_id, DTUB_SELF_IP,
            DTUB_PEER_IP_0, peer_kernel_id[0],
            DTUB_PEER_IP_1, peer_kernel_id[1]);
+
+    /* FPT-179: seed our session epoch from rdtsc so each boot gets a
+     * distinct value even if KERNEL_ID and IP are identical to a prior
+     * run. Peers detect our reboot by observing this value change in
+     * our outbound HELLO. 0 is reserved as "unknown" sentinel. */
+    {
+        uint32_t hi, lo;
+        __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
+        g_my_epoch = lo ^ (hi << 1) ^ ((uint32_t)KERNEL_ID << 24) ^ 0x5A5A5A5Au;
+        if (g_my_epoch == 0) g_my_epoch = 1;
+        printf("[%s] session epoch = 0x%08x\n", COMPONENT_NAME, g_my_epoch);
+    }
 
     /* CryptoTransport init — per-packet AEAD with static PSKs (FPT-155) */
     ct_init(my_node_id);
@@ -1213,6 +1367,12 @@ int run(void)
                         break;
                     }
                 }
+                /* FPT-179 Stage-5: per-peer TX attribution. Counts every
+                 * outbound attempt, including the silent peer_idx=0 fallback
+                 * taken when dest_kid matches no peer — asymmetry vs. actual
+                 * traffic shape flags the fallback (routing bug H1). */
+                if (peer_idx >= 0 && peer_idx < NUM_PEERS)
+                    g_tx_to_peer[peer_idx]++;
 
                 /* ct_buf sized for KRNLC max (2048) + VDTU_HEADER_SIZE + CT_OVERHEAD. */
                 uint8_t ct_buf[2200];
@@ -1256,6 +1416,63 @@ int run(void)
                    g_tx_arp_req, g_tx_arp_rep, g_tx_ip_unicast, g_tx_ip_mcast,
                    g_rx_arp_req, g_rx_arp_rep, g_rx_ip_to_us, g_rx_ip_not_us,
                    g_rx_bcast, g_rx_other);
+            /* FPT-179 Stage-5: RX-path stage counters — locate where inbound
+             * traffic disappears (nic -> ipu -> udpc -> ctok -> ring). */
+            printf("[%s] RX-path: nic=%u ipu=%u udpc=%u trunc=%u ctok=%u ring=%u rfull=%u\n",
+                   COMPONENT_NAME,
+                   g_rx_nic_raw, g_rx_ip_to_us, g_rx_udp_cb, g_rx_udp_trunc,
+                   g_rx_ct_ok, g_rx_ring_send, g_rx_ring_full);
+            printf("[%s] CT-rej: rcvr=%u sndr=%u repl=%u auth=%u | "
+                   "RX-per-peer: p0=%u p1=%u | TX-per-peer: p0=%u p1=%u | "
+                   "reboots_detected=%u\n",
+                   COMPONENT_NAME,
+                   ct_get_rej_rcvr(), ct_get_rej_sender(),
+                   ct_get_rej_replay(), ct_get_rej_auth(),
+                   g_rx_from_peer[0], g_rx_from_peer[1],
+                   g_tx_to_peer[0],   g_tx_to_peer[1],
+                   g_peer_reboots_detected);
+            /* FPT-179 guest-starvation diagnostic.
+             * - polls/descs/empty/max_batch: does our driver service the RX
+             *   ring often enough? Healthy = empty >> descs (ring usually
+             *   idle when we poll). Starvation = descs close to polls and
+             *   max_batch climbing toward E1000_NUM_RX_DESC = ring filling.
+             * - hw_mpc: E1000 Missed Packet Count (HW-level dropped for no
+             *   descriptor). Read-to-clear, so we accumulate into a total.
+             *   MPC > 0 means our guest driver let the ring run empty and
+             *   qemu-dm had to drop frames on the host side.
+             * - ring_fill = RDH-RDT mod NUM, current descriptors awaiting us.
+             * - tsc_delta: cycles between two status prints; with 2100 MHz
+             *   XCP-ng TSC, loops_per_sec = 1M / (tsc_delta / 2.1e9). */
+            if (driver_ready) {
+                uint32_t mpc = e1000_rd(&g_drv, E1000_MPC);
+                g_rx_mpc_total += mpc;
+                uint32_t rdh = e1000_rd(&g_drv, E1000_RDH);
+                uint32_t rdt = e1000_rd(&g_drv, E1000_RDT);
+                uint32_t ring_fill = (rdh + E1000_NUM_RX_DESC - rdt - 1)
+                                     % E1000_NUM_RX_DESC;
+                uint32_t hi, lo;
+                __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
+                uint64_t now_tsc = ((uint64_t)hi << 32) | lo;
+                uint64_t tsc_delta = g_last_status_tsc ?
+                                     (now_tsc - g_last_status_tsc) : 0;
+                g_last_status_tsc = now_tsc;
+                printf("[%s] rx-drain: polls=%u descs=%u empty=%u max_batch=%u"
+                       " hw_mpc=%u ring_fill=%u tsc_delta=%llu\n",
+                       COMPONENT_NAME,
+                       g_rx_poll_count, g_rx_poll_descs, g_rx_poll_empty,
+                       g_rx_poll_max_batch, g_rx_mpc_total, ring_fill,
+                       (unsigned long long)tsc_delta);
+                /* FPT-179: driver → lwIP handoff breakdown. Proves whether
+                 * every descriptor we drained actually makes it into lwIP.
+                 * Invariant check: eth_in_call ≈ descs - pbuf_fail
+                 * Success path: eth_in_ok = g_drv.rx_pkts. */
+                printf("[%s] rx-handoff: eth_in_call=%u eth_in_ok=%u"
+                       " eth_in_fail=%u pbuf_fail=%u nic_raw=%u\n",
+                       COMPONENT_NAME,
+                       g_rx_eth_input_called, g_drv.rx_pkts,
+                       g_rx_eth_input_fail, g_rx_pbuf_alloc_fail,
+                       g_rx_nic_raw);
+            }
             /* FPT-179: periodic register dump — check if descriptor-ring state
              * advances (RDH moves on RX). If RDH stays at 0 and ICR=0 both
              * always, either IRQ path or MMIO mapping is broken. */

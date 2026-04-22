@@ -10,6 +10,18 @@
 #include <string.h>
 #include <stdio.h>
 
+/* FPT-179 Stage-5: per-reason silent-drop counters for ct_decrypt.
+ * Each discriminable rejection path increments a distinct counter so
+ * the operator can see which failure mode dominates on XCP-ng. */
+static uint32_t g_ct_rej_rcvr   = 0;
+static uint32_t g_ct_rej_sender = 0;
+static uint32_t g_ct_rej_replay = 0;
+static uint32_t g_ct_rej_auth   = 0;
+uint32_t ct_get_rej_rcvr(void)   { return g_ct_rej_rcvr; }
+uint32_t ct_get_rej_sender(void) { return g_ct_rej_sender; }
+uint32_t ct_get_rej_replay(void) { return g_ct_rej_replay; }
+uint32_t ct_get_rej_auth(void)   { return g_ct_rej_auth; }
+
 /* Per-peer crypto state */
 typedef struct {
     uint8_t  key[CT_KEY_SIZE];
@@ -62,6 +74,22 @@ int ct_init(uint8_t my_node_id)
 
     printf("[CRYPTO] Initialized CryptoTransport for node %u\n", my_node_id);
     return 0;
+}
+
+/* FPT-179: reset a peer's inbound replay state after a detected reboot
+ * (signalled externally via HELLO epoch change). Clears rx_seq_max so
+ * the peer's post-reboot tx_seq=1 packets are no longer rejected as
+ * replay. Our tx_seq is intentionally NOT reset: it continues ascending
+ * and will exceed the peer's (freshly zeroed) rx_seq_max on their first
+ * RX from us. The PSK and active flag are unchanged — we are not
+ * re-keying, just clearing the sequence-window for the peer's new life. */
+void ct_reset_peer(uint8_t peer_id)
+{
+    if (peer_id >= CT_MAX_NODES)
+        return;
+    printf("[CRYPTO] peer %u rx_seq_max reset (was %u)\n",
+           peer_id, g_peers[peer_id].rx_seq_max);
+    g_peers[peer_id].rx_seq_max = 0;
 }
 
 /* Build 12-byte nonce from sender_id + sequence_num.
@@ -136,6 +164,7 @@ int ct_decrypt(const uint8_t *input, size_t input_len,
     if (hdr->receiver_id != g_my_id) {
         printf("[CRYPTO] REJECT: receiver_id=%u but my_id=%u\n",
                hdr->receiver_id, g_my_id);
+        g_ct_rej_rcvr++;
         return -1;
     }
 
@@ -144,6 +173,7 @@ int ct_decrypt(const uint8_t *input, size_t input_len,
         printf("[CRYPTO] REJECT: sender=%u invalid (max=%d, active=%d)\n",
                sender, CT_MAX_NODES,
                (sender < CT_MAX_NODES) ? g_peers[sender].active : -1);
+        g_ct_rej_sender++;
         return -1;
     }
 
@@ -153,6 +183,7 @@ int ct_decrypt(const uint8_t *input, size_t input_len,
     if (hdr->sequence_num <= peer->rx_seq_max) {
         printf("[CRYPTO] REJECT: replay seq=%u <= max=%u from sender=%u\n",
                hdr->sequence_num, peer->rx_seq_max, sender);
+        g_ct_rej_replay++;
         return -1;
     }
 
@@ -187,6 +218,7 @@ int ct_decrypt(const uint8_t *input, size_t input_len,
         /* Authentication failed — tampered or wrong key */
         printf("[CRYPTO] AEAD auth failure from node %u seq %u\n",
                sender, hdr->sequence_num);
+        g_ct_rej_auth++;
         return -1;
     }
 

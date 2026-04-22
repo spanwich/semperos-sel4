@@ -53,4 +53,15 @@ int ct_decrypt(const uint8_t *input, size_t input_len,
                uint8_t *plaintext, size_t plaintext_max,
                uint8_t *sender_id_out);
 
+/* FPT-179 Stage-5: per-reason ct_decrypt reject counters (read-only).
+ * Lets DTUBridge print aggregate drop reasons without poking internals. */
+uint32_t ct_get_rej_rcvr(void);
+uint32_t ct_get_rej_sender(void);
+uint32_t ct_get_rej_replay(void);
+uint32_t ct_get_rej_auth(void);
+
+/* FPT-179: clear a peer's replay window after externally-detected peer
+ * reboot (HELLO epoch change). Sets rx_seq_max=0; tx_seq unchanged. */
+void ct_reset_peer(uint8_t peer_id);
+
 #endif /* CRYPTO_TRANSPORT_H */
