@@ -105,6 +105,9 @@ static int parse_ip4(const char *s, ip4_addr_t *out)
  */
 
 #include "pci_helpers.h"
+#ifdef SEMPER_USE_VIRTIO_NET
+#include "virtio_pci_net.h"
+#endif
 
 #define E1000_VENDOR_ID     0x8086
 #define E1000_DEVICE_ID     0x100E  /* 82540EM */
@@ -1174,6 +1177,28 @@ void post_init(void)
 {
     int error;
     ps_io_ops_t io_ops;
+
+#ifdef SEMPER_USE_VIRTIO_NET
+    /* FPT-179: VirtIO PCI net path. Phase 2b currently only does device
+     * discovery + BAR pinning + MAC read. Init handshake + queues (Phase
+     * 2c/3) are not yet wired, so this returns non-zero and we skip the
+     * E1000 bring-up rather than proceeding with an uninitialised NIC.
+     * Note: the eth_mmio CAmkES dataport is mapped at DTUB_MMIO_PADDR,
+     * which has been overridden by CMake to the VirtIO BAR4 paddr when
+     * SEMPER_USE_VIRTIO_NET is set. */
+    printf("[%s] VirtIO PCI net + lwIP UDP bridge (WIP)\n", COMPONENT_NAME);
+    {
+        extern void *eth_mmio;
+        uint8_t mac[6] = {0};
+        int rc = virtio_net_init(&g_netif, eth_mmio, mac);
+        printf("[%s] virtio_net_init returned %d (MAC %02x:%02x:%02x:%02x:%02x:%02x)\n",
+               COMPONENT_NAME, rc,
+               mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        /* Skip E1000 bring-up entirely. DTUBridge will run with no NIC
+         * until Phase 3 is done — network tests won't pass until then. */
+        return;
+    }
+#endif
 
     printf("[%s] E1000 + lwIP UDP bridge\n", COMPONENT_NAME);
 

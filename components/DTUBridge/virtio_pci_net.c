@@ -195,16 +195,74 @@ static int virtio_pci_scan(void)
 }
 
 /* -----------------------------------------------------------------------
+ * Phase 2b: pin the VirtIO MMIO BAR to the CAmkES-mapped paddr, enable
+ * memory-space + bus-master, and set file-scope pointers into the BAR
+ * at each capability's offset.
+ *
+ * The CAmkES dataport `eth_mmio` is pre-mapped at DTUB_MMIO_PADDR (set by
+ * CMake). To use it from C code, the PCI BAR the device responds on must
+ * match that paddr. For VirtIO modern the caps live in BAR4, so we force
+ * BAR4 to DTUB_MMIO_PADDR. This is exactly the same trick the E1000 path
+ * uses for BAR0 in e1000_pci_init().
+ * ----------------------------------------------------------------------- */
+
+static int virtio_pci_map_bars(void *mmio_base)
+{
+    const uint32_t target_paddr = (uint32_t)(uintptr_t)DTUB_MMIO_PADDR;
+    const uint8_t  target_bar = 4;  /* modern VirtIO caps live in BAR4 on QEMU Q35 */
+
+    /* Every required cap should reference BAR4. If the device places a cap
+     * in a different BAR we'd need a multi-BAR mapping (not wired today). */
+    const struct virtio_cap_info *caps[] = {
+        &g_cap_common, &g_cap_notify, &g_cap_isr, &g_cap_device
+    };
+    for (unsigned i = 0; i < sizeof(caps)/sizeof(caps[0]); i++) {
+        if (caps[i]->bar != target_bar) {
+            VNET_LOG("ERROR: cap #%u is on BAR%u but we only map BAR%u\n",
+                     i, caps[i]->bar, target_bar);
+            return -1;
+        }
+    }
+
+    /* Force the BAR to our known-mapped paddr. On QEMU the BAR is freely
+     * remappable as long as PCI_COMMAND.MEM_SPACE is cleared first. We
+     * clear MEM_SPACE, rewrite the BAR, then re-enable MEM + bus-master. */
+    uint16_t cmd = pci_cfg_read16(g_pci_bus, g_pci_dev, g_pci_fun, PCI_COMMAND);
+    pci_cfg_write16(g_pci_bus, g_pci_dev, g_pci_fun, PCI_COMMAND,
+                    (uint16_t)(cmd & ~(PCI_CMD_MEM_SPACE | PCI_CMD_BUS_MASTER)));
+
+    pci_cfg_write32(g_pci_bus, g_pci_dev, g_pci_fun, PCI_BAR(target_bar), target_paddr);
+    /* VirtIO modern BAR4 may be 64-bit — write 0 to the upper half. */
+    pci_cfg_write32(g_pci_bus, g_pci_dev, g_pci_fun, PCI_BAR(target_bar + 1), 0);
+
+    pci_cfg_write16(g_pci_bus, g_pci_dev, g_pci_fun, PCI_COMMAND,
+                    (uint16_t)(cmd | PCI_CMD_MEM_SPACE | PCI_CMD_BUS_MASTER));
+
+    uint32_t readback = pci_cfg_read32(g_pci_bus, g_pci_dev, g_pci_fun, PCI_BAR(target_bar));
+    VNET_LOG("BAR%u pinned to 0x%08x (readback 0x%08x), cmd=0x%04x\n",
+             target_bar, target_paddr, readback & ~0xF,
+             pci_cfg_read16(g_pci_bus, g_pci_dev, g_pci_fun, PCI_COMMAND));
+
+    /* Set pointers into the mapped region. */
+    uint8_t *base = (uint8_t *)mmio_base;
+    g_common_cfg = (volatile struct virtio_pci_common_cfg *)(base + g_cap_common.offset);
+    g_isr_cfg    = (volatile uint32_t *)(base + g_cap_isr.offset);
+    g_notify_base = base + g_cap_notify.offset;
+    g_device_cfg = (volatile uint8_t *)(base + g_cap_device.offset);
+    g_notify_off_multiplier = g_notify_off_mult;
+
+    VNET_LOG("cfg pointers: common=%p isr=%p notify_base=%p device=%p\n",
+             (void *)g_common_cfg, (void *)g_isr_cfg,
+             (void *)g_notify_base, (void *)g_device_cfg);
+    return 0;
+}
+
+/* -----------------------------------------------------------------------
  * Public entry points.
  * ----------------------------------------------------------------------- */
 
-int virtio_net_init(struct netif *netif, uint8_t mac_out[6])
+int virtio_net_init(struct netif *netif, void *mmio_base, uint8_t mac_out[6])
 {
-    (void)g_common_cfg;
-    (void)g_isr_cfg;
-    (void)g_notify_base;
-    (void)g_notify_off_multiplier;
-    (void)g_device_cfg;
     (void)g_rx_vq;
     (void)g_tx_vq;
     g_netif = netif;
@@ -215,16 +273,28 @@ int virtio_net_init(struct netif *netif, uint8_t mac_out[6])
         return rc;
     }
 
-    VNET_LOG("init: Phase 2a complete (device located + caps parsed). "
-             "Phase 2b (BAR mapping + VirtIO init sequence) not yet wired; "
-             "driver will not bring up the link.\n");
+    rc = virtio_pci_map_bars(mmio_base);
+    if (rc != 0) {
+        VNET_LOG("init failed at BAR mapping (rc=%d).\n", rc);
+        return rc;
+    }
 
-    /* MAC placeholder until DEVICE_CFG read lands in Phase 2c. */
-    g_mac[0] = 0x52; g_mac[1] = 0x54; g_mac[2] = 0x00;
-    g_mac[3] = 0xff; g_mac[4] = 0xff; g_mac[5] = 0xff;
+    /* Read device MAC from the DEVICE_CFG cap. On VirtIO net, the first 6
+     * bytes of device config space are the MAC when VIRTIO_NET_F_MAC is
+     * negotiated (it's always offered by QEMU/Xen). This peek happens
+     * before feature negotiation, which is fine for a ROM read. */
+    for (int i = 0; i < 6; i++) {
+        g_mac[i] = g_device_cfg[i];
+    }
+    VNET_LOG("device MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
+             g_mac[0], g_mac[1], g_mac[2], g_mac[3], g_mac[4], g_mac[5]);
     memcpy(mac_out, g_mac, 6);
 
-    return -1;  /* still fail-closed — BAR mapping + init not ready */
+    VNET_LOG("init: Phase 2b complete (BARs pinned, cfg pointers set, MAC read). "
+             "Phase 2c (VirtIO init handshake) + Phase 3 (virtqueue setup) "
+             "not yet wired; driver will not bring up the link.\n");
+
+    return -1;  /* still fail-closed — init handshake + queues not ready */
 }
 
 void virtio_net_irq_handle(void)

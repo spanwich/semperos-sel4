@@ -151,9 +151,11 @@ struct virtio_net_hdr {
 
 /* Bring up the VirtIO PCI NIC (PCI scan, cap parse, reset + init, queue
  * setup, register lwIP netif). Returns 0 on success, non-zero on failure.
+ * mmio_base points at the CAmkES-mapped dataport for the VirtIO BAR; the
+ * driver forces the device's BAR to match this paddr.
  * mac_out[6] is filled with the device MAC when configured via
  * VIRTIO_NET_F_MAC. */
-int  virtio_net_init(struct netif *netif, uint8_t mac_out[6]);
+int  virtio_net_init(struct netif *netif, void *mmio_base, uint8_t mac_out[6]);
 
 /* Called by CAmkES IRQ handler. Drains the used ring and feeds frames
  * into lwIP via netif->input(). Safe from IRQ context (same contract as

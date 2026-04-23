@@ -68,6 +68,23 @@ if(SEMPER_USE_VIRTIO_NET)
 endif()
 
 
+# FPT-179 Phase 2b: when VirtIO net is selected, override the DTUBridge MMIO
+# dataport paddr to match the VirtIO BAR4 (modern cap region) instead of
+# the E1000 BAR0. QEMU Q35 places virtio-net-pci BAR4 at 0xfeb00000 by
+# default. On XCP-ng HVM the value may differ — TBD once we boot.
+if(SEMPER_USE_VIRTIO_NET)
+    if(SEMPER_XEN_HVM)
+        # Placeholder — update after first XCP-ng boot reveals actual paddr.
+        set(E1000_MMIO_PADDR "0xf0800000")
+    else()
+        set(E1000_MMIO_PADDR "0xfeb00000")
+    endif()
+    # VirtIO-net-pci default IRQ on QEMU Q35 is pin A on slot 3 → IOAPIC 11.
+    # On Xen HVM it follows the same QEMU Q35 convention.
+    set(E1000_IOAPIC_PIN "11")
+    set(E1000_IRQ_VECTOR "11")
+endif()
+
 # Node identity (compile-time constants per image)
 set(KERNEL_ID "0" CACHE STRING "Kernel identity (0, 1, 2)")
 set(SELF_IP "192.168.100.10" CACHE STRING "This node's IP address")
@@ -292,6 +309,7 @@ DeclareCAmkESComponent(DTUBridge
         -DDTUB_PEER_IP_1=\"${PEER_IP_1}\"
         -DSEMPER_NUM_NODES=${SEMPER_NUM_NODES}
         ${SEMPER_USE_VIRTIO_NET_FLAG}
+        -DDTUB_MMIO_PADDR=${E1000_MMIO_PADDR}
         -ffunction-sections -fdata-sections
 )
 
