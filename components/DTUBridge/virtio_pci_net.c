@@ -671,7 +671,15 @@ int virtio_net_init(struct netif *netif, void *mmio_base,
 void virtio_net_irq_handle(void)
 {
     g_irq_count++;
-    /* Phase 3: read ISR, drain used ring, pbuf_alloc + netif->input. */
+    /* Read the ISR — this has the side-effect of clearing it on the
+     * device, so we must always do it even if we polled the used ring
+     * independently. */
+    if (g_isr_cfg) {
+        (void)*g_isr_cfg;
+    }
+    /* Drain RX used ring and repost buffers. process_rx_packets()
+     * internally kicks the device once at the end after reposting. */
+    process_rx_packets();
 }
 
 uint32_t virtio_net_get_irq_count(void) { return g_irq_count; }

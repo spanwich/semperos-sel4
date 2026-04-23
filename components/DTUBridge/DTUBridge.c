@@ -1159,6 +1159,28 @@ int net_net_send(int dest_node, int msg_len)
  */
 volatile int g_drv_rx_poll_busy = 0;
 
+/* FPT-179 Phase 3b: idempotent wake-post wrapper. The CAmkES-generated
+ * wake_post() uses sync_bin_sem_bare_post(), which asserts *value <= 1.
+ * Multiple async wake sources (eth IRQ, tx_wake signal) can post between
+ * consumer wake_wait() calls; under VirtIO with a multicast hub, the IRQ
+ * rate easily outpaces the consumer. Gate the real post through an atomic
+ * CAS flag so at most one unreturned wake is outstanding at a time. The
+ * consumer clears the flag after wake_wait() returns. */
+static volatile int g_wake_pending = 0;
+
+static inline void dtub_wake_post(void) {
+    int expected = 0;
+    if (__atomic_compare_exchange_n(&g_wake_pending, &expected, 1,
+                                    false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+        (void)wake_post();
+    }
+}
+
+static inline void dtub_wake_wait(void) {
+    (void)wake_wait();
+    __atomic_store_n(&g_wake_pending, 0, __ATOMIC_RELEASE);
+}
+
 void eth_irq_handle(void)
 {
     if (!driver_ready) {
