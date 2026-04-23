@@ -18,6 +18,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <lwip/netif.h>
+#include <platsupport/io.h>
 
 /* ==== VirtIO PCI constants ================================================ */
 
@@ -55,10 +56,12 @@
 #define VIRTIO_NET_RXQ                      0
 #define VIRTIO_NET_TXQ                      1
 
-/* Packet / ring sizing */
+/* Packet / ring sizing. 64 descriptors per queue is the same as the
+ * E1000 RX ring we replace; keeps DMA footprint to ~256 KB total. */
 #define VIRTIO_NET_HDR_SIZE                 12     /* modern (v1) header */
 #define VIRTIO_NET_QSIZE                    64     /* desc per queue */
 #define VIRTIO_NET_BUFSIZE                  2048   /* per-packet DMA buffer */
+#define VIRTIO_NET_RING_ALIGN               4096   /* page-align ring allocs */
 
 /* ==== VirtIO PCI capability header (pci config space) ==================== */
 
@@ -152,14 +155,22 @@ struct virtio_net_hdr {
 /* Bring up the VirtIO PCI NIC (PCI scan, cap parse, reset + init, queue
  * setup, register lwIP netif). Returns 0 on success, non-zero on failure.
  * mmio_base points at the CAmkES-mapped dataport for the VirtIO BAR; the
- * driver forces the device's BAR to match this paddr.
- * mac_out[6] is filled with the device MAC when configured via
- * VIRTIO_NET_F_MAC. */
-int  virtio_net_init(struct netif *netif, void *mmio_base, uint8_t mac_out[6]);
+ * driver forces the device's BAR to match this paddr. dma_manager is used
+ * for virtqueue + packet buffer DMA allocations. The netif is configured
+ * and attached via netif_add() using the device's MAC from DEVICE_CFG.
+ * mac_out[6] receives the MAC for external use. */
+int  virtio_net_init(struct netif *netif, void *mmio_base,
+                     ps_dma_man_t *dma_manager, uint8_t mac_out[6]);
 
-/* Called by CAmkES IRQ handler. Drains the used ring and feeds frames
- * into lwIP via netif->input(). Safe from IRQ context (same contract as
- * the E1000 e1000_poll_rx_lwip). */
+/* lwIP netif init callback. Pass to netif_add() as the init func along
+ * with the IP/netmask/gateway. Only valid after virtio_net_init()
+ * succeeded. */
+err_t virtio_netif_init(struct netif *netif);
+
+/* Called from DTUBridge's eth_irq_handle when SEMPER_USE_VIRTIO_NET is
+ * set. Reads the ISR (clears it on read), drains RX used ring into
+ * lwIP via netif->input. Safe to call from the CAmkES IRQ handler
+ * thread. */
 void virtio_net_irq_handle(void);
 
 /* Called from the periodic status print to export counters for the

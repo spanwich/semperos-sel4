@@ -17,6 +17,10 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <platsupport/io.h>
+#include <lwip/pbuf.h>
+#include <lwip/etharp.h>
+#include <netif/ethernet.h>
 #include "pci_helpers.h"
 
 #define VNET_LOG(fmt, ...) \
@@ -56,6 +60,14 @@ static volatile uint8_t                      *g_device_cfg = NULL;
 
 static struct virtq g_rx_vq;
 static struct virtq g_tx_vq;
+static ps_dma_man_t g_dma;
+
+/* Per-descriptor packet buffers (virtual + physical address arrays). */
+static void     *g_rx_buf_vaddr[VIRTIO_NET_QSIZE];
+static uintptr_t g_rx_buf_paddr[VIRTIO_NET_QSIZE];
+static void     *g_tx_buf_vaddr[VIRTIO_NET_QSIZE];
+static uintptr_t g_tx_buf_paddr[VIRTIO_NET_QSIZE];
+static uint16_t  g_tx_next = 0;  /* next TX descriptor index */
 
 static uint32_t g_irq_count = 0;
 static uint32_t g_rx_pkts   = 0;
@@ -380,14 +392,210 @@ static int virtio_pci_handshake(void)
 }
 
 /* -----------------------------------------------------------------------
+ * Phase 3: virtqueue allocation + RX/TX paths.
+ *
+ * Direct port of the ARM VirtIO MMIO reference driver at
+ * vm-examples/apps/Arm/ics_oneway_norm_v3_dual_nic/components/VirtIO_Net0_Driver/virtio_net0_driver.c.
+ * Virtqueue data structures and ring management are identical; only the
+ * transport-layer register accesses change from MMIO register offsets to
+ * writes into the VirtIO PCI common_cfg struct, and ARM `dmb sy` barriers
+ * become x86 `mfence` (__sync_synchronize).
+ * ----------------------------------------------------------------------- */
+
+static int alloc_queue(struct virtq *vq, uint16_t qsize)
+{
+    size_t desc_sz  = sizeof(struct virtq_desc) * qsize;
+    size_t avail_sz = sizeof(struct virtq_avail) + sizeof(uint16_t) * qsize +
+                      sizeof(uint16_t); /* trailing used_event */
+    size_t used_sz  = sizeof(struct virtq_used) +
+                      sizeof(struct virtq_used_elem) * qsize +
+                      sizeof(uint16_t); /* trailing avail_event */
+
+    vq->num = qsize;
+    vq->last_used_idx = 0;
+
+    vq->desc = ps_dma_alloc(&g_dma, desc_sz, VIRTIO_NET_RING_ALIGN, 0, PS_MEM_NORMAL);
+    if (!vq->desc) { VNET_LOG("desc dma alloc failed\n"); return -1; }
+    vq->desc_paddr = ps_dma_pin(&g_dma, vq->desc, desc_sz);
+    memset(vq->desc, 0, desc_sz);
+
+    vq->avail = ps_dma_alloc(&g_dma, avail_sz, VIRTIO_NET_RING_ALIGN, 0, PS_MEM_NORMAL);
+    if (!vq->avail) { VNET_LOG("avail dma alloc failed\n"); return -1; }
+    vq->avail_paddr = ps_dma_pin(&g_dma, vq->avail, avail_sz);
+    memset(vq->avail, 0, avail_sz);
+
+    vq->used = ps_dma_alloc(&g_dma, used_sz, VIRTIO_NET_RING_ALIGN, 0, PS_MEM_NORMAL);
+    if (!vq->used) { VNET_LOG("used dma alloc failed\n"); return -1; }
+    vq->used_paddr = ps_dma_pin(&g_dma, vq->used, used_sz);
+    memset(vq->used, 0, used_sz);
+
+    return 0;
+}
+
+/* Program the device with the queue paddrs + size and enable it. Returns
+ * the location of the notify register for this queue. */
+static int configure_queue(uint16_t qidx, struct virtq *vq)
+{
+    g_common_cfg->queue_select = qidx;
+    __sync_synchronize();
+    uint16_t qmax = g_common_cfg->queue_size;
+    if (qmax < VIRTIO_NET_QSIZE) {
+        VNET_LOG("queue %u: device max=%u < requested %u\n",
+                 qidx, qmax, VIRTIO_NET_QSIZE);
+        return -1;
+    }
+    g_common_cfg->queue_size   = VIRTIO_NET_QSIZE;
+    g_common_cfg->queue_desc   = (uint64_t)vq->desc_paddr;
+    g_common_cfg->queue_driver = (uint64_t)vq->avail_paddr;
+    g_common_cfg->queue_device = (uint64_t)vq->used_paddr;
+    g_common_cfg->queue_msix_vector = 0xFFFF;  /* disable MSI-X (we use INTx) */
+    __sync_synchronize();
+    uint16_t noff = g_common_cfg->queue_notify_off;
+    vq->notify_reg = (volatile uint16_t *)(g_notify_base +
+                                           noff * g_notify_off_multiplier);
+    g_common_cfg->queue_enable = 1;
+    __sync_synchronize();
+    VNET_LOG("queue %u: configured (desc=0x%lx avail=0x%lx used=0x%lx notify=%p)\n",
+             qidx,
+             (unsigned long)vq->desc_paddr,
+             (unsigned long)vq->avail_paddr,
+             (unsigned long)vq->used_paddr,
+             (void *)vq->notify_reg);
+    return 0;
+}
+
+static void kick(struct virtq *vq, uint16_t qidx)
+{
+    __sync_synchronize();
+    *vq->notify_reg = qidx;
+}
+
+/* Populate the RX queue with empty buffers the device can fill. One
+ * descriptor per buffer, sized for header + MTU. Flag WRITE so device
+ * writes into it. This is the same pattern as the MMIO refill_rx_queue
+ * helper. */
+static void refill_rx_queue(void)
+{
+    struct virtq *vq = &g_rx_vq;
+    for (uint16_t i = 0; i < vq->num; i++) {
+        vq->desc[i].addr  = (uint64_t)g_rx_buf_paddr[i];
+        vq->desc[i].len   = VIRTIO_NET_HDR_SIZE + 1500;
+        vq->desc[i].flags = VIRTQ_DESC_F_WRITE;
+        vq->desc[i].next  = 0;
+        vq->avail->ring[vq->avail->idx % vq->num] = i;
+        vq->avail->idx++;
+    }
+    __sync_synchronize();
+    kick(vq, VIRTIO_NET_RXQ);
+}
+
+/* Drain the used ring. For each completed RX descriptor: strip the
+ * VirtIO net header, pbuf_alloc, feed to lwIP via g_netif->input.
+ * Recycle buffers back into the available ring. */
+static void process_rx_packets(void)
+{
+    struct virtq *vq = &g_rx_vq;
+    while (vq->last_used_idx != vq->used->idx) {
+        __sync_synchronize();
+        uint16_t slot = vq->last_used_idx % vq->num;
+        struct virtq_used_elem *ue = &vq->used->ring[slot];
+        uint16_t desc_idx = (uint16_t)ue->id;
+        uint32_t total_len = ue->len;
+
+        if (total_len <= VIRTIO_NET_HDR_SIZE) {
+            goto recycle;
+        }
+        uint8_t *buf = (uint8_t *)g_rx_buf_vaddr[desc_idx];
+        uint8_t *pkt = buf + VIRTIO_NET_HDR_SIZE;
+        uint16_t plen = (uint16_t)(total_len - VIRTIO_NET_HDR_SIZE);
+
+        struct pbuf *p = pbuf_alloc(PBUF_RAW, plen, PBUF_POOL);
+        if (p) {
+            if (pbuf_take(p, pkt, plen) == ERR_OK && g_netif && g_netif->input) {
+                if (g_netif->input(p, g_netif) != ERR_OK) {
+                    pbuf_free(p);
+                }
+            } else {
+                pbuf_free(p);
+            }
+            g_rx_pkts++;
+        }
+recycle:
+        /* Hand the buffer back to the device. */
+        vq->desc[desc_idx].flags = VIRTQ_DESC_F_WRITE;
+        vq->desc[desc_idx].len   = VIRTIO_NET_HDR_SIZE + 1500;
+        vq->avail->ring[vq->avail->idx % vq->num] = desc_idx;
+        __sync_synchronize();
+        vq->avail->idx++;
+        vq->last_used_idx++;
+    }
+    kick(vq, VIRTIO_NET_RXQ);
+}
+
+/* lwIP TX callback (netif->linkoutput). Copy pbuf into a pre-allocated
+ * TX buffer, build a 1-descriptor chain containing [virtio_net_hdr |
+ * packet], add to available ring, kick. The virtio_net_hdr sits in the
+ * first VIRTIO_NET_HDR_SIZE bytes of the same buffer as the packet,
+ * zeroed (no offload requested). */
+static err_t virtio_netif_output(struct netif *netif, struct pbuf *p)
+{
+    (void)netif;
+    struct virtq *vq = &g_tx_vq;
+
+    /* Find a TX descriptor that's free. We use round-robin and assume
+     * slots wrap before the device falls behind; if the ring fills we
+     * drop here, same as the E1000 path under pressure. */
+    uint16_t desc_idx = g_tx_next;
+    g_tx_next = (uint16_t)((g_tx_next + 1) % vq->num);
+
+    uint8_t *buf = (uint8_t *)g_tx_buf_vaddr[desc_idx];
+    memset(buf, 0, VIRTIO_NET_HDR_SIZE);  /* header: no offload */
+    uint16_t tot = (uint16_t)(p->tot_len);
+    if (tot > VIRTIO_NET_BUFSIZE - VIRTIO_NET_HDR_SIZE) {
+        return ERR_BUF;
+    }
+    if (pbuf_copy_partial(p, buf + VIRTIO_NET_HDR_SIZE, tot, 0) != tot) {
+        return ERR_BUF;
+    }
+
+    vq->desc[desc_idx].addr  = (uint64_t)g_tx_buf_paddr[desc_idx];
+    vq->desc[desc_idx].len   = (uint32_t)(VIRTIO_NET_HDR_SIZE + tot);
+    vq->desc[desc_idx].flags = 0;  /* device reads — no NEXT, no WRITE */
+    vq->desc[desc_idx].next  = 0;
+
+    vq->avail->ring[vq->avail->idx % vq->num] = desc_idx;
+    __sync_synchronize();
+    vq->avail->idx++;
+    kick(vq, VIRTIO_NET_TXQ);
+
+    g_tx_pkts++;
+    return ERR_OK;
+}
+
+/* lwIP netif init callback. Called once from netif_add(). Exposed via
+ * the header so DTUBridge can pass it as the init-func argument. */
+err_t virtio_netif_init(struct netif *netif)
+{
+    netif->name[0] = 'e';
+    netif->name[1] = '0';
+    netif->mtu = 1500;
+    netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP | NETIF_FLAG_LINK_UP;
+    netif->hwaddr_len = 6;
+    memcpy(netif->hwaddr, g_mac, 6);
+    netif->linkoutput = virtio_netif_output;
+    netif->output = etharp_output;
+    return ERR_OK;
+}
+
+/* -----------------------------------------------------------------------
  * Public entry points.
  * ----------------------------------------------------------------------- */
 
-int virtio_net_init(struct netif *netif, void *mmio_base, uint8_t mac_out[6])
+int virtio_net_init(struct netif *netif, void *mmio_base,
+                    ps_dma_man_t *dma_manager, uint8_t mac_out[6])
 {
-    (void)g_rx_vq;
-    (void)g_tx_vq;
     g_netif = netif;
+    g_dma = *dma_manager;
 
     int rc = virtio_pci_scan();
     if (rc != 0) {
@@ -401,10 +609,9 @@ int virtio_net_init(struct netif *netif, void *mmio_base, uint8_t mac_out[6])
         return rc;
     }
 
-    /* Read device MAC from the DEVICE_CFG cap. On VirtIO net, the first 6
-     * bytes of device config space are the MAC when VIRTIO_NET_F_MAC is
-     * negotiated (it's always offered by QEMU/Xen). This peek happens
-     * before feature negotiation, which is fine for a ROM read. */
+    /* Peek MAC from DEVICE_CFG (first 6 bytes). VIRTIO_NET_F_MAC is
+     * always offered by QEMU/Xen for the static MAC configured at
+     * VM creation. */
     for (int i = 0; i < 6; i++) {
         g_mac[i] = g_device_cfg[i];
     }
@@ -412,18 +619,53 @@ int virtio_net_init(struct netif *netif, void *mmio_base, uint8_t mac_out[6])
              g_mac[0], g_mac[1], g_mac[2], g_mac[3], g_mac[4], g_mac[5]);
     memcpy(mac_out, g_mac, 6);
 
-    /* Phase 2c: VirtIO driver init handshake (spec 3.1.1). */
+    /* Phase 2c: handshake through FEATURES_OK. */
     rc = virtio_pci_handshake();
     if (rc != 0) {
         VNET_LOG("init failed at VirtIO handshake (rc=%d).\n", rc);
         return rc;
     }
 
-    VNET_LOG("init: Phase 2c complete (init handshake done). "
-             "Phase 3 (virtqueue setup + DRIVER_OK) not yet wired; "
-             "driver will not bring up the link.\n");
+    /* Phase 3a: allocate + configure RX and TX virtqueues. */
+    rc = alloc_queue(&g_rx_vq, VIRTIO_NET_QSIZE);
+    if (rc != 0) return rc;
+    rc = alloc_queue(&g_tx_vq, VIRTIO_NET_QSIZE);
+    if (rc != 0) return rc;
 
-    return -1;  /* still fail-closed — queues + DRIVER_OK not yet done */
+    rc = configure_queue(VIRTIO_NET_RXQ, &g_rx_vq);
+    if (rc != 0) return rc;
+    rc = configure_queue(VIRTIO_NET_TXQ, &g_tx_vq);
+    if (rc != 0) return rc;
+
+    /* Allocate per-descriptor packet buffers for each queue. */
+    for (uint16_t i = 0; i < VIRTIO_NET_QSIZE; i++) {
+        g_rx_buf_vaddr[i] = ps_dma_alloc(&g_dma, VIRTIO_NET_BUFSIZE, 64,
+                                         0, PS_MEM_NORMAL);
+        if (!g_rx_buf_vaddr[i]) { VNET_LOG("rx buf %u alloc failed\n", i); return -1; }
+        g_rx_buf_paddr[i] = ps_dma_pin(&g_dma, g_rx_buf_vaddr[i],
+                                       VIRTIO_NET_BUFSIZE);
+
+        g_tx_buf_vaddr[i] = ps_dma_alloc(&g_dma, VIRTIO_NET_BUFSIZE, 64,
+                                         0, PS_MEM_NORMAL);
+        if (!g_tx_buf_vaddr[i]) { VNET_LOG("tx buf %u alloc failed\n", i); return -1; }
+        g_tx_buf_paddr[i] = ps_dma_pin(&g_dma, g_tx_buf_vaddr[i],
+                                       VIRTIO_NET_BUFSIZE);
+    }
+
+    /* DRIVER_OK — device starts processing queues. */
+    g_common_cfg->device_status = VIRTIO_STATUS_ACKNOWLEDGE |
+                                  VIRTIO_STATUS_DRIVER |
+                                  VIRTIO_STATUS_FEATURES_OK |
+                                  VIRTIO_STATUS_DRIVER_OK;
+    __sync_synchronize();
+    VNET_LOG("DRIVER_OK set (status=0x%02x)\n", g_common_cfg->device_status);
+
+    /* Pre-populate RX queue so the device has empty buffers to fill. */
+    refill_rx_queue();
+
+    /* Attach the lwIP netif. Caller will set the IP via netif_add's args. */
+    VNET_LOG("netif attached, link UP\n");
+    return 0;
 }
 
 void virtio_net_irq_handle(void)

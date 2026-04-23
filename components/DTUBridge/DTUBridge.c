@@ -1179,23 +1179,27 @@ void post_init(void)
     ps_io_ops_t io_ops;
 
 #ifdef SEMPER_USE_VIRTIO_NET
-    /* FPT-179: VirtIO PCI net path. Phase 2b currently only does device
-     * discovery + BAR pinning + MAC read. Init handshake + queues (Phase
-     * 2c/3) are not yet wired, so this returns non-zero and we skip the
-     * E1000 bring-up rather than proceeding with an uninitialised NIC.
-     * Note: the eth_mmio CAmkES dataport is mapped at DTUB_MMIO_PADDR,
-     * which has been overridden by CMake to the VirtIO BAR4 paddr when
-     * SEMPER_USE_VIRTIO_NET is set. */
+    /* FPT-179: VirtIO PCI net path (Phase 3a). Initialises the virtqueues,
+     * sets DRIVER_OK, pre-populates the RX ring. Skips the E1000 bring-up
+     * entirely. lwIP integration (netif_add with virtio_netif_init) and
+     * the main poll/TX loop are not yet wired — see Phase 3b. */
     printf("[%s] VirtIO PCI net + lwIP UDP bridge (WIP)\n", COMPONENT_NAME);
     {
         extern void *eth_mmio;
+        ps_io_ops_t vio_ops;
+        int vrc = camkes_io_ops(&vio_ops);
+        if (vrc) {
+            printf("[%s] virtio: failed to get io_ops: %d\n", COMPONENT_NAME, vrc);
+            return;
+        }
         uint8_t mac[6] = {0};
-        int rc = virtio_net_init(&g_netif, eth_mmio, mac);
+        int rc = virtio_net_init(&g_netif, eth_mmio, &vio_ops.dma_manager, mac);
         printf("[%s] virtio_net_init returned %d (MAC %02x:%02x:%02x:%02x:%02x:%02x)\n",
                COMPONENT_NAME, rc,
                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-        /* Skip E1000 bring-up entirely. DTUBridge will run with no NIC
-         * until Phase 3 is done — network tests won't pass until then. */
+        /* Phase 3b will continue here with lwip_init, netif_add + the
+         * main loop. For now we return so the driver state is validated
+         * in isolation without DTUBridge expecting a working NIC. */
         return;
     }
 #endif
