@@ -258,6 +258,128 @@ static int virtio_pci_map_bars(void *mmio_base)
 }
 
 /* -----------------------------------------------------------------------
+ * Phase 2c: VirtIO driver init handshake (spec 1.2 §3.1.1).
+ *
+ *   RESET → poll status == 0
+ *   ACKNOWLEDGE
+ *   DRIVER
+ *   negotiate features (read device_feature low+high, write driver_feature)
+ *   FEATURES_OK
+ *   verify FEATURES_OK still set (else device rejected our feature set)
+ *
+ * Leaves the driver in DRIVER+FEATURES_OK state, ready for queue setup.
+ * Sets DRIVER_OK only after queues are configured (Phase 3). The features
+ * we request here — VIRTIO_F_VERSION_1 + VIRTIO_NET_F_MAC — are the
+ * minimum needed for the modern transport with a fixed MAC; offload
+ * features (CSUM, TSO, MRG_RX_BUF) are deliberately not requested so the
+ * device presents untagged 1500-byte frames without segmentation, which
+ * matches what our lwIP + HACL* CryptoTransport code expects.
+ *
+ * x86 memory barriers: we use __sync_synchronize() (= mfence) before and
+ * after every MMIO access that needs ordering. Most writes to the
+ * common_cfg region are bytewise/16-bit/32-bit stores to memory that
+ * qemu-dm intercepts; the MMIO write itself is serialising enough on x86,
+ * but we leave the fences in for explicitness.
+ * ----------------------------------------------------------------------- */
+
+static int virtio_pci_handshake(void)
+{
+    if (!g_common_cfg) {
+        VNET_LOG("handshake: common_cfg not mapped\n");
+        return -1;
+    }
+
+    /* 1. RESET: write 0 to device_status, then wait for it to read back 0. */
+    g_common_cfg->device_status = 0;
+    __sync_synchronize();
+    int spin = 1000000;
+    while (g_common_cfg->device_status != 0 && spin-- > 0) {
+        __asm__ volatile("pause");
+    }
+    if (g_common_cfg->device_status != 0) {
+        VNET_LOG("handshake: device did not accept RESET (status=0x%02x)\n",
+                 g_common_cfg->device_status);
+        return -1;
+    }
+    VNET_LOG("handshake: RESET acknowledged (status=0)\n");
+
+    /* 2. ACKNOWLEDGE */
+    g_common_cfg->device_status = VIRTIO_STATUS_ACKNOWLEDGE;
+    __sync_synchronize();
+
+    /* 3. DRIVER */
+    g_common_cfg->device_status = VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER;
+    __sync_synchronize();
+
+    /* 4. Feature negotiation — read device features (64 bit, split 32-bit). */
+    g_common_cfg->device_feature_select = 0;
+    __sync_synchronize();
+    uint64_t dev_features = g_common_cfg->device_feature;
+    g_common_cfg->device_feature_select = 1;
+    __sync_synchronize();
+    dev_features |= ((uint64_t)g_common_cfg->device_feature) << 32;
+    VNET_LOG("handshake: device features = 0x%08x%08x\n",
+             (uint32_t)(dev_features >> 32), (uint32_t)dev_features);
+
+    /* Pick the minimal set that makes the device usable for us. VERSION_1
+     * is mandatory for modern. NET_F_MAC lets us read the MAC we already
+     * peeked above (pure sanity). Do NOT ask for MRG_RXBUF, CSUM, or TSO
+     * — we want the device to hand us a single-descriptor frame per
+     * packet so the RX path stays simple and matches the MMIO reference. */
+    uint64_t wanted = VIRTIO_F_VERSION_1 | VIRTIO_NET_F_MAC;
+    uint64_t missing = (wanted & ~dev_features);
+    if (missing) {
+        VNET_LOG("handshake: device lacks required features 0x%08x%08x\n",
+                 (uint32_t)(missing >> 32), (uint32_t)missing);
+        g_common_cfg->device_status |= VIRTIO_STATUS_FAILED;
+        return -1;
+    }
+    uint64_t driver_features = wanted;
+
+    g_common_cfg->driver_feature_select = 0;
+    __sync_synchronize();
+    g_common_cfg->driver_feature = (uint32_t)driver_features;
+    __sync_synchronize();
+    g_common_cfg->driver_feature_select = 1;
+    __sync_synchronize();
+    g_common_cfg->driver_feature = (uint32_t)(driver_features >> 32);
+    __sync_synchronize();
+    VNET_LOG("handshake: driver features = 0x%08x%08x\n",
+             (uint32_t)(driver_features >> 32), (uint32_t)driver_features);
+
+    /* 5. FEATURES_OK */
+    g_common_cfg->device_status = VIRTIO_STATUS_ACKNOWLEDGE |
+                                  VIRTIO_STATUS_DRIVER |
+                                  VIRTIO_STATUS_FEATURES_OK;
+    __sync_synchronize();
+
+    /* 6. Re-read status to verify FEATURES_OK is still set. If the device
+     * cleared it, it means the features we requested aren't supported as
+     * a set; we must fail. */
+    if (!(g_common_cfg->device_status & VIRTIO_STATUS_FEATURES_OK)) {
+        VNET_LOG("handshake: device rejected FEATURES_OK (status=0x%02x)\n",
+                 g_common_cfg->device_status);
+        g_common_cfg->device_status |= VIRTIO_STATUS_FAILED;
+        return -1;
+    }
+    VNET_LOG("handshake: FEATURES_OK confirmed (status=0x%02x)\n",
+             g_common_cfg->device_status);
+
+    /* Report the queue shape so Phase 3 knows how big to make the rings. */
+    g_common_cfg->queue_select = VIRTIO_NET_RXQ;
+    __sync_synchronize();
+    uint16_t rx_qmax = g_common_cfg->queue_size;
+    g_common_cfg->queue_select = VIRTIO_NET_TXQ;
+    __sync_synchronize();
+    uint16_t tx_qmax = g_common_cfg->queue_size;
+    uint16_t num_queues = g_common_cfg->num_queues;
+    VNET_LOG("handshake: num_queues=%u rx_queue_size=%u tx_queue_size=%u\n",
+             num_queues, rx_qmax, tx_qmax);
+
+    return 0;
+}
+
+/* -----------------------------------------------------------------------
  * Public entry points.
  * ----------------------------------------------------------------------- */
 
@@ -290,11 +412,18 @@ int virtio_net_init(struct netif *netif, void *mmio_base, uint8_t mac_out[6])
              g_mac[0], g_mac[1], g_mac[2], g_mac[3], g_mac[4], g_mac[5]);
     memcpy(mac_out, g_mac, 6);
 
-    VNET_LOG("init: Phase 2b complete (BARs pinned, cfg pointers set, MAC read). "
-             "Phase 2c (VirtIO init handshake) + Phase 3 (virtqueue setup) "
-             "not yet wired; driver will not bring up the link.\n");
+    /* Phase 2c: VirtIO driver init handshake (spec 3.1.1). */
+    rc = virtio_pci_handshake();
+    if (rc != 0) {
+        VNET_LOG("init failed at VirtIO handshake (rc=%d).\n", rc);
+        return rc;
+    }
 
-    return -1;  /* still fail-closed — init handshake + queues not ready */
+    VNET_LOG("init: Phase 2c complete (init handshake done). "
+             "Phase 3 (virtqueue setup + DRIVER_OK) not yet wired; "
+             "driver will not bring up the link.\n");
+
+    return -1;  /* still fail-closed — queues + DRIVER_OK not yet done */
 }
 
 void virtio_net_irq_handle(void)
