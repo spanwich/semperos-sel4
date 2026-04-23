@@ -520,7 +520,7 @@ static void send_directed_garp(int peer_idx)
     uint8_t frame[42];
     /* Ethernet header */
     memset(frame, 0xff, 6);                 /* L2 dst = broadcast */
-    memcpy(frame + 6, g_drv.mac_addr, 6);   /* L2 src = our MAC */
+    memcpy(frame + 6, g_netif.hwaddr, 6);   /* L2 src = our MAC */
     frame[12] = 0x08; frame[13] = 0x06;     /* EtherType = ARP */
     /* ARP body */
     frame[14] = 0x00; frame[15] = 0x01;     /* htype = Ethernet */
@@ -528,13 +528,23 @@ static void send_directed_garp(int peer_idx)
     frame[18] = 0x06;                        /* hlen = 6 */
     frame[19] = 0x04;                        /* plen = 4 */
     frame[20] = 0x00; frame[21] = 0x02;     /* op = REPLY */
-    memcpy(frame + 22, g_drv.mac_addr, 6);  /* sha = our MAC */
+    memcpy(frame + 22, g_netif.hwaddr, 6);  /* sha = our MAC */
     uint32_t ours = ip4_addr_get_u32(&self_ip_addr);
     memcpy(frame + 28, &ours, 4);           /* spa = our IP */
     memset(frame + 32, 0xff, 6);            /* tha = broadcast (unknown) */
     uint32_t them = ip4_addr_get_u32(&peer_addrs[peer_idx]);
     memcpy(frame + 38, &them, 4);           /* tpa = peer IP */
+#ifdef SEMPER_USE_VIRTIO_NET
+    /* Emit through the netif's linkoutput so we share TX path with lwIP. */
+    struct pbuf *p = pbuf_alloc(PBUF_RAW, 42, PBUF_RAM);
+    if (p) {
+        pbuf_take(p, frame, 42);
+        g_netif.linkoutput(&g_netif, p);
+        pbuf_free(p);
+    }
+#else
     e1000_tx(&g_drv, frame, 42);
+#endif
 }
 
 static void send_directed_garp_all(void)
@@ -1155,6 +1165,15 @@ void eth_irq_handle(void)
         eth_irq_acknowledge();
         return;
     }
+#ifdef SEMPER_USE_VIRTIO_NET
+    /* VirtIO IRQ: read+clear ISR, drain RX used ring, refill. */
+    if (!g_drv_rx_poll_busy) {
+        g_drv_rx_poll_busy = 1;
+        virtio_net_irq_handle();
+        g_drv_rx_poll_busy = 0;
+    }
+    eth_irq_acknowledge();
+#else
     g_drv.irq_count++;
     uint32_t icr = e1000_rd(&g_drv, E1000_ICR);
 
@@ -1166,6 +1185,7 @@ void eth_irq_handle(void)
     }
 
     eth_irq_acknowledge();
+#endif
 }
 
 void pre_init(void)
@@ -1179,31 +1199,25 @@ void post_init(void)
     ps_io_ops_t io_ops;
 
 #ifdef SEMPER_USE_VIRTIO_NET
-    /* FPT-179: VirtIO PCI net path (Phase 3a). Initialises the virtqueues,
-     * sets DRIVER_OK, pre-populates the RX ring. Skips the E1000 bring-up
-     * entirely. lwIP integration (netif_add with virtio_netif_init) and
-     * the main poll/TX loop are not yet wired — see Phase 3b. */
-    printf("[%s] VirtIO PCI net + lwIP UDP bridge (WIP)\n", COMPONENT_NAME);
+    printf("[%s] VirtIO PCI net + lwIP UDP bridge\n", COMPONENT_NAME);
     {
         extern void *eth_mmio;
-        ps_io_ops_t vio_ops;
-        int vrc = camkes_io_ops(&vio_ops);
-        if (vrc) {
-            printf("[%s] virtio: failed to get io_ops: %d\n", COMPONENT_NAME, vrc);
+        error = camkes_io_ops(&io_ops);
+        if (error) {
+            printf("[%s] virtio: failed to get io_ops: %d\n", COMPONENT_NAME, error);
             return;
         }
         uint8_t mac[6] = {0};
-        int rc = virtio_net_init(&g_netif, eth_mmio, &vio_ops.dma_manager, mac);
-        printf("[%s] virtio_net_init returned %d (MAC %02x:%02x:%02x:%02x:%02x:%02x)\n",
-               COMPONENT_NAME, rc,
+        int rc = virtio_net_init(&g_netif, eth_mmio, &io_ops.dma_manager, mac);
+        if (rc != 0) {
+            printf("[%s] virtio_net_init failed: %d\n", COMPONENT_NAME, rc);
+            return;
+        }
+        printf("[%s] virtio_net_init OK (MAC %02x:%02x:%02x:%02x:%02x:%02x)\n",
+               COMPONENT_NAME,
                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-        /* Phase 3b will continue here with lwip_init, netif_add + the
-         * main loop. For now we return so the driver state is validated
-         * in isolation without DTUBridge expecting a working NIC. */
-        return;
     }
-#endif
-
+#else
     printf("[%s] E1000 + lwIP UDP bridge\n", COMPONENT_NAME);
 
     /* PCI init */
@@ -1232,6 +1246,7 @@ void post_init(void)
         printf("[%s] HW init failed\n", COMPONENT_NAME);
         return;
     }
+#endif
 
     /* Node identity from compile-time constants */
     my_node_id = KERNEL_ID;
@@ -1282,7 +1297,11 @@ void post_init(void)
     IP4_ADDR(&netmask, 255, 255, 255, 0);
     IP4_ADDR(&gw, 0, 0, 0, 0);
 
+#ifdef SEMPER_USE_VIRTIO_NET
+    netif_add(&g_netif, &self_ip_addr, &netmask, &gw, NULL, virtio_netif_init, ethernet_input);
+#else
     netif_add(&g_netif, &self_ip_addr, &netmask, &gw, NULL, e1000_netif_init, ethernet_input);
+#endif
     netif_set_default(&g_netif);
     netif_set_up(&g_netif);
 
@@ -1323,9 +1342,11 @@ void post_init(void)
     printf("[%s] Sent %d directed gratuitous ARP rounds to %d peers at init\n",
            COMPONENT_NAME, 20, NUM_PEERS);
 
+#ifndef SEMPER_USE_VIRTIO_NET
     /* FPT-179: one-shot diagnostics after HW init. */
     e1000_pci_debug_dump();
     e1000_reg_debug_dump(&g_drv, "post_init");
+#endif
 
     /* Initialize network ring buffers (07e).
      * DTUBridge inits both rings; kernel attaches later in kernel_start().
@@ -1356,11 +1377,19 @@ int run(void)
          * so the IRQ handler skips its own poll — prevents the race
          * on rx_tail / rx_pkts (bug 9 from FPT-176). */
         if (driver_ready) {
+#ifdef SEMPER_USE_VIRTIO_NET
+            uint32_t rx_before = virtio_net_get_rx_pkts();
+            g_drv_rx_poll_busy = 1;
+            virtio_net_irq_handle();
+            g_drv_rx_poll_busy = 0;
+            if (virtio_net_get_rx_pkts() != rx_before) did_work = true;
+#else
             uint32_t rx_before = g_drv.rx_pkts;
             g_drv_rx_poll_busy = 1;
             e1000_poll_rx_lwip(&g_drv);
             g_drv_rx_poll_busy = 0;
             if (g_drv.rx_pkts != rx_before) did_work = true;
+#endif
         }
 
         /* Pump lwIP timers (ARP, etc.) */
@@ -1462,12 +1491,21 @@ int run(void)
         /* Periodic status */
         loop_count++;
         if ((loop_count % 1000000) == 0) {
+#ifdef SEMPER_USE_VIRTIO_NET
+            printf("[%s] irq=%u rx=%u tx=%u hello=%s (p0=%d p1=%d)\n",
+                   COMPONENT_NAME,
+                   virtio_net_get_irq_count(), virtio_net_get_rx_pkts(),
+                   virtio_net_get_tx_pkts(),
+                   all_peers_complete() ? "YES" : "no",
+                   (int)peer_hello_phase[0], (int)peer_hello_phase[1]);
+#else
             printf("[%s] irq=%u rx=%u tx=%u drop=%u hello=%s (p0=%d p1=%d)\n",
                    COMPONENT_NAME,
                    g_drv.irq_count, g_drv.rx_pkts,
                    g_drv.tx_pkts, g_drv.rx_dropped,
                    all_peers_complete() ? "YES" : "no",
                    (int)peer_hello_phase[0], (int)peer_hello_phase[1]);
+#endif
             /* FPT-179 Stage 4 fix-7: L2/L3 packet class counters. */
             printf("[%s] L2/3: TX[arp_req=%u arp_rep=%u ip_uc=%u ip_mc=%u] RX[arp_req=%u arp_rep=%u ip_to_us=%u ip_not_us=%u bcast=%u other=%u]\n",
                    COMPONENT_NAME,
@@ -1489,6 +1527,7 @@ int run(void)
                    g_rx_from_peer[0], g_rx_from_peer[1],
                    g_tx_to_peer[0],   g_tx_to_peer[1],
                    g_peer_reboots_detected);
+#ifndef SEMPER_USE_VIRTIO_NET
             /* FPT-179 guest-starvation diagnostic.
              * - polls/descs/empty/max_batch: does our driver service the RX
              *   ring often enough? Healthy = empty >> descs (ring usually
@@ -1536,6 +1575,7 @@ int run(void)
              * always, either IRQ path or MMIO mapping is broken. */
             if (driver_ready)
                 e1000_reg_debug_dump(&g_drv, "periodic");
+#endif
         }
 
         if (!did_work) seL4_Yield();
