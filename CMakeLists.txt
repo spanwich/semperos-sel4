@@ -54,6 +54,20 @@ if(SEMPER_MULTI_NODE)
     set(SEMPER_MULTI_NODE_FLAG "-DSEMPER_MULTI_NODE")
 endif()
 
+# FPT-179: swap DTUBridge's E1000 driver for a VirtIO net PCI driver.
+# Rationale: emulated E1000 was designed as a bootstrap-only path; on XCP-ng
+# it loses a scheduling race against dom0's other work and caps at ~2 %
+# delivery for sustained traffic. VirtIO net has a higher-throughput path
+# (shared-memory virtqueues + lightweight notifications) and is what normal
+# HVM guests use via xen-netfront/virtio-net. When ON, DTUBridge links the
+# virtio-pci driver instead of the e1000 one.
+option(SEMPER_USE_VIRTIO_NET "Use VirtIO PCI net driver instead of emulated E1000" OFF)
+set(SEMPER_USE_VIRTIO_NET_FLAG "")
+if(SEMPER_USE_VIRTIO_NET)
+    set(SEMPER_USE_VIRTIO_NET_FLAG "-DSEMPER_USE_VIRTIO_NET")
+endif()
+
+
 # Node identity (compile-time constants per image)
 set(KERNEL_ID "0" CACHE STRING "Kernel identity (0, 1, 2)")
 set(SELF_IP "192.168.100.10" CACHE STRING "This node's IP address")
@@ -242,10 +256,21 @@ set(HACL_SOURCES
     ${HACL_DIR}/Lib_Memzero0.c                 # FPT-166: secure zeroization
 )
 
+# FPT-179: conditionally include virtio-pci-net driver sources instead of
+# the e1000 code in DTUBridge.c. DTUBridge.c itself still compiles in both
+# modes; SEMPER_USE_VIRTIO_NET toggles which driver backend is active.
+set(DTUBRIDGE_NET_SOURCES "")
+if(SEMPER_USE_VIRTIO_NET)
+    set(DTUBRIDGE_NET_SOURCES
+        components/DTUBridge/virtio_pci_net.c
+    )
+endif()
+
 DeclareCAmkESComponent(DTUBridge
     SOURCES
         components/DTUBridge/DTUBridge.c
         components/DTUBridge/crypto_transport.c
+        ${DTUBRIDGE_NET_SOURCES}
         ${VDTU_RING_SRC}
         ${LWIP_UDP_SOURCES}
         ${HACL_SOURCES}
@@ -266,6 +291,7 @@ DeclareCAmkESComponent(DTUBridge
         -DDTUB_PEER_IP_0=\"${PEER_IP_0}\"
         -DDTUB_PEER_IP_1=\"${PEER_IP_1}\"
         -DSEMPER_NUM_NODES=${SEMPER_NUM_NODES}
+        ${SEMPER_USE_VIRTIO_NET_FLAG}
         -ffunction-sections -fdata-sections
 )
 
