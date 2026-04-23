@@ -104,13 +104,7 @@ static int parse_ip4(const char *s, ip4_addr_t *out)
  * ============================================================
  */
 
-#define PCI_VENDOR_ID       0x00
-#define PCI_DEVICE_ID       0x02
-#define PCI_COMMAND         0x04
-#define PCI_BAR0            0x10
-
-#define PCI_CMD_MEM_SPACE   0x0002
-#define PCI_CMD_BUS_MASTER  0x0004
+#include "pci_helpers.h"
 
 #define E1000_VENDOR_ID     0x8086
 #define E1000_DEVICE_ID     0x100E  /* 82540EM */
@@ -122,27 +116,35 @@ static uint8_t e1000_pci_bus = 0;
 static uint8_t e1000_pci_dev = 0;
 static uint8_t e1000_pci_fun = 0;
 
-static uint32_t pci_cfg_read32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t offset)
+/* PCI helpers — previously static in this file, now shared via pci_helpers.h
+ * so the VirtIO-PCI driver can reuse them (FPT-179 Phase 2). */
+uint32_t pci_cfg_read32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t offset)
 {
     uint32_t addr = (1 << 31) | (bus << 16) | (dev << 11) | (func << 8) | (offset & 0xFC);
     pci_config_out32_offset(0, addr);
     return pci_config_in32_offset(4);
 }
 
-static uint16_t pci_cfg_read16(uint8_t bus, uint8_t dev, uint8_t func, uint8_t offset)
+uint16_t pci_cfg_read16(uint8_t bus, uint8_t dev, uint8_t func, uint8_t offset)
 {
     uint32_t val = pci_cfg_read32(bus, dev, func, offset & 0xFC);
     return (val >> ((offset & 2) * 8)) & 0xFFFF;
 }
 
-static void pci_cfg_write32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t offset, uint32_t val)
+uint8_t pci_cfg_read8(uint8_t bus, uint8_t dev, uint8_t func, uint8_t offset)
+{
+    uint32_t val = pci_cfg_read32(bus, dev, func, offset & 0xFC);
+    return (val >> ((offset & 3) * 8)) & 0xFF;
+}
+
+void pci_cfg_write32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t offset, uint32_t val)
 {
     uint32_t addr = (1 << 31) | (bus << 16) | (dev << 11) | (func << 8) | (offset & 0xFC);
     pci_config_out32_offset(0, addr);
     pci_config_out32_offset(4, val);
 }
 
-static void pci_cfg_write16(uint8_t bus, uint8_t dev, uint8_t func, uint8_t offset, uint16_t val)
+void pci_cfg_write16(uint8_t bus, uint8_t dev, uint8_t func, uint8_t offset, uint16_t val)
 {
     uint32_t addr = (1 << 31) | (bus << 16) | (dev << 11) | (func << 8) | (offset & 0xFC);
     pci_config_out32_offset(0, addr);
