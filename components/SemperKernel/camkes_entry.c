@@ -149,6 +149,38 @@ extern int krnlc_ping_peer(void);
 
 static volatile int net_ping_sent = 0;
 static volatile int net_pong_sent = 0;
+
+/* Per-sender KRNLC serialisation gate — mimics gem5 DTU hardware
+ * backpressure. Set true before dispatching an inbound KRNLC msg from peer N.
+ * Sync handlers: cleared immediately after dispatch_net_krnlc returns (the
+ *   work was completed inline, no further async chain).
+ * Async handlers (rgate subscribe in createSessFwd / exchangeOverSessionFwd):
+ *   call krnlc_mark_async_pending(kid) so the post-dispatch auto-clear is
+ *   skipped; the lambda then calls krnlc_clear_inflight(kid) at its
+ *   completion point (lambda exit / unsubscribe).
+ * While the flag for peer N is true, net_poll() defers the next msg from
+ * peer N (leaves it in the ring; no ack). Cross-peer traffic is unaffected.
+ * Indexed by sender_kernel_id. (FPT-176 comment 10540.) */
+#ifndef MAX_SRC_KID
+#define MAX_SRC_KID 8
+#endif
+static volatile int krnlc_inflight[MAX_SRC_KID];
+static volatile int g_krnlc_async_pending;  /* set by handler if it subscribed
+                                              * to an rgate before returning */
+
+/* C++-callable helpers (see KernelcallHandler.cc).
+ * Called from inside a FWD-style handler that subscribes to an rgate, to
+ * tell net_poll "the work isn't done yet; don't clear inflight at dispatch
+ * return — the lambda will clear via krnlc_clear_inflight when it finishes." */
+void krnlc_mark_async_pending(void) {
+    g_krnlc_async_pending = 1;
+}
+
+void krnlc_clear_inflight(unsigned char src_kid) {
+    __sync_synchronize();
+    if (src_kid < MAX_SRC_KID)
+        krnlc_inflight[src_kid] = 0;
+}
 static volatile int net_pong_received = 0;
 static uint32_t net_poll_count = 0;
 
@@ -370,7 +402,6 @@ void net_poll(void)
              * Globally-once broke 3-node (only first peer ever saw PONG).
              * Every-time floods the network. Per-sender is the right grain:
              * each peer's PING stops once its PONG arrives. */
-            #define MAX_SRC_KID 8
             static int pong_sent_to[MAX_SRC_KID];  /* indexed by src_kid */
             uint8_t src_kid = (uint8_t)(msg->hdr.sender_core_id / NUM_LOCAL_PES);
             uint16_t my_pe = (uint16_t)(KERNEL_ID * NUM_LOCAL_PES);
@@ -395,9 +426,38 @@ void net_poll(void)
             printf("[SemperKernel] NET: === PONG RECEIVED -- round trip complete! ===\n");
         } else {
             /* Inter-kernel message (Task 08): dispatch to KernelcallHandler.
-             * The raw vdtu_message has the same layout as m3::DTU::Message. */
+             * The raw vdtu_message has the same layout as m3::DTU::Message.
+             *
+             * Per-sender KRNLC serialisation (FPT-176 comment 10540): mimic
+             * gem5's DTU hardware backpressure where a peer cannot deliver
+             * a second message until the first has been consumed. While the
+             * inflight flag for peer N is set, defer subsequent messages
+             * from N (leave in ring, no ack) so net_poll retries them next
+             * iteration. Cross-peer traffic is unaffected (per-peer slot).
+             *
+             * Lifecycle:
+             *  - Set inflight=1 before dispatch.
+             *  - Sync handlers complete inline → clear at dispatch return.
+             *  - Async handlers (createSessFwd / exchangeOverSessionFwd
+             *    subscribe to an rgate) call krnlc_mark_async_pending()
+             *    inside the handler; we then SKIP the post-dispatch clear,
+             *    and the lambda calls krnlc_clear_inflight(kid) at its
+             *    completion point (lambda exit / unsubscribe). */
+            uint8_t src_kid = (uint8_t)(msg->hdr.sender_core_id / NUM_LOCAL_PES);
+            if (src_kid < MAX_SRC_KID && krnlc_inflight[src_kid]) {
+                /* Defer: leave msg in ring (no ack), retry next iteration. */
+                return;
+            }
+            if (src_kid < MAX_SRC_KID) {
+                krnlc_inflight[src_kid] = 1;
+                __sync_synchronize();
+            }
+            g_krnlc_async_pending = 0;
             uint16_t total = VDTU_HEADER_SIZE + msg->hdr.length;
             dispatch_net_krnlc((const void *)msg, total);
+            __sync_synchronize();
+            if (!g_krnlc_async_pending && src_kid < MAX_SRC_KID)
+                krnlc_inflight[src_kid] = 0;
         }
 
         vdtu_ring_ack(&g_net_in_ring);

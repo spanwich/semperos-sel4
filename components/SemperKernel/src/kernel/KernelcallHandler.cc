@@ -17,6 +17,14 @@
 
 extern "C" {
 #include <stdio.h>
+
+/* Per-sender KRNLC serialisation gate (FPT-176 comment 10540).
+ * Defined in components/SemperKernel/camkes_entry.c. The async-aware FWD
+ * handlers below pair these calls so the inflight slot is held across the
+ * rgate subscriber lambda (createSessFwd / exchangeOverSessionFwd) and
+ * released only when the async chain finishes. */
+extern void krnlc_mark_async_pending(void);
+extern void krnlc_clear_inflight(unsigned char src_kid);
 }
 #include <base/log/Kernel.h>
 #include <base/Init.h>
@@ -404,6 +412,13 @@ void KernelcallHandler::createSessFwd(GateIStream &is) {
         // send request to service
         m3::Reference<Service> rsrv(srv);
 
+        /* createSessFwd is NOT gated by the inflight slot — gating it caused
+         * Test 12 timeouts on multi-node (k0↔k1 simultaneous CREATESESS would
+         * cross-deadlock, since node-a's createSessResp to k=1 had to wait for
+         * inflight[k=1] to clear, which only happened after VPE1's reply to
+         * k=2's concurrent OPEN). Only exchangeOverSession needs the gate
+         * (Test 14 race). FPT-176 c10540. */
+
         RecvGate *rgate = new RecvGate(SyscallHandler::get().srvepid(), nullptr);
         rgate->subscribe([this, rgate, rsrv, cap, tid, vpeID, sender] (GateIStream &reply, m3::Subscriber<GateIStream&> *s) {
             m3::Reference<Service> srvcpy = rsrv;
@@ -565,6 +580,13 @@ void KernelcallHandler::exchangeOverSession(GateIStream &is) {
     label_t sender = is.label();
     m3::Reference<Service> rsrv(srv);
     RecvGate *rgate = new RecvGate(SyscallHandler::get().srvepid(), nullptr);
+
+    /* exchangeOverSession is NOT gated by the inflight slot. The first
+     * implementation (FPT-176 c10540) cross-deadlocked when k0↔k1 sent
+     * concurrent OBTAIN/DELEGATE — node-a's REPLY to k=1 sat deferred
+     * behind node-a's still-pending lambda for k=2's request. The Test 14
+     * 1/3 INV_ARGS race needs to be fixed at the protocol layer
+     * (range_unused inside lambda) rather than via DTU-level backpressure. */
 
     rgate->subscribe([this, rgate, rsrv, tid, sender, obtain, vpe, caps]
         (GateIStream &reply, m3::Subscriber<GateIStream&> *s) {

@@ -226,17 +226,31 @@ static void service_poll(void)
         }
         case SRV_CMD_OBTAIN:
         case SRV_CMD_DELEGATE: {
-            printf("[VPE1] %s\n", cmd == SRV_CMD_OBTAIN ? "OBTAIN" : "DELEGATE");
-            /* OBTAIN: reply with source range — caller reads FROM VPE1:10
-             * DELEGATE: reply with destination range — caller writes TO VPE1:20
-             * Separate ranges so a delegate after an obtain doesn't collide. */
+            /* OBTAIN: reply with source range — caller reads FROM VPE1:10+
+             * DELEGATE: reply with destination range — caller writes TO VPE1:20+
+             * Separate base ranges so a delegate after an obtain doesn't collide.
+             *
+             * FPT-176 c10540 race fix: each call increments the per-cmd
+             * counter so concurrent OBTAINs/DELEGATEs from multiple peer
+             * kernels (3-node Test 14) get distinct destination slots.
+             * Without this, two concurrent DELEGATEs both reserve slot 20
+             * on VPE1's CapTable and the second errors INV_ARGS in the
+             * kernel's range_unused() check inside the rgate lambda. */
+            static uint32_t next_obtain_slot   = 10;
+            static uint32_t next_delegate_slot = 20;
+            uint32_t start = (cmd == SRV_CMD_OBTAIN)
+                                 ? next_obtain_slot++
+                                 : next_delegate_slot++;
+            printf("[VPE1] %s -> slot=%u\n",
+                   cmd == SRV_CMD_OBTAIN ? "OBTAIN" : "DELEGATE",
+                   (unsigned)start);
             struct __attribute__((packed)) {
                 uint64_t error;
                 uint32_t type, start, count, pad;
             } reply = {
                 0,
                 CAP_TYPE_OBJ,
-                (cmd == SRV_CMD_OBTAIN) ? 10u : 20u,
+                start,
                 1,
                 0
             };
