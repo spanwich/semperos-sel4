@@ -238,8 +238,11 @@ extern "C" void kernel_start(void) {
         size_t my_kid = Platform::kernelId();
         (void)Platform::pe_base();  /* referenced by macros below */
 
-        /* 3-node XCP-ng topology. See DTUBridge NUM_PEERS. */
-        const size_t NUM_KERNELS = 3;
+        /* Cluster size from cmake (-DSEMPER_NUM_NODES). Default 3. */
+#ifndef SEMPER_NUM_NODES
+#define SEMPER_NUM_NODES 3
+#endif
+        const size_t NUM_KERNELS = SEMPER_NUM_NODES;
 
         for (size_t peer_kid = 0; peer_kid < NUM_KERNELS; peer_kid++) {
             if (peer_kid == my_kid) continue;

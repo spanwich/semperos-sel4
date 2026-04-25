@@ -70,7 +70,13 @@
 #define KERNEL_ID 0
 #endif
 
-#define NUM_PEERS 2
+/* Cluster size from cmake (-DSEMPER_NUM_NODES). NUM_PEERS = nodes − self.
+ * Default 3 preserves the FPT-179 Stage-3/4 multi-peer behaviour for the
+ * XCP-ng path; legacy/hille-baseline overrides to 2 or 3 per docker run. */
+#ifndef SEMPER_NUM_NODES
+#define SEMPER_NUM_NODES 3
+#endif
+#define NUM_PEERS (SEMPER_NUM_NODES - 1)
 
 static ip4_addr_t self_ip_addr;
 static ip4_addr_t peer_addrs[NUM_PEERS];
@@ -1194,7 +1200,9 @@ void post_init(void)
     my_node_id = KERNEL_ID;
     parse_ip4(DTUB_SELF_IP, &self_ip_addr);
     parse_ip4(DTUB_PEER_IP_0, &peer_addrs[0]);
+#if NUM_PEERS >= 2
     parse_ip4(DTUB_PEER_IP_1, &peer_addrs[1]);
+#endif
 
     /* Build peer index → KERNEL_ID mapping from IP last octet convention.
      * XCP-ng: .10 = kernel 0, .11 = kernel 1, .12 = kernel 2 (offset 10).
@@ -1204,10 +1212,16 @@ void post_init(void)
         peer_kernel_id[i] = (last >= 10) ? (last - 10) : (last - 1);
     }
 
+#if NUM_PEERS >= 2
     printf("[%s] Node %u (self=%s, peer0=%s[k%u], peer1=%s[k%u])\n",
            COMPONENT_NAME, my_node_id, DTUB_SELF_IP,
            DTUB_PEER_IP_0, peer_kernel_id[0],
            DTUB_PEER_IP_1, peer_kernel_id[1]);
+#else
+    printf("[%s] Node %u (self=%s, peer0=%s[k%u])\n",
+           COMPONENT_NAME, my_node_id, DTUB_SELF_IP,
+           DTUB_PEER_IP_0, peer_kernel_id[0]);
+#endif
 
     /* FPT-179: seed our session epoch from rdtsc so each boot gets a
      * distinct value even if KERNEL_ID and IP are identical to a prior
