@@ -1388,59 +1388,100 @@ int run(void)
             }
         }
 
-        /* --- spanning_revoke (REVOKE of obtained cap) --- */
+        /* --- spanning_revoke_session (TRUE cross-kernel REVOKE) ---
+         * Per iter: open a fresh session at sel BSESS (cross-kernel),
+         * then revoke it. The session cap has REMOTE CHILDREN (the
+         * service-cap child added during createSessFwd on K1's VPE1),
+         * so revocation triggers the spanning REVOKE/REVOKEFINISH KRNLC
+         * round-trip — Hille tier-2 path. Each iter is ~22 ms (createsess)
+         * + measured (revoke). Iter count low because of setup cost. */
         {
+            const uint32_t BSESS = 700;  /* fresh session sel for the bench */
+            char rname[11];
+            rname[0]='t'; rname[1]='e'; rname[2]='s'; rname[3]='t';
+            rname[4]='s'; rname[5]='r'; rname[6]='v'; rname[7]='-';
+            rname[8]='k'; rname[9]='1'; rname[10]='\0';
+            const int SREVOKE_WARMUP = 3;
+            const int SREVOKE_ITERS  = 30;
+
+            int ok = 1;
+            for (int w = 0; w < SREVOKE_WARMUP && ok; w++) {
+                if (send_createsess(BSESS, rname, 10) != 0) ok = 0;
+                else send_revoke(BSESS);
+            }
             int collected = 0;
-            for (int i = 0; i < SPAN_ITERS && i < BENCH_ITERS; i++) {
-                if (send_obtain(SESS, 800, 1) != 0) continue;
+            for (int i = 0; i < SREVOKE_ITERS && i < BENCH_ITERS && ok; i++) {
+                if (send_createsess(BSESS, rname, 10) != 0) continue;
                 uint64_t t0 = rdtsc();
-                int err = send_revoke(800);
+                int err = send_revoke(BSESS);
                 uint64_t t1 = rdtsc();
                 if (err == 0) bench_samples[collected++] = t1 - t0;
             }
             if (collected > 0)
-                bench_report_n("spanning_revoke_walltime", collected);
-            printf("[BENCH-2A-SPANNING] spanning_revoke_walltime: collected n=%d\n", collected);
+                bench_report_n("spanning_revoke_session_walltime", collected);
+            printf("[BENCH-2A-SPANNING] spanning_revoke_session_walltime: collected n=%d (true cross-kernel REVOKE)\n", collected);
         }
 
-        /* --- spanning_chain_revoke at depths 10, 50, 100 --- */
-        const int chain_depths[3] = {10, 50, 100};
-        const char *chain_names[3] = {"spanning_chain_revoke_10_walltime",
-                                       "spanning_chain_revoke_50_walltime",
-                                       "spanning_chain_revoke_100_walltime"};
-        for (int dx = 0; dx < 3; dx++) {
-            int depth = chain_depths[dx];
-            int chain_ok = 1;
-            int collected = 0;
-            for (int w = 0; w < CHAIN_WARMUP && chain_ok; w++) {
-                if (send_obtain(SESS, 800, 1) != 0) { chain_ok = 0; break; }
-                for (int d = 0; d < depth && chain_ok; d++) {
-                    if (send_exchange(0, (uint32_t)(800 + d), 1,
-                                      (uint32_t)(800 + d + 1), 1, 0) != 0) {
+        /* --- spanning_chain_revoke_session at depths 10, 50, 100 ---
+         * Per iter: open session at BSESS (cross-kernel), build a LOCAL
+         * chain rooted at BSESS via self-exchange (depth N, sels BSESS+1..N+1),
+         * then revoke BSESS. The revoke walks the local chain (N+1 caps)
+         * AND triggers cross-kernel REVOKE for the session's remote child
+         * on K1. So revoke cost = local_chain_walk(N) + 1 cross-kernel
+         * REVOKE round-trip (~22 ms baseline + N×~50µs local). */
+        {
+            const uint32_t BSESS = 700;
+            char rname[11];
+            rname[0]='t'; rname[1]='e'; rname[2]='s'; rname[3]='t';
+            rname[4]='s'; rname[5]='r'; rname[6]='v'; rname[7]='-';
+            rname[8]='k'; rname[9]='1'; rname[10]='\0';
+            const int SCHAIN_WARMUP = 2;
+            const int SCHAIN_ITERS  = 20;
+
+            const int chain_depths[3] = {10, 50, 100};
+            const char *chain_names[3] = {
+                "spanning_chain_revoke_session_10_walltime",
+                "spanning_chain_revoke_session_50_walltime",
+                "spanning_chain_revoke_session_100_walltime"};
+            for (int dx = 0; dx < 3; dx++) {
+                int depth = chain_depths[dx];
+                int chain_ok = 1;
+                int collected = 0;
+                for (int w = 0; w < SCHAIN_WARMUP && chain_ok; w++) {
+                    if (send_createsess(BSESS, rname, 10) != 0) {
                         chain_ok = 0; break;
                     }
+                    for (int d = 0; d < depth && chain_ok; d++) {
+                        if (send_exchange(0, (uint32_t)(BSESS + d), 1,
+                                          (uint32_t)(BSESS + d + 1), 1, 0) != 0) {
+                            chain_ok = 0; break;
+                        }
+                    }
+                    send_revoke(BSESS);
                 }
-                send_revoke(800);
-            }
-            for (int i = 0; i < CHAIN_ITERS && i < BENCH_ITERS && chain_ok; i++) {
-                if (send_obtain(SESS, 800, 1) != 0) { chain_ok = 0; break; }
-                int build_ok = 1;
-                for (int d = 0; d < depth && build_ok; d++) {
-                    if (send_exchange(0, (uint32_t)(800 + d), 1,
-                                      (uint32_t)(800 + d + 1), 1, 0) != 0)
-                        build_ok = 0;
+                for (int i = 0; i < SCHAIN_ITERS && i < BENCH_ITERS && chain_ok; i++) {
+                    if (send_createsess(BSESS, rname, 10) != 0) {
+                        chain_ok = 0; break;
+                    }
+                    int build_ok = 1;
+                    for (int d = 0; d < depth && build_ok; d++) {
+                        if (send_exchange(0, (uint32_t)(BSESS + d), 1,
+                                          (uint32_t)(BSESS + d + 1), 1, 0) != 0)
+                            build_ok = 0;
+                    }
+                    if (!build_ok) { send_revoke(BSESS); break; }
+                    uint64_t t0 = rdtsc();
+                    int err = send_revoke(BSESS);
+                    uint64_t t1 = rdtsc();
+                    if (err == 0) bench_samples[collected++] = t1 - t0;
                 }
-                if (!build_ok) { send_revoke(800); break; }
-                uint64_t t0 = rdtsc();
-                int err = send_revoke(800);
-                uint64_t t1 = rdtsc();
-                if (err == 0) bench_samples[collected++] = t1 - t0;
+                if (chain_ok && collected > 0)
+                    bench_report_n(chain_names[dx], collected);
+                printf("[BENCH-2A-SPANNING] %s: collected n=%d\n",
+                       chain_names[dx], collected);
             }
-            if (chain_ok && collected > 0)
-                bench_report_n(chain_names[dx], collected);
-            printf("[BENCH-2A-SPANNING] %s: collected n=%d\n",
-                   chain_names[dx], collected);
         }
+        (void)CHAIN_WARMUP; (void)CHAIN_ITERS;  /* unused now */
         printf("\n[VPE0] === Experiment 2A SPANNING complete ===\n");
     } else {
         /* Non-K0 nodes: long yield so K0's bench finishes before our 15a/15b. */

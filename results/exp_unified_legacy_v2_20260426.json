@@ -1,0 +1,66 @@
+{
+  "title": "FPT-176 Hille-on-hardware unified benchmark v2 — true spanning REVOKE",
+  "timestamp": "2026-04-26T00:50",
+  "branch": "legacy/hille-baseline",
+  "supersedes": "exp_unified_legacy_20260426.json (v1, spanning_revoke was local-only path)",
+  "platform": {
+    "name": "Docker QEMU 2-node, e1000 socket networking",
+    "qemu": "qemu-system-x86_64 -machine q35 -cpu qemu64+rdrand+fsgsbase+xsave+xsaveopt -m 512",
+    "topology": "SEMPER_NUM_NODES=2",
+    "tsc_mhz": 2100,
+    "kernel_id_measured": 0
+  },
+  "tests": "16/16 PASS on node-a",
+  "experiment_1_vdtu_primitives": {
+    "ring_write":     {"min":2648, "med":2700,  "mean":2820,  "max":70454,   "us_med":1.3, "n":2000},
+    "ring_read":      {"min":236,  "med":248,   "mean":295,   "max":64438,   "us_med":0.1, "n":2000},
+    "ring_roundtrip": {"min":2858, "med":2920,  "mean":6082,  "max":6080778, "us_med":1.4, "n":2000},
+    "ep_configure":   {"min":48394,"med":49632, "mean":63511, "max":6194176, "us_med":23.6,"n":2000},
+    "ep_terminate":   {"min":46310,"med":47374, "mean":75761, "max":6105694, "us_med":22.6,"n":2000},
+    "mem_access":     {"min":304,  "med":328,   "mean":445,   "max":230162,  "us_med":0.2, "n":2000}
+  },
+  "experiment_2a_local_walltime": {
+    "local_exchange_walltime":         {"min":116508,  "med":118186, "mean":205887, "max":6333048, "us_med":56.3,  "n":200},
+    "local_revoke_walltime":           {"min":161060,  "med":168368, "mean":204494, "max":6292412, "us_med":80.2,  "n":200},
+    "local_chain_revoke_10_walltime":  {"min":307454,  "med":333876, "mean":341700, "max":456382,  "us_med":159.0, "n":50},
+    "local_chain_revoke_50_walltime":  {"min":928384,  "med":994056, "mean":1142696,"max":6976360, "us_med":473.4, "n":50},
+    "local_chain_revoke_100_walltime": {"min":1749072, "med":1869498,"mean":2363680,"max":8081050, "us_med":890.2, "n":50}
+  },
+  "experiment_2a_spanning_walltime": {
+    "spanning_exchange_walltime":               {"min":47496924, "med":47778006, "mean":48976313, "max":143891886, "us_med":22751.4, "n":100,
+      "definition":"Cross-kernel OBTAIN via session — VPE0→K0→DTUBridge→net→K1→VPE1 service handler→reply"},
+    "spanning_revoke_session_walltime":         {"min":216492,   "med":264914,   "mean":276339,   "max":602350,    "us_med":126.1,   "n":30,
+      "definition":"TRUE cross-kernel REVOKE — revokes session cap (Hille tier-2 path with remote children); per-iter creates fresh session at sel 700 then revokes; triggers REVOKE/REVOKEFINISH KRNLC"},
+    "spanning_chain_revoke_session_10_walltime":  {"min":399586,  "med":436000,   "mean":435202,  "max":490108,    "us_med":207.6, "n":20,
+      "definition":"Local chain depth 10 rooted at session cap; revoke walks chain AND triggers cross-kernel REVOKE for session's remote child"},
+    "spanning_chain_revoke_session_50_walltime":  {"min":1051226, "med":1117150,  "mean":1120926, "max":1211954,   "us_med":532.0, "n":20},
+    "spanning_chain_revoke_session_100_walltime": {"min":1833036, "med":1984722,  "mean":2630117, "max":9059514,   "us_med":945.1, "n":20}
+  },
+  "thesis_comparison_local_vs_spanning": {
+    "exchange":  {"local_us":56.3,  "spanning_us":22751.4, "ratio_x":404.1, "delta_us":22695.0,
+      "interpretation":"Round-trip dominated by emulated E1000 + UDP + ChaCha20-Poly1305 + VPE1 service handler"},
+    "revoke":    {"local_us":80.2,  "spanning_us":126.1,   "ratio_x":1.6,   "delta_us":45.9,
+      "interpretation":"REVOKE/REVOKEFINISH KRNLC is much cheaper than CREATESESS — no VPE1 service handler involved, just kernel-to-kernel"},
+    "chain_10":  {"local_us":159.0, "spanning_us":207.6,   "ratio_x":1.3,   "delta_us":48.6},
+    "chain_50":  {"local_us":473.4, "spanning_us":532.0,   "ratio_x":1.1,   "delta_us":58.6},
+    "chain_100": {"local_us":890.2, "spanning_us":945.1,   "ratio_x":1.06,  "delta_us":54.9,
+      "interpretation":"Cross-kernel REVOKE delta is constant ~50us regardless of local chain depth — confirms tier-2 fires once per spanning subtree, scales O(local_chain) + O(1) cross-kernel"}
+  },
+  "hille_gem5_published": {
+    "spanning_exchange_us_at_2ghz": 3.2,
+    "spanning_revoke_us_at_2ghz": 1.9,
+    "spanning_chain_revoke_100_us_at_2ghz": 102.0
+  },
+  "headline_vs_gem5": {
+    "spanning_exchange":      {"qemu_us":22751.4, "gem5_us":3.2,   "delta_x":7110.0},
+    "spanning_revoke_session":{"qemu_us":126.1,   "gem5_us":1.9,   "delta_x":66.4},
+    "spanning_chain_100":     {"qemu_us":945.1,   "gem5_us":102.0, "delta_x":9.3}
+  },
+  "key_findings": [
+    "Cross-kernel REVOKE/REVOKEFINISH overhead = ~50us delta over local revoke. CONSISTENT across chain depths 10/50/100.",
+    "Hille two-tier revocation behaves as designed: tier-1 (local subtree) walks O(N), tier-2 fires ONCE per spanning subtree boundary regardless of local depth.",
+    "Spanning OBTAIN is 180x more expensive than spanning REVOKE (22.7ms vs 126us). Reason: OBTAIN involves VPE1's service-handler reply path; REVOKE is kernel-to-kernel only.",
+    "QEMU-vs-gem5 hardware-tax for REVOKE = 66x. For chain_100 = 9.3x — close to gem5 because local chain walk dominates and is similar speed on QEMU TCG.",
+    "Concurrency caveat: numbers are SINGLE-INITIATOR. Multi-initiator stress (3-node Test 14) shows 1/3 INV_ARGS rate from a protocol-level race in exchangeOverSession."
+  ]
+}
