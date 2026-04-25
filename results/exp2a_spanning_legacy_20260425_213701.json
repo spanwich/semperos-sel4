@@ -1,0 +1,46 @@
+{
+  "timestamp": "2026-04-25T21:30",
+  "branch": "legacy/hille-baseline",
+  "commit_base": "74a53a0 + cherry-picks (Stage 3-5 + epoch nonce + SEMPER_NUM_NODES + Theme-D ring)",
+  "platform": "Docker QEMU 2-node, qemu64+rdrand+fsgsbase+xsave+xsaveopt, e1000 socket networking",
+  "tsc_mhz": 2100,
+  "kernel_id_measured": 0,
+  "tests": {"node_a": "16/16 PASS"},
+  "iter_counts": {"span_warmup": 20, "span_iters": 100, "chain_warmup": 5, "chain_iters": 50},
+  "spanning_benchmarks": {
+    "spanning_exchange_walltime": {
+      "definition": "Cross-kernel OBTAIN through session at sel 300 (true round-trip K0->DTUBridge->net->K1->VPE1->reply). VPE0-side rdtsc walltime.",
+      "min": 47345717, "med": 47799382, "mean": 54457793, "max": 71943230, "n": 100,
+      "us_median_at_2100mhz": 22761.6
+    },
+    "spanning_revoke_walltime": {
+      "definition": "REVOKE of an OBTAINed cap (cap has remote parent on peer, no remote children — local-only revoke per Hille tier-1).",
+      "min": 140332, "med": 154018, "mean": 156421, "max": 308966, "n": 100,
+      "us_median_at_2100mhz": 73.3,
+      "caveat": "Does NOT exercise cross-kernel REVOKE — that requires revoking a cap WITH remote children (e.g. the session itself, as in Test 15b). Future bench iteration should revoke the session cap per iteration."
+    },
+    "spanning_chain_revoke_10_walltime": {
+      "min": 127762, "med": 134942, "mean": 138996, "max": 285574, "n": 50,
+      "us_median_at_2100mhz": 64.3,
+      "caveat": "Chain root is the OBTAINed cap with remote parent. Revoke walks local chain only — doesn't appear to scale with depth, suggesting either chain is not actually built (delegate semantics) or chain walk is faster than measurement noise."
+    },
+    "spanning_chain_revoke_50_walltime": {
+      "min": 124632, "med": 129518, "mean": 130292, "max": 152416, "n": 50,
+      "us_median_at_2100mhz": 61.7
+    },
+    "spanning_chain_revoke_100_walltime": {
+      "min": 125610, "med": 134788, "mean": 135772, "max": 182604, "n": 50,
+      "us_median_at_2100mhz": 64.2
+    }
+  },
+  "hille_gem5_published": {
+    "exchange": {"cycles": 6484, "us_at_2ghz": 1.8},
+    "revoke": {"cycles": 1997, "us_at_2ghz": 1.0},
+    "chain_revoke_100": {"cycles": 200000, "us_at_2ghz": 100}
+  },
+  "delta_factor_vs_gem5": {
+    "exchange": "47.8M / 6.5K = ~7400x (round trip dominates: emulated E1000 + UDP + ChaCha20-Poly1305 vs lossless instant gem5 NoC)",
+    "revoke": "154K / 1.99K = ~77x (local revoke; explained by QEMU TCG syscall overhead vs gem5)",
+    "chain_100": "135K / 200K = 0.67x (LOWER than gem5 — see caveat: bench likely not exercising chain walk correctly)"
+  }
+}
