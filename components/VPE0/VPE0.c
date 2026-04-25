@@ -1481,6 +1481,124 @@ int run(void)
         }
     }
 
+    printf("\n[VPE0] === Experiment 2A LOCAL complete ===\n");
+
+#ifdef SEMPER_MULTI_NODE
+    /* ==================================================================
+     * Experiment 2A: Spanning Operations (rdtsc walltime)  — FPT-176
+     *
+     * Cross-kernel CREATESESS / OBTAIN / REVOKE through the session at
+     * sel 300 established by Test 12. Wall-clock cycles via rdtsc on
+     * VPE0 — covers VPE0→K_self→DTUBridge→Net→K_peer→VPE1→reply path.
+     * Compare against Hille gem5 (~6,484 cy exchange, ~3,876 cy revoke;
+     * chain depth 100 ~200K cy).
+     *
+     * Only KERNEL_ID==0 measures; peer node(s) act as service responders
+     * (avoids the Theme-A wait_for self-deadlock seen on master HEAD when
+     * both sides initiate concurrently).
+     * ================================================================== */
+    if (SEMPER_KERNEL_ID == 0) {
+        printf("\n[VPE0] === Experiment 2A: Spanning Ops (rdtsc walltime) ===\n");
+
+        /* Iteration count chosen as BENCH_CAP_ITERS=1000 — matches the
+         * local Exp 2A grain rather than Exp 1's 10K, since each spanning
+         * op is ~1000x slower than a local one and 10K would exceed the
+         * docker timeout budget. */
+        const int SPAN_WARMUP = 100;
+        const int SPAN_ITERS  = 1000;
+        const int CHAIN_WARMUP = 20;
+        const int CHAIN_ITERS  = 200;
+
+        /* --- spanning_exchange (cross-kernel OBTAIN through session) --- */
+        {
+            int ok = 1;
+            for (int w = 0; w < SPAN_WARMUP && ok; w++) {
+                if (send_obtain(300, 600 + (w % 100), 1) == 0)
+                    send_revoke(600 + (w % 100));
+                else { ok = 0; }
+            }
+            if (ok) {
+                int collected = 0;
+                for (int i = 0; i < SPAN_ITERS && i < BENCH_ITERS; i++) {
+                    uint32_t sel = 600 + (i % 100);
+                    uint64_t t0 = rdtsc();
+                    int err = send_obtain(300, sel, 1);
+                    uint64_t t1 = rdtsc();
+                    if (err == 0) {
+                        bench_samples[collected++] = t1 - t0;
+                        send_revoke(sel);
+                    }
+                }
+                if (collected > 0)
+                    bench_report_n("spanning_exchange_walltime", collected);
+                printf("[BENCH-2A-SPANNING] spanning_exchange_walltime: collected n=%d\n", collected);
+            } else {
+                printf("[BENCH-2A-SPANNING] spanning_exchange_walltime: SETUP FAILED\n");
+            }
+        }
+
+        /* --- spanning_revoke (cross-kernel REVOKE of obtained cap) --- */
+        {
+            int collected = 0;
+            for (int i = 0; i < SPAN_ITERS && i < BENCH_ITERS; i++) {
+                if (send_obtain(300, 600, 1) != 0) continue;
+                uint64_t t0 = rdtsc();
+                int err = send_revoke(600);
+                uint64_t t1 = rdtsc();
+                if (err == 0) bench_samples[collected++] = t1 - t0;
+            }
+            if (collected > 0)
+                bench_report_n("spanning_revoke_walltime", collected);
+            printf("[BENCH-2A-SPANNING] spanning_revoke_walltime: collected n=%d\n", collected);
+        }
+
+        /* --- spanning_chain_revoke at depths 10, 50, 100 ---
+         * Setup per iteration: OBTAIN spanning cap at 600, then local
+         * exchange chain depth N (sels 600..600+N). Time only the REVOKE
+         * of the root, which walks the local chain AND triggers a single
+         * cross-kernel REVOKE on peer for the OBTAINed root parent. */
+        const int chain_depths[3] = {10, 50, 100};
+        const char *chain_names[3] = {"spanning_chain_revoke_10_walltime",
+                                       "spanning_chain_revoke_50_walltime",
+                                       "spanning_chain_revoke_100_walltime"};
+        for (int dx = 0; dx < 3; dx++) {
+            int depth = chain_depths[dx];
+            int chain_ok = 1;
+            int collected = 0;
+            for (int w = 0; w < CHAIN_WARMUP && chain_ok; w++) {
+                if (send_obtain(300, 600, 1) != 0) { chain_ok = 0; break; }
+                for (int d = 0; d < depth && chain_ok; d++) {
+                    if (send_exchange(0, (uint32_t)(600 + d), 1,
+                                      (uint32_t)(600 + d + 1), 1, 0) != 0) {
+                        chain_ok = 0; break;
+                    }
+                }
+                send_revoke(600);
+            }
+            for (int i = 0; i < CHAIN_ITERS && i < BENCH_ITERS && chain_ok; i++) {
+                if (send_obtain(300, 600, 1) != 0) { chain_ok = 0; break; }
+                int build_ok = 1;
+                for (int d = 0; d < depth && build_ok; d++) {
+                    if (send_exchange(0, (uint32_t)(600 + d), 1,
+                                      (uint32_t)(600 + d + 1), 1, 0) != 0)
+                        build_ok = 0;
+                }
+                if (!build_ok) { send_revoke(600); break; }
+                uint64_t t0 = rdtsc();
+                int err = send_revoke(600);
+                uint64_t t1 = rdtsc();
+                if (err == 0) bench_samples[collected++] = t1 - t0;
+            }
+            if (chain_ok && collected > 0)
+                bench_report_n(chain_names[dx], collected);
+            printf("[BENCH-2A-SPANNING] %s: collected n=%d\n",
+                   chain_names[dx], collected);
+        }
+
+        printf("\n[VPE0] === Experiment 2A SPANNING complete ===\n");
+    }
+#endif /* SEMPER_MULTI_NODE */
+
     printf("\n[VPE0] === Experiment 2A complete ===\n");
 
     /* Yield forever — keeps other components (DTUBridge, VPE1) scheduled */

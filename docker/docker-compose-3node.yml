@@ -1,0 +1,66 @@
+#
+# docker-compose-3node.yml — Triple-QEMU SemperOS Hille spanning evaluation
+#
+# Three QEMU instances on a shared multicast hub. Each emulates an
+# Intel 82540EM (e1000) and joins multicast group 230.0.0.1:11000 so all
+# three see every frame. With `-cpu host` unavailable inside the
+# semperos-qemu container we run TCG; that's fine for correctness
+# verification and within-platform timing comparison (Hille gem5 vs
+# this-on-QEMU+TCG+E1000).
+#
+# Each container's seL4 image is pre-built with distinct KERNEL_ID +
+# SELF_IP + PEER_IP_0 + PEER_IP_1 + SEMPER_NUM_NODES=3 (see /build-isos
+# for cmake invocation).
+#
+# Usage:
+#   cd docker/
+#   docker compose -f docker-compose-3node.yml up --abort-on-container-exit \
+#       2>&1 | tee ../qemu-3node-hille.log
+#
+
+services:
+  node-a:
+    image: semperos-qemu:latest
+    container_name: semperos-3n-node-a
+    volumes:
+      - ../../../build-node0/images:/sel4-image:ro
+    network_mode: host
+    environment:
+      TIMEOUT: "900"
+    command:
+      - -nic
+      - none
+      - -device
+      - e1000,netdev=eth0,mac=52:54:00:00:00:01
+      - -netdev
+      - "socket,id=eth0,mcast=230.0.0.1:11000,localaddr=127.0.0.1"
+
+  node-b:
+    image: semperos-qemu:latest
+    container_name: semperos-3n-node-b
+    volumes:
+      - ../../../build-node1/images:/sel4-image:ro
+    network_mode: host
+    environment:
+      TIMEOUT: "900"
+    depends_on:
+      - node-a
+    entrypoint:
+      - sh
+      - -c
+      - "sleep 3 && /run-qemu.sh -nic none -device e1000,netdev=eth0,mac=52:54:00:00:00:02 -netdev socket,id=eth0,mcast=230.0.0.1:11000,localaddr=127.0.0.1"
+
+  node-c:
+    image: semperos-qemu:latest
+    container_name: semperos-3n-node-c
+    volumes:
+      - ../../../build-node2/images:/sel4-image:ro
+    network_mode: host
+    environment:
+      TIMEOUT: "900"
+    depends_on:
+      - node-a
+    entrypoint:
+      - sh
+      - -c
+      - "sleep 6 && /run-qemu.sh -nic none -device e1000,netdev=eth0,mac=52:54:00:00:00:03 -netdev socket,id=eth0,mcast=230.0.0.1:11000,localaddr=127.0.0.1"
