@@ -1293,8 +1293,11 @@ void post_init(void)
     /* Initialize network ring buffers (07e).
      * DTUBridge inits both rings; kernel attaches later in kernel_start().
      * post_init runs before any run(), so kernel_start() sees initialized rings. */
-    vdtu_ring_init(&g_net_out_ring, (void *)net_outbound, 4, 512);
-    vdtu_ring_init(&g_net_in_ring, (void *)net_inbound, 4, 512);
+    /* Theme-D band-aid (per WAN audit): 4 → 8 slots so a single PING burst
+     * or HELLO retransmit cluster can't saturate net_in before the kernel
+     * polls. 8 × 512 + 64 ctrl = 4160 fits inside Buf(8192). */
+    vdtu_ring_init(&g_net_out_ring, (void *)net_outbound, 8, 512);
+    vdtu_ring_init(&g_net_in_ring, (void *)net_inbound, 8, 512);
     net_rings_ready = true;
     printf("[%s] Net rings initialized (4 slots x 512B)\n", COMPONENT_NAME);
 

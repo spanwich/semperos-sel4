@@ -166,8 +166,8 @@ component SemperKernel {
     consumes Signal net_msg_arrived;
 
     /* Network ring buffers: kernel <-> DTUBridge (07e) */
-    dataport Buf(4096) net_outbound;    /* kernel writes, bridge reads */
-    dataport Buf(4096) net_inbound;     /* bridge writes, kernel reads */
+    dataport Buf(8192) net_outbound;    /* kernel writes, bridge reads */
+    dataport Buf(8192) net_inbound;     /* bridge writes, kernel reads */
 }
 
 component VPE0 {
@@ -266,8 +266,8 @@ component DTUBridge {
     emits Signal net_msg_ready;
 
     /* Network ring buffers: kernel <-> DTUBridge (07e) */
-    dataport Buf(4096) net_outbound;    /* kernel writes, bridge reads */
-    dataport Buf(4096) net_inbound;     /* bridge writes, kernel reads */
+    dataport Buf(8192) net_outbound;    /* kernel writes, bridge reads */
+    dataport Buf(8192) net_inbound;     /* bridge writes, kernel reads */
 }
 
 /*
