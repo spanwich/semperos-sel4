@@ -1061,9 +1061,15 @@ static void dtu_udp_recv_cb(void *arg, struct udp_pcb *pcb,
     if (payload_len > avail)
         payload_len = avail;
 
-    printf("[%s] NET RX: %d bytes from node %u (label=0x%lx)\n",
-           COMPONENT_NAME, pt_len, sender_node,
-           (unsigned long)hdr.label);
+    {
+        static int rx_log_count = 0;
+        if (rx_log_count < 24) {
+            printf("[%s] NET RX: %d bytes from node %u (label=0x%lx)\n",
+                   COMPONENT_NAME, pt_len, sender_node,
+                   (unsigned long)hdr.label);
+            rx_log_count++;
+        }
+    }
 
     /* Write to inbound ring buffer for kernel to consume */
     if (net_rings_ready) {
@@ -1404,10 +1410,14 @@ int run(void)
                         ip_addr_copy_from_ip4(dest_ip, peer_addrs[peer_idx]);
                         err_t err = udp_sendto(g_udp_pcb, p, &dest_ip, DTU_UDP_PORT);
                         pbuf_free(p);
-                        printf("[%s] NET TX: %u->%d bytes to peer %d (kid=%u, label=0x%lx, err=%d)\n",
-                               COMPONENT_NAME, plaintext_len, ct_len,
-                               peer_idx, (unsigned)dest_kid,
-                               (unsigned long)outmsg->hdr.label, err);
+                        static int tx_net_log = 0;
+                        if (tx_net_log < 24) {
+                            printf("[%s] NET TX: %u->%d bytes to peer %d (kid=%u, label=0x%lx, err=%d)\n",
+                                   COMPONENT_NAME, plaintext_len, ct_len,
+                                   peer_idx, (unsigned)dest_kid,
+                                   (unsigned long)outmsg->hdr.label, err);
+                            tx_net_log++;
+                        }
                     }
                 } else {
                     printf("[%s] NET TX: encrypt failed for %u bytes (pt_len=%u ct_max=%zu)\n",

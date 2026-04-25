@@ -218,8 +218,14 @@ int config_config_recv(int target_pe, int ep_id,
     ep->slot_size   = (int)slot_size;
     ep->flags       = flags;
 
-    printf("[vDTU] config_recv(pe=%d, ep=%d) -> channel %d (%d slots x %dB)\n",
-           target_pe, ep_id, ch, (int)slot_count, (int)slot_size);
+    {
+        static int cfg_log_count = 0;
+        if (cfg_log_count < 32) {
+            printf("[vDTU] config_recv(pe=%d, ep=%d) -> channel %d (%d slots x %dB)\n",
+                   target_pe, ep_id, ch, (int)slot_count, (int)slot_size);
+            cfg_log_count++;
+        }
+    }
 
     return ch;
 }

@@ -481,8 +481,10 @@ static int send_revoke_ex(uint64_t cap_sel, uint64_t *out_cycles)
  * Benchmark Infrastructure (Experiment 1)
  * ============================================================== */
 
-#define BENCH_WARMUP    1000
-#define BENCH_ITERS     10000
+/* Reduced from 1000/10000 so Exp 1 fits in docker timeout under verbose
+ * [DTUBridge] L2 logging on QEMU TCG. n=2000 is still statistically robust. */
+#define BENCH_WARMUP    200
+#define BENCH_ITERS     2000
 
 /* Reduced iteration counts for expensive capability benchmarks.
  * Each iteration involves multiple seL4 IPC round-trips (~15ms each).
@@ -1084,6 +1086,131 @@ int run(void)
         printf("[VPE0] Test 11 (chain revoke depth %d): %s\n", depth, ok ? "PASS" : "FAIL");
     }
 
+    /* ==================================================================
+     * Exp 2A LOCAL + Exp 1 — both run BEFORE Tests 12-15b so kernel state
+     * is fresh (post-spanning-revoke leaves caps in a degraded state).
+     *
+     * 2A LOCAL runs FIRST because Exp 1's bench_ring_write fills the SYSC
+     * ring with non-syscall messages (no reply expected) — those leave the
+     * ring head/tail pointers in a state that breaks subsequent real
+     * syscalls (creategate / exchange / revoke return -1 timeout).
+     *
+     * All measurements use VPE0-side rdtsc walltime, comparable apples-
+     * to-apples with the spanning bench (Exp 2A SPANNING) below.
+     * ==================================================================*/
+    printf("\n[VPE0] === Experiment 2A: Capability Ops (Local, walltime) ===\n");
+    {
+        /* Iter counts kept modest so the unified bench fits the docker
+         * timeout budget under QEMU TCG. n=200 is statistically robust
+         * for median/mean reporting. */
+        const int LOCAL_WARMUP = 20;
+        const int LOCAL_ITERS  = 200;
+        const int LCHAIN_WARMUP = 5;
+        const int LCHAIN_ITERS  = 50;
+
+        /* --- local_exchange_walltime ---
+         * VPE0 OBTAIN of a local cap from VPE1 (tcap=2 = VPE1, mode=1=obtain).
+         * Setup: create gate at sel 200, delegate to VPE1:210, then OBTAIN
+         * back rotating selectors. */
+        /* Sel 1000 (root) + sel 1010 (VPE1 mirror) + sel 1100..1199 (rotating
+         * obtain targets) + sel 1200..1209 (warmup). Avoids ALL Tests 1-11
+         * sels (5..200) and all Tests 12-15b sels (300..500). */
+        const uint32_t LSRC  = 600;   /* between Tests sels (≤500) and bench-session sel 700 */
+        const uint32_t LDST  = 610;
+        const uint64_t LEPID = 6;     /* EP 6 — Tests 2/5/6/7/8/11 use 2..7 transiently then revoke */
+
+        int err = send_creategate(LSRC, 0xBE00, LEPID, 32);
+        if (err == 0) err = send_exchange(2, LSRC, 1, LDST, 1, 0);
+        if (err == 0) {
+            for (int w = 0; w < LOCAL_WARMUP; w++) {
+                send_exchange(2, 1200 + (w % 10), 1, LDST, 1, 1);
+                send_revoke(1200 + (w % 10));
+            }
+            int collected = 0;
+            for (int i = 0; i < LOCAL_ITERS && i < BENCH_ITERS; i++) {
+                uint32_t sel = (uint32_t)(1100 + (i % 100));
+                uint64_t t0 = rdtsc();
+                int e = send_exchange(2, sel, 1, LDST, 1, 1);
+                uint64_t t1 = rdtsc();
+                if (e == 0) bench_samples[collected++] = t1 - t0;
+                send_revoke(sel);
+            }
+            if (collected > 0)
+                bench_report_n("local_exchange_walltime", collected);
+            printf("[BENCH-2A-LOCAL] local_exchange_walltime: collected n=%d\n", collected);
+            send_revoke(LSRC);
+        } else {
+            printf("[BENCH-2A-LOCAL] local_exchange_walltime: SETUP FAILED (err=%d)\n", err);
+        }
+
+        /* --- local_revoke_walltime --- per iter create+delegate (setup, untimed) → revoke (timed). */
+        for (int w = 0; w < LOCAL_WARMUP; w++) {
+            send_creategate(LSRC, 0xBE00, LEPID, 32);
+            send_exchange(2, LSRC, 1, LDST, 1, 0);
+            send_revoke(LSRC);
+        }
+        {
+            int collected = 0;
+            for (int i = 0; i < LOCAL_ITERS && i < BENCH_ITERS; i++) {
+                send_creategate(LSRC, 0xBE00, LEPID, 32);
+                send_exchange(2, LSRC, 1, LDST, 1, 0);
+                uint64_t t0 = rdtsc();
+                int e = send_revoke(LSRC);
+                uint64_t t1 = rdtsc();
+                if (e == 0) bench_samples[collected++] = t1 - t0;
+            }
+            if (collected > 0)
+                bench_report_n("local_revoke_walltime", collected);
+            printf("[BENCH-2A-LOCAL] local_revoke_walltime: collected n=%d\n", collected);
+        }
+
+        /* --- local_chain_revoke at depths 10, 50, 100 ---
+         * Chain LSRC → LSRC+1 → ... → LSRC+depth via self-exchange.
+         * Time only the revoke of the root which walks the full chain. */
+        const int chain_depths[3] = {10, 50, 100};
+        const char *chain_names[3] = {"local_chain_revoke_10_walltime",
+                                       "local_chain_revoke_50_walltime",
+                                       "local_chain_revoke_100_walltime"};
+        for (int dx = 0; dx < 3; dx++) {
+            int depth = chain_depths[dx];
+            int chain_ok = 1;
+            int collected = 0;
+            for (int w = 0; w < LCHAIN_WARMUP && chain_ok; w++) {
+                if (send_creategate(LSRC, 0xBE00, LEPID, 32) != 0) {
+                    chain_ok = 0; break;
+                }
+                for (int d = 0; d < depth && chain_ok; d++) {
+                    if (send_exchange(0, (uint32_t)(LSRC + d), 1,
+                                      (uint32_t)(LSRC + d + 1), 1, 0) != 0) {
+                        chain_ok = 0; break;
+                    }
+                }
+                send_revoke(LSRC);
+            }
+            for (int i = 0; i < LCHAIN_ITERS && i < BENCH_ITERS && chain_ok; i++) {
+                if (send_creategate(LSRC, 0xBE00, LEPID, 32) != 0) {
+                    chain_ok = 0; break;
+                }
+                int build_ok = 1;
+                for (int d = 0; d < depth && build_ok; d++) {
+                    if (send_exchange(0, (uint32_t)(LSRC + d), 1,
+                                      (uint32_t)(LSRC + d + 1), 1, 0) != 0)
+                        build_ok = 0;
+                }
+                if (!build_ok) { send_revoke(LSRC); break; }
+                uint64_t t0 = rdtsc();
+                int e = send_revoke(LSRC);
+                uint64_t t1 = rdtsc();
+                if (e == 0) bench_samples[collected++] = t1 - t0;
+            }
+            if (chain_ok && collected > 0)
+                bench_report_n(chain_names[dx], collected);
+            printf("[BENCH-2A-LOCAL] %s: collected n=%d\n",
+                   chain_names[dx], collected);
+        }
+    }
+    printf("\n[VPE0] === Experiment 2A LOCAL complete ===\n");
+
 #ifdef SEMPER_MULTI_NODE
     /* ==============================================================
      * Test 12: Cross-kernel CREATESESS (spanning session)
@@ -1121,7 +1248,7 @@ int run(void)
          * DTUBridges. Single attempt — retries cause BUSY errors because
          * the kernel thread from the first attempt is still blocked. */
         printf("[VPE0] Test 12: waiting for remote VPE1 + network ready...\n");
-        for (int y = 0; y < 500000; y++) seL4_Yield();
+        for (int y = 0; y < 50000; y++) seL4_Yield();
 
         printf("[VPE0] Test 12: sending CREATESESS\n");
         err = send_createsess(300, remote_name, 10);
@@ -1147,7 +1274,7 @@ int run(void)
      * ============================================================== */
     {
         printf("[VPE0] Test 13: waiting before OBTAIN...\n");
-        for (int y = 0; y < 500000; y++) seL4_Yield();
+        for (int y = 0; y < 50000; y++) seL4_Yield();
 
         printf("[VPE0] Test 13: sending OBTAIN (sess=300 -> cap=400)\n");
         int obt_err = send_obtain(300, 400, 1);
@@ -1179,7 +1306,7 @@ int run(void)
             printf("[VPE0] Test 14: CREATEGATE sel 500 FAILED (err=%d)\n", cg_err);
             fail++;
         } else {
-            for (int y = 0; y < 500000; y++) seL4_Yield();
+            for (int y = 0; y < 50000; y++) seL4_Yield();
             printf("[VPE0] Test 14: sending DELEGATE (cap=500 -> sess=300)\n");
             int del_err = send_delegate(300, 500, 1);
             int del_ok = (del_err == 0);
@@ -1330,7 +1457,7 @@ int run(void)
                rev_ok ? "PASS" : "FAIL", rev_err);
 
         /* 15b: revoke the session cap — this has remote children */
-        for (int y = 0; y < 500000; y++) seL4_Yield();
+        for (int y = 0; y < 50000; y++) seL4_Yield();
         printf("[VPE0] Test 15b: REVOKE session cap at sel 300 (spanning)\n");
         rev_err = send_revoke(300);
         rev_ok = (rev_err == 0);
@@ -1342,261 +1469,14 @@ int run(void)
 
     printf("[VPE0] === %d passed, %d failed ===\n", pass, fail);
 
-    /* Spanning exchange tests removed — replaced by layered test suite.
-     * See Confluence: "SemperOS-seL4 — Multi-Node Communication Test Suite Design"
-     * Layer 2 (KRNLC_PING) and Layers 3-6 will be added incrementally. */
-    /* ==============================================================
-     * Experiment 1: vDTU Primitive Latency Benchmarks
-     *
-     * Measures the six core vDTU primitives using x86 rdtsc.
-     * Results are in CPU cycles. us conversion assumes 2 GHz
-     * (QEMU default for qemu64 CPU model).
-     * ============================================================== */
-
+    /* Exp 1 runs LAST: bench_ring_write pollutes the SYSC ring (channel 0)
+     * with non-syscall messages, after which subsequent SYSCALLs return
+     * err=-1 (wait_for_reply timeout). Defer to end so Tests 12-15b and
+     * spanning bench can run on a clean ring. */
     printf("\n[VPE0] === Experiment 1: vDTU Primitive Latency ===\n");
     bench_all();
 
-    /* ==============================================================
-     * Experiment 2A: Capability Operation Benchmarks (Local)
-     *
-     * Measures local exchange and revocation performance.
-     * Label: [BENCH-2A-LOCAL-UNVERIFIED]
-     *
-     * Paper comparison: Hille et al. 2019, gem5 2GHz
-     *   Local exchange:  3597 cycles / 1.8us
-     *   Local revoke:    1997 cycles / 1.0us
-     *   Chain d=100:     ~200K cycles / ~100us
-     * ============================================================== */
-    printf("\n[VPE0] === Experiment 2A: Capability Ops (Local, Unverified) ===\n");
-    printf("[VPE0] Cap ops: %d warmup + %d measured\n",
-           BENCH_CAP_WARMUP, BENCH_CAP_ITERS);
-    printf("[VPE0] Chain ops: %d warmup + %d measured\n",
-           BENCH_CHAIN_WARMUP, BENCH_CHAIN_ITERS);
-    printf("[VPE0] TSC frequency: %lu MHz (method: %s)\n\n",
-           (unsigned long)tsc_mhz, tsc_method);
-
-    /* --- Bench 2A-1: local_exchange --- */
-    {
-        /* Measure: VPE0 obtains a capability from VPE1 (both local) */
-        /* Setup: create a gate at sel 200, delegate to VPE1:210 */
-        err = send_creategate(200, 0xBE00, 8, 32);
-        if (err != 0) {
-            printf("[BENCH-2A-LOCAL-UNVERIFIED] local_exchange: SETUP FAILED (err=%d)\n", err);
-        } else {
-            err = send_exchange(2, 200, 1, 210, 1, 0);
-            if (err != 0) {
-                printf("[BENCH-2A-LOCAL-UNVERIFIED] local_exchange: DELEGATE FAILED (err=%d)\n", err);
-            } else {
-                /* Warmup: obtain + revoke cycle */
-                for (int i = 0; i < BENCH_CAP_WARMUP; i++) {
-                    send_exchange(2, 220 + (i % 10), 1, 210, 1, 1);
-                    send_revoke(220 + (i % 10));
-                }
-                /* Measure: obtain from VPE1:210 into VPE0 at rotating selectors.
-                 * Use kernel-measured cycles (via _cap_bench_cycles in reply). */
-                for (int i = 0; i < BENCH_CAP_ITERS; i++) {
-                    uint32_t sel = (uint32_t)(300 + (i % 100));
-                    uint64_t kcycles = 0;
-                    send_exchange_ex(2, sel, 1, 210, 1, 1, &kcycles);
-                    bench_samples[i] = kcycles;
-                    send_revoke(sel);
-                }
-                bench_report_n("local_exchange_kernel", BENCH_CAP_ITERS);
-                printf("[BENCH-2A-LOCAL-UNVERIFIED] local_exchange_kernel: collected\n");
-            }
-            send_revoke(200);
-        }
-    }
-
-    /* --- Bench 2A-2: local_revoke --- */
-    {
-        /* Measure: create a gate, delegate to VPE1, then revoke */
-        /* Warmup */
-        for (int i = 0; i < BENCH_CAP_WARMUP; i++) {
-            send_creategate(200, 0xBE00, 8, 32);
-            send_exchange(2, 200, 1, 210, 1, 0);
-            send_revoke(200);
-        }
-        /* Measure: kernel-measured revoke cycles */
-        for (int i = 0; i < BENCH_CAP_ITERS; i++) {
-            send_creategate(200, 0xBE00, 8, 32);
-            send_exchange(2, 200, 1, 210, 1, 0);
-            uint64_t kcycles = 0;
-            send_revoke_ex(200, &kcycles);
-            bench_samples[i] = kcycles;
-        }
-        bench_report_n("local_revoke_kernel", BENCH_CAP_ITERS);
-        printf("[BENCH-2A-LOCAL-UNVERIFIED] local_revoke_kernel: collected\n");
-    }
-
-    /* --- Bench 2A-3: chain_revoke_10 --- */
-    {
-        /* Build a chain of depth 10 via self-exchange (tcap=0, delegate).
-         * Each step clones the previous tip into a new selector within VPE0's
-         * CapTable, creating a parent-child chain: 200→210→220→...→300.
-         * revoke_rec walks the chain recursively regardless of VPE ownership. */
-        int chain_ok = 1;
-        /* Warmup */
-        for (int w = 0; w < BENCH_CHAIN_WARMUP && chain_ok; w++) {
-            send_creategate(200, 0xBE00, 8, 32);
-            for (int d = 0; d < 10; d++) {
-                uint32_t s = (uint32_t)(200 + d * 10);
-                uint32_t ds = (uint32_t)(200 + (d + 1) * 10);
-                err = send_exchange(0, s, 1, ds, 1, 0);
-                if (err != 0) {
-                    printf("[VPE0] chain_revoke_10 warmup FAILED at d=%d err=%d\n", d, err);
-                    chain_ok = 0; break;
-                }
-            }
-            send_revoke(200);
-        }
-        /* Measure: kernel-measured revoke cycles */
-        for (int i = 0; i < BENCH_CHAIN_ITERS && chain_ok; i++) {
-            send_creategate(200, 0xBE00, 8, 32);
-            for (int d = 0; d < 10; d++) {
-                uint32_t s = (uint32_t)(200 + d * 10);
-                uint32_t ds = (uint32_t)(200 + (d + 1) * 10);
-                err = send_exchange(0, s, 1, ds, 1, 0);
-                if (err != 0) {
-                    printf("[VPE0] chain_revoke_10 build FAILED at i=%d d=%d err=%d\n", i, d, err);
-                    chain_ok = 0; break;
-                }
-            }
-            if (!chain_ok) { send_revoke(200); break; }
-            uint64_t kcycles = 0;
-            send_revoke_ex(200, &kcycles);
-            bench_samples[i] = kcycles;
-        }
-        if (chain_ok) {
-            bench_report_n("chain_revoke_10_kernel", BENCH_CHAIN_ITERS);
-            printf("[BENCH-2A-LOCAL-UNVERIFIED] chain_revoke_10_kernel: collected\n");
-        }
-    }
-
-    /* --- Bench 2A-4: chain_revoke_25 --- */
-    {
-        int chain_ok = 1;
-        /* Warmup */
-        for (int w = 0; w < BENCH_CHAIN_WARMUP && chain_ok; w++) {
-            send_creategate(200, 0xBE00, 8, 32);
-            for (int d = 0; d < 25; d++) {
-                uint32_t s = (uint32_t)(200 + d * 4);
-                uint32_t ds = (uint32_t)(200 + (d + 1) * 4);
-                err = send_exchange(0, s, 1, ds, 1, 0);
-                if (err != 0) {
-                    printf("[VPE0] chain_revoke_25 warmup FAILED at d=%d err=%d\n", d, err);
-                    chain_ok = 0; break;
-                }
-            }
-            send_revoke(200);
-        }
-        /* Measure */
-        for (int i = 0; i < BENCH_CHAIN_ITERS && chain_ok; i++) {
-            send_creategate(200, 0xBE00, 8, 32);
-            for (int d = 0; d < 25; d++) {
-                uint32_t s = (uint32_t)(200 + d * 4);
-                uint32_t ds = (uint32_t)(200 + (d + 1) * 4);
-                err = send_exchange(0, s, 1, ds, 1, 0);
-                if (err != 0) {
-                    printf("[VPE0] chain_revoke_25 build FAILED at i=%d d=%d err=%d\n", i, d, err);
-                    chain_ok = 0; break;
-                }
-            }
-            if (!chain_ok) { send_revoke(200); break; }
-            uint64_t kcycles = 0;
-            send_revoke_ex(200, &kcycles);
-            bench_samples[i] = kcycles;
-        }
-        if (chain_ok) {
-            bench_report_n("chain_revoke_25_kernel", BENCH_CHAIN_ITERS);
-            printf("[BENCH-2A-LOCAL-UNVERIFIED] chain_revoke_25_kernel: collected\n");
-        }
-    }
-
-    /* --- Bench 2A-5: chain_revoke_50 --- */
-    {
-        int chain_ok = 1;
-        /* Warmup */
-        for (int w = 0; w < BENCH_CHAIN_WARMUP && chain_ok; w++) {
-            send_creategate(200, 0xBE00, 8, 32);
-            for (int d = 0; d < 50; d++) {
-                uint32_t s = (uint32_t)(200 + d * 2);
-                uint32_t ds = (uint32_t)(200 + (d + 1) * 2);
-                err = send_exchange(0, s, 1, ds, 1, 0);
-                if (err != 0) {
-                    printf("[VPE0] chain_revoke_50 warmup FAILED at d=%d err=%d\n", d, err);
-                    chain_ok = 0; break;
-                }
-            }
-            send_revoke(200);
-        }
-        /* Measure */
-        for (int i = 0; i < BENCH_CHAIN_ITERS && chain_ok; i++) {
-            send_creategate(200, 0xBE00, 8, 32);
-            for (int d = 0; d < 50; d++) {
-                uint32_t s = (uint32_t)(200 + d * 2);
-                uint32_t ds = (uint32_t)(200 + (d + 1) * 2);
-                err = send_exchange(0, s, 1, ds, 1, 0);
-                if (err != 0) {
-                    printf("[VPE0] chain_revoke_50 build FAILED at i=%d d=%d err=%d\n", i, d, err);
-                    chain_ok = 0; break;
-                }
-            }
-            if (!chain_ok) { send_revoke(200); break; }
-            uint64_t kcycles = 0;
-            send_revoke_ex(200, &kcycles);
-            bench_samples[i] = kcycles;
-        }
-        if (chain_ok) {
-            bench_report_n("chain_revoke_50_kernel", BENCH_CHAIN_ITERS);
-            printf("[BENCH-2A-LOCAL-UNVERIFIED] chain_revoke_50_kernel: collected\n");
-        }
-    }
-
-    /* --- Bench 2A-6: chain_revoke_100 --- */
-    {
-        int chain_ok = 1;
-        /* Warmup */
-        for (int w = 0; w < BENCH_CHAIN_WARMUP && chain_ok; w++) {
-            send_creategate(200, 0xBE00, 8, 32);
-            for (int d = 0; d < 100; d++) {
-                uint32_t s = (uint32_t)(200 + d);
-                uint32_t ds = (uint32_t)(200 + d + 1);
-                err = send_exchange(0, s, 1, ds, 1, 0);
-                if (err != 0) {
-                    printf("[VPE0] chain_revoke_100 warmup FAILED at d=%d err=%d\n", d, err);
-                    chain_ok = 0; break;
-                }
-            }
-            send_revoke(200);
-        }
-        /* Measure */
-        for (int i = 0; i < BENCH_CHAIN_ITERS && chain_ok; i++) {
-            send_creategate(200, 0xBE00, 8, 32);
-            for (int d = 0; d < 100; d++) {
-                uint32_t s = (uint32_t)(200 + d);
-                uint32_t ds = (uint32_t)(200 + d + 1);
-                err = send_exchange(0, s, 1, ds, 1, 0);
-                if (err != 0) {
-                    printf("[VPE0] chain_revoke_100 build FAILED at i=%d d=%d err=%d\n", i, d, err);
-                    chain_ok = 0; break;
-                }
-            }
-            if (!chain_ok) { send_revoke(200); break; }
-            uint64_t kcycles = 0;
-            send_revoke_ex(200, &kcycles);
-            bench_samples[i] = kcycles;
-        }
-        if (chain_ok) {
-            bench_report_n("chain_revoke_100_kernel", BENCH_CHAIN_ITERS);
-            printf("[BENCH-2A-LOCAL-UNVERIFIED] chain_revoke_100_kernel: collected\n");
-        }
-    }
-
-    printf("\n[VPE0] === Experiment 2A LOCAL complete ===\n");
-
-
-    printf("\n[VPE0] === Experiment 2A complete ===\n");
+    printf("\n[VPE0] === All experiments complete (Exp 2A LOCAL + Tests 1-15b + Spanning + Exp 1) ===\n");
 
     /* Yield forever — keeps other components (DTUBridge, VPE1) scheduled */
     for (;;) { seL4_Yield(); }

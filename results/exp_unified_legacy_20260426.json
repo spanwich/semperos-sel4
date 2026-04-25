@@ -1,0 +1,68 @@
+{
+  "title": "FPT-176 Hille-on-hardware unified benchmark — same image, single run",
+  "timestamp": "2026-04-26T00:30",
+  "branch": "legacy/hille-baseline",
+  "platform": {
+    "name": "Docker QEMU 2-node, e1000 socket networking",
+    "qemu": "qemu-system-x86_64 -machine q35 -cpu qemu64+rdrand+fsgsbase+xsave+xsaveopt -m 512",
+    "topology": "SEMPER_NUM_NODES=2",
+    "tsc_mhz": 2100,
+    "kernel_id_measured": 0,
+    "image": "single binary per node, all 4 sections in one VPE0 run"
+  },
+  "tests": "16/16 PASS on node-a (Tests 1-15b including spanning revoke)",
+  "iter_counts": {
+    "exp1_warmup": 200, "exp1_iters": 2000,
+    "local_warmup": 20, "local_iters": 200,
+    "lchain_warmup": 5, "lchain_iters": 50,
+    "span_warmup": 20, "span_iters": 100,
+    "schain_warmup": 5, "schain_iters": 50
+  },
+  "experiment_1_vdtu_primitives": {
+    "ring_write":     {"min":2638, "med":2704,  "mean":5799,  "max":6099490, "us_med":1.3},
+    "ring_read":      {"min":234,  "med":252,   "mean":269,   "max":32056,   "us_med":0.1},
+    "ring_roundtrip": {"min":2870, "med":3120,  "mean":6361,  "max":6009960, "us_med":1.5},
+    "ep_configure":   {"min":47986,"med":50244, "mean":69468, "max":6179886, "us_med":23.9},
+    "ep_terminate":   {"min":46086,"med":47778, "mean":66709, "max":6279870, "us_med":22.8},
+    "mem_access":     {"min":298,  "med":322,   "mean":427,   "max":213122,  "us_med":0.2}
+  },
+  "experiment_2a_local_walltime": {
+    "local_exchange_walltime":         {"min":107032,  "med":127442, "mean":260650, "max":8047838,  "us_med":60.7,  "n":200},
+    "local_revoke_walltime":           {"min":161148,  "med":176598, "mean":269319, "max":6336254,  "us_med":84.1,  "n":200},
+    "local_chain_revoke_10_walltime":  {"min":308590,  "med":333978, "mean":454605, "max":6382336,  "us_med":159.0, "n":50},
+    "local_chain_revoke_50_walltime":  {"min":919652,  "med":995330, "mean":1266364,"max":7102376,  "us_med":474.0, "n":50},
+    "local_chain_revoke_100_walltime": {"min":1763898, "med":2006302,"mean":2467897,"max":8146726,  "us_med":955.4, "n":50}
+  },
+  "experiment_2a_spanning_walltime": {
+    "spanning_exchange_walltime":         {"min":47586028, "med":47769670, "mean":48725214, "max":143653304, "us_med":22747.5, "n":100},
+    "spanning_revoke_walltime":           {"min":145672,   "med":157916,   "mean":160754,   "max":268538,    "us_med":75.2,    "n":100, "caveat":"Local-only revoke (cap has remote PARENT not remote children); does not exercise cross-kernel REVOKEFINISH"},
+    "spanning_chain_revoke_10_walltime":  {"min":129548,   "med":135324,   "mean":137490,   "max":165214,    "us_med":64.4,    "n":50,  "caveat":"Flat across depths; chain may not be exercising scaled revoke walk — see follow-up"},
+    "spanning_chain_revoke_50_walltime":  {"min":131510,   "med":138478,   "mean":140735,   "max":206488,    "us_med":65.9,    "n":50},
+    "spanning_chain_revoke_100_walltime": {"min":129704,   "med":134530,   "mean":136944,   "max":163750,    "us_med":64.1,    "n":50}
+  },
+  "hille_gem5_published": {
+    "local_exchange_us_at_2ghz": 1.8,
+    "local_revoke_us_at_2ghz": 1.0,
+    "chain_revoke_100_us_at_2ghz": 100.0,
+    "spanning_exchange_us_at_2ghz": 3.2,
+    "spanning_revoke_us_at_2ghz": 1.9,
+    "spanning_chain_revoke_100_us_at_2ghz": 102.0
+  },
+  "headline_comparison": {
+    "local_exchange":           {"qemu_us": 60.7,    "gem5_us": 1.8,  "delta_x": 33.7},
+    "local_revoke":             {"qemu_us": 84.1,    "gem5_us": 1.0,  "delta_x": 84.1},
+    "local_chain_revoke_100":   {"qemu_us": 955.4,   "gem5_us": 100.0,"delta_x": 9.5},
+    "spanning_exchange":        {"qemu_us": 22747.5, "gem5_us": 3.2,  "delta_x": 7109.0,
+                                 "note": "round-trip dominated by emulated E1000 + UDP + ChaCha20-Poly1305 vs lossless instant gem5 NoC"},
+    "spanning_revoke":          {"qemu_us": 75.2,    "gem5_us": 1.9,  "delta_x": 39.6, "note": "local-only revoke; not true cross-kernel"},
+    "spanning_chain_100":       {"qemu_us": 64.1,    "gem5_us": 102.0,"delta_x": 0.6,  "note": "chain not exercised — investigate"}
+  },
+  "thesis_findings": [
+    "All measurements on a SINGLE image and a SINGLE run — no XCP-ng-vs-Docker apples-to-oranges.",
+    "Local primitives (Exp 1, ring/EP/mem) are 1-50us — close to bare-metal expectation.",
+    "Local capability ops (Exp 2A LOCAL) are 60-1000us — 30-100x slower than gem5, dominated by QEMU TCG syscall overhead.",
+    "Spanning EXCHANGE = 22.7ms = 7000x gem5 — round-trip cost of real Ethernet + AEAD vs lossless NoC. THIS is the hardware reality tax.",
+    "Spanning REVOKE and CHAIN REVOKE benches need follow-up: current shape doesn't exercise cross-kernel REVOKEFINISH chain. Two follow-up benches needed before WRITING."
+  ],
+  "concurrency_caveat": "Numbers are SINGLE-INITIATOR; benchmarks gated to KERNEL_ID==0 only. Multi-initiator concurrency (3-node Test 14: 1/3 fails with INV_ARGS = err=5) reveals a protocol gap in the published Hille design — exchangeOverSession checks range_unused() inside an async callback, allowing two concurrent foreign delegates to reserve overlapping selector ranges. The cooperative single-thread kernel relies on deterministic scheduling that gem5 simulation guaranteed but real-time message arrival breaks. Fix belongs in the protocol (range reservation at delegate entry), not in the threading model."
+}
