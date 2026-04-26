@@ -259,11 +259,149 @@ static void test_kernelcalls_slot_size(void)
 }
 
 /* ------------------------------------------------------------------- */
+/*  Routed API tests (FPT-183 Phase 3b)
+ *  Slot layout: [route 4B][hdr 25B][payload]
+ *  Effective payload = slot_size - 29.
+ */
+
+static void test_routed_roundtrip(void)
+{
+    TEST("send_to + fetch_routed roundtrip with route tag");
+
+    size_t total = vdtu_per_ep_total_size(EP_COUNT, SLOT_COUNT, SLOT_SIZE);
+    void *mem = calloc(1, total);
+
+    struct vdtu_per_ep_set tx, rx;
+    CHECK(vdtu_per_ep_init(&tx, mem, EP_COUNT, SLOT_COUNT, SLOT_SIZE) == 0, "init");
+    CHECK(vdtu_per_ep_attach(&rx, mem, EP_COUNT, SLOT_COUNT, SLOT_SIZE) == 0, "attach");
+
+    const char *p = "routed payload";
+    int rc = vdtu_per_ep_send_to(&tx, /*src_ep*/ 3,
+                                 /*dest_pe*/ 0x0102, /*dest_ep*/ 7,
+                                 /*sender_pe*/ 42, /*sender_ep*/ 9,
+                                 /*sender_vpe*/ 5, /*reply_ep*/ 1,
+                                 /*label*/ 0xDEADBEEFULL,
+                                 /*replylabel*/ 0xCAFEBABEULL,
+                                 /*flags*/ 0,
+                                 p, (uint16_t)strlen(p));
+    CHECK(rc == 0, "send_to should succeed");
+
+    const struct vdtu_per_ep_routed_msg *m = vdtu_per_ep_fetch_routed(&rx, 3);
+    CHECK(m != NULL, "fetch_routed returned NULL");
+    CHECK(m->route.dest_pe == 0x0102, "dest_pe mismatch");
+    CHECK(m->route.dest_ep == 7,      "dest_ep mismatch");
+    CHECK(m->route.reserved == 0,     "reserved should be 0");
+    CHECK(m->hdr.sender_core_id == 42, "sender_core_id mismatch");
+    CHECK(m->hdr.sender_ep_id   == 9,  "sender_ep_id mismatch");
+    CHECK(m->hdr.sender_vpe_id  == 5,  "sender_vpe_id mismatch");
+    CHECK(m->hdr.reply_ep_id    == 1,  "reply_ep_id mismatch");
+    CHECK(m->hdr.label          == 0xDEADBEEFULL, "label mismatch");
+    CHECK(m->hdr.replylabel     == 0xCAFEBABEULL, "replylabel mismatch");
+    CHECK(m->hdr.length == strlen(p), "length mismatch");
+    CHECK(memcmp(m->data, p, strlen(p)) == 0, "payload mismatch");
+    vdtu_per_ep_ack(&rx, 3);
+
+    /* Drained: fetch returns NULL again. */
+    CHECK(vdtu_per_ep_fetch_routed(&rx, 3) == NULL, "should be empty after ack");
+
+    free(mem);
+    PASS();
+}
+
+static void test_routed_payload_too_large(void)
+{
+    TEST("send_to rejects payload that pushes slot beyond slot_size");
+
+    size_t total = vdtu_per_ep_total_size(EP_COUNT, SLOT_COUNT, SLOT_SIZE);
+    void *mem = calloc(1, total);
+    struct vdtu_per_ep_set s;
+    CHECK(vdtu_per_ep_init(&s, mem, EP_COUNT, SLOT_COUNT, SLOT_SIZE) == 0, "init");
+
+    /* Slot size is 512 bytes. Route 4 + hdr 25 = 29. Max payload = 483. */
+    char *p = malloc(SLOT_SIZE);
+    memset(p, 0xAB, SLOT_SIZE);
+
+    /* Exactly at max — should succeed. */
+    int rc = vdtu_per_ep_send_to(&s, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                 p, SLOT_SIZE - 29);
+    CHECK(rc == 0, "max-fitting payload should succeed");
+
+    /* One byte over — must fail with -2. */
+    rc = vdtu_per_ep_send_to(&s, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                             p, SLOT_SIZE - 29 + 1);
+    CHECK(rc == -2, "oversize payload should return -2");
+
+    free(p);
+    free(mem);
+    PASS();
+}
+
+static void test_routed_per_ep_isolation(void)
+{
+    TEST("routed: EP N full does not block EP M");
+
+    size_t total = vdtu_per_ep_total_size(EP_COUNT, SLOT_COUNT, SLOT_SIZE);
+    void *mem = calloc(1, total);
+    struct vdtu_per_ep_set s;
+    CHECK(vdtu_per_ep_init(&s, mem, EP_COUNT, SLOT_COUNT, SLOT_SIZE) == 0, "init");
+
+    /* Fill EP 2 to capacity. */
+    const char *p = "fill";
+    for (uint32_t i = 0; i < SLOT_COUNT - 1; i++) {
+        CHECK(vdtu_per_ep_send_to(&s, 2, 99, 7, 1, 0, 0, 0, 0, 0, 0,
+                                  p, (uint16_t)strlen(p)) == 0,
+              "EP 2 send before full");
+    }
+    CHECK(vdtu_per_ep_send_to(&s, 2, 99, 7, 1, 0, 0, 0, 0, 0, 0,
+                              p, (uint16_t)strlen(p)) == -1,
+          "EP 2 must be full");
+
+    /* EP 6 unaffected. */
+    CHECK(vdtu_per_ep_send_to(&s, 6, 12, 3, 1, 0, 0, 0, 0, 0, 0,
+                              p, (uint16_t)strlen(p)) == 0,
+          "EP 6 must accept despite EP 2 full");
+
+    const struct vdtu_per_ep_routed_msg *m = vdtu_per_ep_fetch_routed(&s, 6);
+    CHECK(m != NULL, "EP 6 fetch should succeed");
+    CHECK(m->route.dest_pe == 12, "EP 6 dest_pe mismatch");
+    CHECK(m->route.dest_ep == 3,  "EP 6 dest_ep mismatch");
+
+    free(mem);
+    PASS();
+}
+
+static void test_routed_terminated_ep(void)
+{
+    TEST("send_to rejects writes to TERMINATED EP");
+
+    size_t total = vdtu_per_ep_total_size(EP_COUNT, SLOT_COUNT, SLOT_SIZE);
+    void *mem = calloc(1, total);
+    struct vdtu_per_ep_set s;
+    CHECK(vdtu_per_ep_init(&s, mem, EP_COUNT, SLOT_COUNT, SLOT_SIZE) == 0, "init");
+
+    /* Manually mark EP 4 as TERMINATED. */
+    struct vdtu_ring *r = vdtu_per_ep_get_ring(&s, 4);
+    CHECK(r != NULL, "EP 4 ring exists");
+    r->ctrl->ep_state = VDTU_EP_TERMINATED;
+
+    int rc = vdtu_per_ep_send_to(&s, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                 "x", 1);
+    CHECK(rc == -3, "TERMINATED EP must return -3");
+
+    /* Other EPs still work. */
+    rc = vdtu_per_ep_send_to(&s, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, "y", 1);
+    CHECK(rc == 0, "other EPs unaffected");
+
+    free(mem);
+    PASS();
+}
+
+/* ------------------------------------------------------------------- */
 
 int main(void)
 {
-    printf("vdtu_per_ep tests (FPT-183 Phase 3a foundation)\n");
-    printf("===============================================\n");
+    printf("vdtu_per_ep tests (FPT-183 Phase 3a foundation + 3b routing)\n");
+    printf("============================================================\n");
     test_total_size_and_stride();
     test_init_attach_roundtrip();
     test_per_ep_isolation();
@@ -271,6 +409,11 @@ int main(void)
     test_init_bad_params();
     test_max_ep_count();
     test_kernelcalls_slot_size();
+    /* Phase 3b additions — routed API */
+    test_routed_roundtrip();
+    test_routed_payload_too_large();
+    test_routed_per_ep_isolation();
+    test_routed_terminated_ep();
     printf("\nResult: %d passed, %d failed\n", tests_passed, tests_failed);
     return tests_failed == 0 ? 0 : 1;
 }

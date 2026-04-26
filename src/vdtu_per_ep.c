@@ -150,3 +150,87 @@ void vdtu_per_ep_ack(struct vdtu_per_ep_set *set, uint32_t ep)
     struct vdtu_ring *r = vdtu_per_ep_get_ring(set, ep);
     if (r) vdtu_ring_ack(r);
 }
+
+/*
+ * --------------------------------------------------------------------------
+ *  Routed API (FPT-183 Phase 3b)
+ *
+ *  Slot layout: [vdtu_per_ep_route 4B][vdtu_msg_header 25B][payload]
+ *  We bypass vdtu_ring_send/fetch here because we need to write three
+ *  contiguous regions into one slot. Logic mirrors vdtu_ring_send.c
+ *  (memory barriers, head/tail, slot_size sanity).
+ * --------------------------------------------------------------------------
+ */
+
+int vdtu_per_ep_send_to(struct vdtu_per_ep_set *set, uint32_t ep,
+                        uint16_t dest_pe, uint8_t dest_ep,
+                        uint16_t sender_pe, uint8_t sender_ep,
+                        uint16_t sender_vpe, uint8_t reply_ep,
+                        uint64_t label, uint64_t replylabel, uint8_t flags,
+                        const void *payload, uint16_t payload_len)
+{
+    struct vdtu_ring *r = vdtu_per_ep_get_ring(set, ep);
+    if (!r || !r->ctrl) return -1;
+
+    if (r->ctrl->ep_state == VDTU_EP_TERMINATED) return -3;
+
+    /* Slot must fit route(4) + hdr(25) + payload. */
+    size_t total = (size_t)VDTU_PER_EP_ROUTE_SIZE
+                 + VDTU_HEADER_SIZE + payload_len;
+    if (total > r->ctrl->slot_size) return -2;
+
+    /* slot_size sanity (mirrors vdtu_ring_send line 76). */
+    if (r->ctrl->slot_size == 0 || r->ctrl->slot_size > 4096) return -4;
+
+    uint32_t head = r->ctrl->head;
+    uint32_t next_head = (head + 1) & r->ctrl->slot_mask;
+    if (next_head == r->ctrl->tail) return -1;  /* full */
+
+    uint8_t *slot = r->slots + (size_t)head * r->ctrl->slot_size;
+    memset(slot, 0, r->ctrl->slot_size);
+
+    /* Routing prefix. */
+    struct vdtu_per_ep_route *route = (struct vdtu_per_ep_route *)slot;
+    route->dest_pe  = dest_pe;
+    route->dest_ep  = dest_ep;
+    route->reserved = 0;
+
+    /* DTU header (gem5 layout, untouched). */
+    struct vdtu_msg_header *hdr =
+        (struct vdtu_msg_header *)(slot + VDTU_PER_EP_ROUTE_SIZE);
+    hdr->flags          = flags;
+    hdr->sender_core_id = sender_pe;
+    hdr->sender_ep_id   = sender_ep;
+    hdr->reply_ep_id    = reply_ep;
+    hdr->length         = payload_len;
+    hdr->sender_vpe_id  = sender_vpe;
+    hdr->label          = label;
+    hdr->replylabel     = replylabel;
+
+    /* Payload. */
+    if (payload && payload_len > 0) {
+        memcpy(slot + VDTU_PER_EP_ROUTE_SIZE + VDTU_HEADER_SIZE,
+               payload, payload_len);
+    }
+
+    __asm__ volatile("" ::: "memory");
+    r->ctrl->head = next_head;
+    return 0;
+}
+
+const struct vdtu_per_ep_routed_msg *
+vdtu_per_ep_fetch_routed(const struct vdtu_per_ep_set *set, uint32_t ep)
+{
+    if (!set || ep >= set->ep_count) return NULL;
+    const struct vdtu_ring *r = &set->rings[ep];
+    if (!r->ctrl) return NULL;
+
+    uint32_t tail = r->ctrl->tail;
+    uint32_t head = r->ctrl->head;
+    if (tail == head) return NULL;
+
+    __asm__ volatile("" ::: "memory");
+
+    const uint8_t *slot = r->slots + (size_t)tail * r->ctrl->slot_size;
+    return (const struct vdtu_per_ep_routed_msg *)slot;
+}
