@@ -288,6 +288,23 @@ static struct vdtu_per_ep_set g_vdtu_pe1_in;
 static struct vdtu_per_ep_set g_vdtu_pe2_out;
 static struct vdtu_per_ep_set g_vdtu_pe2_in;
 
+/* FPT-183 Phase 3b: NUM_LOCAL_PES is the per-kernel PE-ID stride. Global
+ * PE id = (KERNEL_ID × NUM_LOCAL_PES) + local. The local PE map for
+ * Hille's topology (compatible with components/SemperKernel/.../Platform.h
+ * #define NUM_LOCAL_PES 4) is: 0 = SemperKernel, 1 = unused, 2 = VPE0,
+ * 3 = VPE1. The two unused-slot conditions (dest_pe == KERNEL_ID*4+1)
+ * are never produced by any PE on this branch, so we just route them
+ * remote (which will then fail to find a peer kid and drop). */
+#ifndef NUM_LOCAL_PES
+#define NUM_LOCAL_PES 4
+#endif
+
+/* Phase 3b counters (debug-only). */
+static volatile uint64_t g_route_local_ok    = 0;
+static volatile uint64_t g_route_local_full  = 0;  /* dest's inbound EP full */
+static volatile uint64_t g_route_remote      = 0;  /* deferred to step-3 */
+static volatile uint64_t g_route_dropped     = 0;  /* unroutable */
+
 /* lwIP time tracking */
 static volatile uint32_t lwip_time_ms = 0;
 
@@ -1412,6 +1429,96 @@ void post_init(void)
     printf("[%s] Ready\n", COMPONENT_NAME);
 }
 
+/*
+ * FPT-183 Phase 3b-step-2: local-routing pump.
+ *
+ * Polls each PE's outbound per-EP dataport, and for messages with
+ * dest_pe targeting a LOCAL PE on this kernel, forwards them to the
+ * destination's inbound EP ring. Remote destinations are counted but
+ * not yet sent (step-3 wires them through CryptoTransport + UDP).
+ *
+ * Returns true if any message was routed (caller flips did_work to
+ * skip the seL4_Yield this iteration).
+ */
+static bool vdtu_route_pump_local(void)
+{
+    /* Don't route until DTUBridge has fully initialised the per-EP sets. */
+    if (!net_rings_ready)
+        return false;
+
+    bool did_route = false;
+    const uint16_t self_pe_kernel = (uint16_t)(KERNEL_ID * NUM_LOCAL_PES + 0);
+    const uint16_t self_pe_vpe0   = (uint16_t)(KERNEL_ID * NUM_LOCAL_PES + 2);
+    const uint16_t self_pe_vpe1   = (uint16_t)(KERNEL_ID * NUM_LOCAL_PES + 3);
+
+    /* Iterate the three outbound dataports × all EPs. */
+    struct vdtu_per_ep_set *outs[3] = {
+        &g_vdtu_pe0_out,  /* SemperKernel */
+        &g_vdtu_pe1_out,  /* VPE0 */
+        &g_vdtu_pe2_out,  /* VPE1 */
+    };
+    for (int src = 0; src < 3; src++) {
+        for (uint32_t ep = 0; ep < VDTU_PER_EP_COUNT; ep++) {
+            const struct vdtu_per_ep_routed_msg *m =
+                vdtu_per_ep_fetch_routed(outs[src], ep);
+            if (!m) continue;
+
+            uint16_t dest_pe = m->route.dest_pe;
+            uint8_t  dest_ep = m->route.dest_ep;
+
+            /* Identify the local destination's inbound set, if any. */
+            struct vdtu_per_ep_set *dst_in = NULL;
+            if (dest_pe == self_pe_kernel)      dst_in = &g_vdtu_pe0_in;
+            else if (dest_pe == self_pe_vpe0)   dst_in = &g_vdtu_pe1_in;
+            else if (dest_pe == self_pe_vpe1)   dst_in = &g_vdtu_pe2_in;
+
+            if (dst_in == NULL) {
+                /* Remote — leave for step-3. We deliberately do NOT ack
+                 * here so step-3 can pick the message up from the same
+                 * slot. Once remote routing lands, this branch becomes a
+                 * UDP send + ack. For step-2 we only count, and skip
+                 * acking which leaves the slot pinned — so to avoid
+                 * stalling we still ack for now and treat it as dropped.
+                 * Kernel data-path migration (step-5) is what actually
+                 * routes through here, so this is a no-op until then. */
+                g_route_remote++;
+                vdtu_per_ep_ack(outs[src], ep);
+                continue;
+            }
+
+            /* Local: forward by re-encoding into the destination's
+             * inbound[dest_ep]. We preserve the route + header verbatim;
+             * receiver may inspect either. */
+            int rc = vdtu_per_ep_send_to(dst_in, dest_ep,
+                                         dest_pe, dest_ep,
+                                         m->hdr.sender_core_id,
+                                         m->hdr.sender_ep_id,
+                                         m->hdr.sender_vpe_id,
+                                         m->hdr.reply_ep_id,
+                                         m->hdr.label,
+                                         m->hdr.replylabel,
+                                         m->hdr.flags,
+                                         m->data,
+                                         m->hdr.length);
+            if (rc == 0) {
+                g_route_local_ok++;
+                vdtu_per_ep_ack(outs[src], ep);
+                did_route = true;
+            } else if (rc == -1) {
+                /* Destination's EP ring is full — leave the message
+                 * pinned at the source so we re-attempt next iteration.
+                 * This is the natural backpressure for per-EP isolation. */
+                g_route_local_full++;
+            } else {
+                /* -2 oversize / -3 terminated / -4 corrupt → drop. */
+                g_route_dropped++;
+                vdtu_per_ep_ack(outs[src], ep);
+            }
+        }
+    }
+    return did_route;
+}
+
 int run(void)
 {
     printf("[%s] Entering main loop\n", COMPONENT_NAME);
@@ -1537,6 +1644,12 @@ int run(void)
                 did_work = true;
             }
         }
+
+        /* FPT-183 Phase 3b-step-2: per-EP local routing pump. Scans the
+         * three PE outbound dataports and forwards messages with local
+         * dest_pe to the destination's inbound EP. Remote routing (step-3)
+         * and the kernel-side cutover (step-5) follow. */
+        if (vdtu_route_pump_local()) did_work = true;
 
         /* Periodic status */
         loop_count++;
