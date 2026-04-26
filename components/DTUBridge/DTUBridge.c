@@ -38,6 +38,7 @@
 
 #include "e1000_hw.h"
 #include "vdtu_ring.h"
+#include "vdtu_per_ep.h"   /* FPT-183: per-PE per-EP partitioned rings */
 #include "crypto_transport.h"
 
 #define COMPONENT_NAME "DTUBridge"
@@ -273,6 +274,19 @@ static uint32_t g_peer_reboots_detected = 0;    /* diagnostic */
 static struct vdtu_ring g_net_out_ring;  /* consumer: bridge reads kernel's outbound */
 static struct vdtu_ring g_net_in_ring;   /* producer: bridge writes incoming network msgs */
 static volatile bool net_rings_ready = false;
+
+/* FPT-183: per-PE per-EP partitioned dataports — DTUBridge as virtual NoC.
+ * Indexed by PE: pe0 = SemperKernel, pe1 = VPE0, pe2 = VPE1.
+ * "_out" = PE writes / bridge reads (bridge is consumer side).
+ * "_in"  = bridge writes / PE reads (bridge is producer side).
+ * Initialized in post_init(); the routing logic that consumes them lands
+ * in Phase 3b. */
+static struct vdtu_per_ep_set g_vdtu_pe0_out;
+static struct vdtu_per_ep_set g_vdtu_pe0_in;
+static struct vdtu_per_ep_set g_vdtu_pe1_out;
+static struct vdtu_per_ep_set g_vdtu_pe1_in;
+static struct vdtu_per_ep_set g_vdtu_pe2_out;
+static struct vdtu_per_ep_set g_vdtu_pe2_in;
 
 /* lwIP time tracking */
 static volatile uint32_t lwip_time_ms = 0;
@@ -1358,6 +1372,42 @@ void post_init(void)
     vdtu_ring_init(&g_net_in_ring, (void *)net_inbound, 8, 512);
     net_rings_ready = true;
     printf("[%s] Net rings initialized (4 slots x 512B)\n", COMPONENT_NAME);
+
+    /* FPT-183: initialize the six per-PE vDTU dataports — DTUBridge owns
+     * the init (the bridge becomes the virtual NoC; PEs attach on their
+     * side). Each set carries 32 EP rings at slot_count=2, slot_size=2048
+     * → stride 8192, total 256 KiB per dataport. Phase 3b switches the
+     * data path to flow through these; Phase 3a-step-2 just stands the
+     * infrastructure up. */
+    {
+        const uint32_t EPS = VDTU_PER_EP_COUNT;
+        const uint32_t SC  = 2;                     /* slot_count */
+        const uint32_t SS  = VDTU_KRNLC_MSG_SIZE;   /* slot_size = 2048 */
+        struct {
+            const char *label;
+            void *mem;
+            struct vdtu_per_ep_set *set;
+        } sets[] = {
+            { "pe0_out", (void *)vdtu_pe0_out, &g_vdtu_pe0_out },
+            { "pe0_in",  (void *)vdtu_pe0_in,  &g_vdtu_pe0_in  },
+            { "pe1_out", (void *)vdtu_pe1_out, &g_vdtu_pe1_out },
+            { "pe1_in",  (void *)vdtu_pe1_in,  &g_vdtu_pe1_in  },
+            { "pe2_out", (void *)vdtu_pe2_out, &g_vdtu_pe2_out },
+            { "pe2_in",  (void *)vdtu_pe2_in,  &g_vdtu_pe2_in  },
+        };
+        for (size_t i = 0; i < sizeof(sets) / sizeof(sets[0]); i++) {
+            int rc = vdtu_per_ep_init(sets[i].set, sets[i].mem, EPS, SC, SS);
+            if (rc != 0) {
+                printf("[%s] FPT-183 per-EP init(%s) FAILED rc=%d\n",
+                       COMPONENT_NAME, sets[i].label, rc);
+            }
+        }
+        printf("[%s] FPT-183: per-PE vDTU init (6 sets, %u EPs each, "
+               "stride=%u, total=%u KiB)\n",
+               COMPONENT_NAME, EPS,
+               vdtu_per_ep_compute_stride(SC, SS),
+               (unsigned)(vdtu_per_ep_total_size(EPS, SC, SS) / 1024));
+    }
 
     printf("[%s] Ready\n", COMPONENT_NAME);
 }

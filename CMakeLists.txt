@@ -32,6 +32,8 @@ set(VDTU_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/components/include")
 # Shared library sources (compiled into each component)
 set(VDTU_RING_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/vdtu_ring.c")
 set(VDTU_CHANNELS_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/vdtu_channels.c")
+# FPT-183: per-EP partitioned ring buffers for the n-vDTU model.
+set(VDTU_PER_EP_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/vdtu_per_ep.c")
 
 # Bench mode: disable verbose hot-path kernel logging for clean measurements
 option(SEMPER_BENCH_MODE "Disable verbose hot-path kernel logging for benchmarking" OFF)
@@ -100,6 +102,7 @@ DeclareCAmkESComponent(VDTUService
     SOURCES
         components/VDTUService/VDTUService.c
         ${VDTU_RING_SRC}
+        ${VDTU_PER_EP_SRC}
     INCLUDES
         ${VDTU_INCLUDE_DIR}
 )
@@ -122,6 +125,7 @@ DeclareCAmkESComponent(SemperKernel
         # vDTU shared library
         ${VDTU_RING_SRC}
         ${VDTU_CHANNELS_SRC}
+        ${VDTU_PER_EP_SRC}
         # arch/sel4/ backend (replaces gem5)
         ${SK_KERNEL}/arch/sel4/kernel.cc
         ${SK_KERNEL}/arch/sel4/DTU.cc
@@ -188,6 +192,7 @@ DeclareCAmkESComponent(VPE0
         components/VPE0/VPE0.c
         ${VDTU_RING_SRC}
         ${VDTU_CHANNELS_SRC}
+        ${VDTU_PER_EP_SRC}
     INCLUDES
         ${VDTU_INCLUDE_DIR}
     C_FLAGS
@@ -203,6 +208,7 @@ DeclareCAmkESComponent(VPE1
         components/VPE1/VPE1.c
         ${VDTU_RING_SRC}
         ${VDTU_CHANNELS_SRC}
+        ${VDTU_PER_EP_SRC}
     INCLUDES
         ${VDTU_INCLUDE_DIR}
     C_FLAGS
@@ -289,6 +295,7 @@ DeclareCAmkESComponent(DTUBridge
         components/DTUBridge/crypto_transport.c
         ${DTUBRIDGE_NET_SOURCES}
         ${VDTU_RING_SRC}
+        ${VDTU_PER_EP_SRC}
         ${LWIP_UDP_SOURCES}
         ${HACL_SOURCES}
     INCLUDES

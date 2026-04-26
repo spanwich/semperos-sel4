@@ -168,6 +168,14 @@ component SemperKernel {
     /* Network ring buffers: kernel <-> DTUBridge (07e) */
     dataport Buf(8192) net_outbound;    /* kernel writes, bridge reads */
     dataport Buf(8192) net_inbound;     /* bridge writes, kernel reads */
+
+    /* FPT-183: per-PE vDTU instance (kernel0 = PE 0).
+     * Two partitioned dataports — outbound (kernel → DTUBridge as virtual
+     * NoC) and inbound (DTUBridge → kernel). Each carries 32 EP rings
+     * (VDTU_PER_EP_COUNT) at stride 8192 (slot_count=2, slot_size=2048).
+     * Total: 32 × 8192 = 262144 = 256 KiB per dataport. */
+    dataport Buf(262144) vdtu_out;      /* kernel writes, DTUBridge reads */
+    dataport Buf(262144) vdtu_in;       /* DTUBridge writes, kernel reads */
 }
 
 component VPE0 {
@@ -202,6 +210,11 @@ component VPE0 {
 
     /* Data path: VPE0 signals kernel that a reply is available */
     emits    Signal signal_kernel;
+
+    /* FPT-183: per-PE vDTU instance (VPE0 = PE 1 in the n-vDTU PE map).
+     * Outbound + inbound partitioned dataports to DTUBridge. */
+    dataport Buf(262144) vdtu_out;      /* VPE0 writes, DTUBridge reads */
+    dataport Buf(262144) vdtu_in;       /* DTUBridge writes, VPE0 reads */
 }
 
 /*
@@ -239,6 +252,11 @@ component VPE1 {
     /* Data path signals */
     consumes Signal signal_from_kernel_v1;
     emits    Signal signal_kernel_v1;
+
+    /* FPT-183: per-PE vDTU instance (VPE1 = PE 2 in the n-vDTU PE map).
+     * Outbound + inbound partitioned dataports to DTUBridge. */
+    dataport Buf(262144) vdtu_out;      /* VPE1 writes, DTUBridge reads */
+    dataport Buf(262144) vdtu_in;       /* DTUBridge writes, VPE1 reads */
 }
 
 /*
@@ -268,6 +286,21 @@ component DTUBridge {
     /* Network ring buffers: kernel <-> DTUBridge (07e) */
     dataport Buf(8192) net_outbound;    /* kernel writes, bridge reads */
     dataport Buf(8192) net_inbound;     /* bridge writes, kernel reads */
+
+    /* FPT-183: per-PE per-direction partitioned dataports.
+     * DTUBridge becomes the virtual NoC — sees ALL traffic from every PE
+     * and routes by destination PE address. Six dataports:
+     *   pe0 = SemperKernel
+     *   pe1 = VPE0
+     *   pe2 = VPE1
+     * Outbound = PE writes / DTUBridge reads.
+     * Inbound  = DTUBridge writes / PE reads. */
+    dataport Buf(262144) vdtu_pe0_out;
+    dataport Buf(262144) vdtu_pe0_in;
+    dataport Buf(262144) vdtu_pe1_out;
+    dataport Buf(262144) vdtu_pe1_in;
+    dataport Buf(262144) vdtu_pe2_out;
+    dataport Buf(262144) vdtu_pe2_in;
 }
 
 /*
@@ -392,6 +425,24 @@ assembly {
                                                     to dtu_bridge.net_outbound);
         connection seL4SharedData net_inbound_dp(from dtu_bridge.net_inbound,
                                                    to kernel0.net_inbound);
+
+        /* FPT-183: per-PE vDTU dataports — DTUBridge becomes virtual NoC.
+         * Each PE has its own outbound + inbound partitioned dataport with
+         * 32 EP rings inside. DTUBridge sees all six and routes by dest_pe.
+         * The legacy dtu_ch_<N> and net_outbound/net_inbound dataports
+         * above will be removed in Phase 3b once routing migrates. */
+        connection seL4SharedData vdtu_k0_out_dp(from kernel0.vdtu_out,
+                                                  to dtu_bridge.vdtu_pe0_out);
+        connection seL4SharedData vdtu_k0_in_dp(from dtu_bridge.vdtu_pe0_in,
+                                                 to kernel0.vdtu_in);
+        connection seL4SharedData vdtu_v0_out_dp(from vpe0.vdtu_out,
+                                                  to dtu_bridge.vdtu_pe1_out);
+        connection seL4SharedData vdtu_v0_in_dp(from dtu_bridge.vdtu_pe1_in,
+                                                 to vpe0.vdtu_in);
+        connection seL4SharedData vdtu_v1_out_dp(from vpe1.vdtu_out,
+                                                  to dtu_bridge.vdtu_pe2_out);
+        connection seL4SharedData vdtu_v1_in_dp(from dtu_bridge.vdtu_pe2_in,
+                                                 to vpe1.vdtu_in);
     }
 
     configuration {

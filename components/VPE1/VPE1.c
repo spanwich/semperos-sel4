@@ -10,6 +10,7 @@
 #include <camkes.h>
 #include "vdtu_ring.h"
 #include "vdtu_channels.h"
+#include "vdtu_per_ep.h"   /* FPT-183: per-PE per-EP partitioned rings */
 
 #ifndef SEMPER_KERNEL_ID
 #define SEMPER_KERNEL_ID 0
@@ -36,6 +37,32 @@
 
 static struct vdtu_channel_table channels;
 static int send_chan = -1;
+
+/* FPT-183: per-PE vDTU instance — VPE1's outbound + inbound EP rings.
+ * DTUBridge initializes both dataports on its side; we attach. Data path
+ * wired in Phase 3b once DTUBridge becomes the virtual NoC. */
+static struct vdtu_per_ep_set g_vdtu_local_out;  /* VPE1 → DTUBridge */
+static struct vdtu_per_ep_set g_vdtu_local_in;   /* DTUBridge → VPE1 */
+
+#define FPT183_SLOT_COUNT  2
+#define FPT183_SLOT_SIZE   VDTU_KRNLC_MSG_SIZE  /* 2048 */
+
+static void init_vdtu_per_ep(void)
+{
+    int rc;
+    rc = vdtu_per_ep_attach(&g_vdtu_local_out, (void *)vdtu_out,
+                            VDTU_PER_EP_COUNT,
+                            FPT183_SLOT_COUNT, FPT183_SLOT_SIZE);
+    if (rc != 0) {
+        printf("[VPE1] vdtu_per_ep_attach(out) FAILED rc=%d\n", rc);
+    }
+    rc = vdtu_per_ep_attach(&g_vdtu_local_in, (void *)vdtu_in,
+                            VDTU_PER_EP_COUNT,
+                            FPT183_SLOT_COUNT, FPT183_SLOT_SIZE);
+    if (rc != 0) {
+        printf("[VPE1] vdtu_per_ep_attach(in) FAILED rc=%d\n", rc);
+    }
+}
 
 static void init_channels(void)
 {
@@ -273,6 +300,7 @@ int run(void)
     printf("[VPE1] Starting (PE %d, VPE ID %d)\n", MY_PE, MY_VPE_ID);
 
     init_channels();
+    init_vdtu_per_ep();
 
     /* Debug: show dataport pointers and ring state for all channels */
     for (int ch = 0; ch < 4; ch++) {

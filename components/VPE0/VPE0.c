@@ -10,6 +10,7 @@
 #include <camkes.h>
 #include "vdtu_ring.h"
 #include "vdtu_channels.h"
+#include "vdtu_per_ep.h"   /* FPT-183: per-PE per-EP partitioned rings */
 #include "tsc_calibrate.h"
 
 /* VPE0 is local PE 2. In multi-node mode, global PE = KERNEL_ID * 4 + 2.
@@ -48,6 +49,34 @@
 /* Channel table */
 static struct vdtu_channel_table channels;
 static int send_chan = -1;
+
+/* FPT-183: per-PE vDTU instance — VPE0's outbound + inbound EP rings.
+ * DTUBridge initializes both dataports on its side; we attach. The data
+ * path through these rings is wired in Phase 3b once DTUBridge becomes
+ * the virtual NoC. For 3a-step-2 we just stand the infrastructure up so
+ * the build is verified clean. */
+static struct vdtu_per_ep_set g_vdtu_local_out;  /* VPE0 → DTUBridge */
+static struct vdtu_per_ep_set g_vdtu_local_in;   /* DTUBridge → VPE0 */
+
+#define FPT183_SLOT_COUNT  2
+#define FPT183_SLOT_SIZE   VDTU_KRNLC_MSG_SIZE  /* 2048 — covers KRNLC max */
+
+static void init_vdtu_per_ep(void)
+{
+    int rc;
+    rc = vdtu_per_ep_attach(&g_vdtu_local_out, (void *)vdtu_out,
+                            VDTU_PER_EP_COUNT,
+                            FPT183_SLOT_COUNT, FPT183_SLOT_SIZE);
+    if (rc != 0) {
+        printf("[VPE0] vdtu_per_ep_attach(out) FAILED rc=%d\n", rc);
+    }
+    rc = vdtu_per_ep_attach(&g_vdtu_local_in, (void *)vdtu_in,
+                            VDTU_PER_EP_COUNT,
+                            FPT183_SLOT_COUNT, FPT183_SLOT_SIZE);
+    if (rc != 0) {
+        printf("[VPE0] vdtu_per_ep_attach(in) FAILED rc=%d\n", rc);
+    }
+}
 
 static void init_channel_table(void)
 {
@@ -761,6 +790,7 @@ int run(void)
            TSC_FREQ_MHZ, TSC_METHOD);
 
     init_channel_table();
+    init_vdtu_per_ep();
 
     /* Wait for kernel to configure our endpoints */
     printf("[VPE0] Waiting for channels...\n");

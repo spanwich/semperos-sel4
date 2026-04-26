@@ -64,6 +64,7 @@ void sel4_yield_wrapper(void)
  */
 #include <string.h>
 #include "vdtu_ring.h"
+#include "vdtu_per_ep.h"   /* FPT-183: per-PE per-EP partitioned rings */
 
 /* Must match Platform.h's NUM_LOCAL_PES. PEs are allocated per kernel in
  * contiguous blocks of this size; sender_kernel = sender_pe / NUM_LOCAL_PES. */
@@ -137,6 +138,16 @@ void net_msg_clear(void)
 static struct vdtu_ring g_net_out_ring;  /* producer: kernel writes outbound msgs */
 static struct vdtu_ring g_net_in_ring;   /* consumer: kernel reads inbound msgs */
 static volatile int net_rings_attached = 0;
+
+/* FPT-183: per-PE vDTU instance — kernel0 = PE 0 in the n-vDTU PE map.
+ * DTUBridge initializes both dataports on its side (post_init); kernel
+ * attaches in net_init_rings(). Phase 3a-step-2 stands the infrastructure
+ * up; Phase 3b switches the DTU::send_to() routing to use these. */
+static struct vdtu_per_ep_set g_vdtu_local_out;  /* kernel → DTUBridge */
+static struct vdtu_per_ep_set g_vdtu_local_in;   /* DTUBridge → kernel */
+
+#define FPT183_SLOT_COUNT  2
+#define FPT183_SLOT_SIZE   VDTU_KRNLC_MSG_SIZE  /* 2048 — covers KRNLC max */
 
 #define NET_LABEL_PING  0x50494E47ULL  /* "PING" in ASCII */
 #define NET_LABEL_PONG  0x504F4E47ULL  /* "PONG" in ASCII */
@@ -302,6 +313,24 @@ void net_init_rings(void)
     net_rings_attached = 1;
     g_net_state = NET_DISCONNECTED;
     printf("[SemperKernel] Net rings attached (outbound + inbound)\n");
+
+    /* FPT-183: attach to the per-PE per-EP partitioned dataports owned by
+     * DTUBridge. Used in Phase 3b when DTU::send_to() switches over. */
+    int rc;
+    rc = vdtu_per_ep_attach(&g_vdtu_local_out, (void *)vdtu_out,
+                            VDTU_PER_EP_COUNT,
+                            FPT183_SLOT_COUNT, FPT183_SLOT_SIZE);
+    if (rc != 0)
+        printf("[SemperKernel] vdtu_per_ep_attach(out) FAILED rc=%d\n", rc);
+
+    rc = vdtu_per_ep_attach(&g_vdtu_local_in, (void *)vdtu_in,
+                            VDTU_PER_EP_COUNT,
+                            FPT183_SLOT_COUNT, FPT183_SLOT_SIZE);
+    if (rc != 0)
+        printf("[SemperKernel] vdtu_per_ep_attach(in) FAILED rc=%d\n", rc);
+    printf("[SemperKernel] FPT-183: per-PE vDTU attached "
+           "(%u EPs x %u slots x %u bytes)\n",
+           VDTU_PER_EP_COUNT, FPT183_SLOT_COUNT, FPT183_SLOT_SIZE);
 }
 
 /* C wrapper for DTU.cc to write to outbound ring.
