@@ -435,8 +435,11 @@ assembly {
         /* MMIO must be uncached for device register access */
         dtu_bridge.eth_mmio_hardware_cached = false;
 
-        /* E1000 hardware config (Intel 82540EM on QEMU q35) */
-        eth_hardware.mmio_paddr = 0xfeb80000;
+        /* NIC hardware config — FPT-176 c10547 switched to VirtIO PCI.
+         * QEMU Q35 places virtio-net-pci BAR4 (modern cap region) at
+         * 0xfeb00000 by default. IRQ stays IOAPIC pin 11 / vector 11
+         * (slot 2 pin A on Q35 — same as the previous E1000 emulation). */
+        eth_hardware.mmio_paddr = 0xfeb00000;
         eth_hardware.mmio_size = 0x20000;
         eth_hardware.irq_irq_type = "pci";
         eth_hardware.irq_irq_ioapic = 0;

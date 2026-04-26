@@ -1,16 +1,16 @@
 #
 # docker-compose-3node.yml — Triple-QEMU SemperOS Hille spanning evaluation
 #
-# Three QEMU instances on a shared multicast hub. Each emulates an
-# Intel 82540EM (e1000) and joins multicast group 230.0.0.1:11000 so all
-# three see every frame. With `-cpu host` unavailable inside the
-# semperos-qemu container we run TCG; that's fine for correctness
-# verification and within-platform timing comparison (Hille gem5 vs
-# this-on-QEMU+TCG+E1000).
+# Three QEMU instances on a shared multicast hub. Each presents a
+# virtio-net-pci NIC (modern transport, disable-legacy=on) and joins
+# multicast group 230.0.0.1:11000 so all three see every frame. VirtIO
+# replaces the previous e1000 emulation per FPT-176 c10547 — the E1000
+# RX-IRQ stall on node-a was a QEMU emulation bug that VirtIO bypasses
+# entirely.
 #
 # Each container's seL4 image is pre-built with distinct KERNEL_ID +
-# SELF_IP + PEER_IP_0 + PEER_IP_1 + SEMPER_NUM_NODES=3 (see /build-isos
-# for cmake invocation).
+# SELF_IP + PEER_IP_0 + PEER_IP_1 + SEMPER_NUM_NODES=3 +
+# SEMPER_USE_VIRTIO_NET=ON (see /build-isos for cmake invocation).
 #
 # Usage:
 #   cd docker/
@@ -31,7 +31,7 @@ services:
       - -nic
       - none
       - -device
-      - e1000,netdev=eth0,mac=52:54:00:00:00:01
+      - virtio-net-pci,disable-legacy=on,disable-modern=off,netdev=eth0,mac=52:54:00:00:00:01
       - -netdev
       - "socket,id=eth0,mcast=230.0.0.1:11000,localaddr=127.0.0.1"
 
@@ -48,7 +48,7 @@ services:
     entrypoint:
       - sh
       - -c
-      - "sleep 3 && /run-qemu.sh -nic none -device e1000,netdev=eth0,mac=52:54:00:00:00:02 -netdev socket,id=eth0,mcast=230.0.0.1:11000,localaddr=127.0.0.1"
+      - "sleep 3 && /run-qemu.sh -nic none -device virtio-net-pci,disable-legacy=on,disable-modern=off,netdev=eth0,mac=52:54:00:00:00:02 -netdev socket,id=eth0,mcast=230.0.0.1:11000,localaddr=127.0.0.1"
 
   node-c:
     image: semperos-qemu:latest
@@ -63,4 +63,4 @@ services:
     entrypoint:
       - sh
       - -c
-      - "sleep 6 && /run-qemu.sh -nic none -device e1000,netdev=eth0,mac=52:54:00:00:00:03 -netdev socket,id=eth0,mcast=230.0.0.1:11000,localaddr=127.0.0.1"
+      - "sleep 6 && /run-qemu.sh -nic none -device virtio-net-pci,disable-legacy=on,disable-modern=off,netdev=eth0,mac=52:54:00:00:00:03 -netdev socket,id=eth0,mcast=230.0.0.1:11000,localaddr=127.0.0.1"
