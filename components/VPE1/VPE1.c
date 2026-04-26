@@ -234,10 +234,93 @@ static int send_reply(struct vdtu_ring *ring, const struct vdtu_message *orig,
                           data, len);
 }
 
+/* Dispatch one service-request message. Used by both the per-EP scan
+ * and the legacy channel scan in service_poll(). */
+static void dispatch_srv_msg(const struct vdtu_msg_header *hdr,
+                             const void *data_ptr,
+                             uint16_t length,
+                             struct vdtu_ring *legacy_ring)
+{
+    if (length < sizeof(uint64_t)) return;
+
+    uint64_t cmd;
+    memcpy(&cmd, data_ptr, sizeof(cmd));
+
+    /* Build a synthetic vdtu_message wrapper for send_reply (which only
+     * reads orig->hdr.reply_ep_id and orig->hdr.replylabel). For per-EP
+     * delivery we don't have a vdtu_message in legacy form — pass a
+     * stack copy of the header alone, with no payload. */
+    struct vdtu_message *fake = NULL;
+    uint8_t fake_buf[VDTU_HEADER_SIZE];
+    if (legacy_ring == NULL) {
+        memcpy(fake_buf, hdr, VDTU_HEADER_SIZE);
+        fake = (struct vdtu_message *)fake_buf;
+    }
+
+    switch (cmd) {
+    case SRV_CMD_OPEN: {
+        printf("[VPE1] OPEN (replylabel=0x%lx)\n",
+               (unsigned long)hdr->replylabel);
+        uint64_t reply[2] = { 0, 1 };
+        send_reply(legacy_ring, fake ? fake :
+                   (const struct vdtu_message *)hdr,
+                   reply, sizeof(reply));
+        break;
+    }
+    case SRV_CMD_OBTAIN:
+    case SRV_CMD_DELEGATE: {
+        static uint32_t next_obtain_slot   = 10;
+        static uint32_t next_delegate_slot = 20;
+        uint32_t start = (cmd == SRV_CMD_OBTAIN)
+                             ? next_obtain_slot++
+                             : next_delegate_slot++;
+        printf("[VPE1] %s -> slot=%u\n",
+               cmd == SRV_CMD_OBTAIN ? "OBTAIN" : "DELEGATE",
+               (unsigned)start);
+        struct __attribute__((packed)) {
+            uint64_t error;
+            uint32_t type, start, count, pad;
+        } reply = { 0, CAP_TYPE_OBJ, start, 1, 0 };
+        send_reply(legacy_ring, fake ? fake :
+                   (const struct vdtu_message *)hdr,
+                   &reply, sizeof(reply));
+        break;
+    }
+    case SRV_CMD_CLOSE:
+        printf("[VPE1] CLOSE\n");
+        break;
+    default:
+        printf("[VPE1] Unknown cmd %lu\n", (unsigned long)cmd);
+        break;
+    }
+}
+
 /* Poll for service requests.
- * Scan channels 1-15 (skip ch 0 = send channel, same as wait_for_reply). */
+ *
+ * FPT-183 Phase 3b-step-5 follow-up: post-cutover, the kernel delivers
+ * OPEN/OBTAIN/DELEGATE messages through the per-EP path —
+ * net_route_send → DTUBridge → vpe1.vdtu_in[ep]. Without scanning that
+ * here, OPEN never reaches us, the service never replies, CREATESESS
+ * times out, and Tests 12/13/14 fail on every node. (3-node validation
+ * caught this; on-target single-node passed because the kernel and
+ * VPE1 in single-node never exchange service messages.)
+ *
+ * Both paths active during transition; legacy `dtu_ch_<N>` scan stays
+ * until 5f cleanup once we're confident no service request takes the
+ * legacy path any more.
+ */
 static void service_poll(void)
 {
+    /* New per-EP path. */
+    for (uint32_t ep = 0; ep < VDTU_PER_EP_COUNT; ep++) {
+        const struct vdtu_per_ep_routed_msg *m =
+            vdtu_per_ep_fetch_routed(&g_vdtu_local_in, ep);
+        if (!m) continue;
+        dispatch_srv_msg(&m->hdr, m->data, m->hdr.length, NULL);
+        vdtu_per_ep_ack(&g_vdtu_local_in, ep);
+    }
+
+    /* Legacy dtu_ch_<N> scan (transition path; will go silent post-5f). */
     for (int ch = 1; ch < VDTU_CHANNELS_PER_PE; ch++) {
         if (!channels.ch[ch]) continue;
         if (!channels.rings[ch].ctrl)
@@ -249,62 +332,7 @@ static void service_poll(void)
         const struct vdtu_message *msg = vdtu_ring_fetch(ring);
         if (!msg) continue;
 
-        if (msg->hdr.length < sizeof(uint64_t)) {
-            vdtu_ring_ack(ring);
-            continue;
-        }
-
-        uint64_t cmd;
-        memcpy(&cmd, msg->data, sizeof(cmd));
-
-        switch (cmd) {
-        case SRV_CMD_OPEN: {
-            printf("[VPE1] OPEN (replylabel=0x%lx)\n",
-                   (unsigned long)msg->hdr.replylabel);
-            uint64_t reply[2] = { 0, 1 };  /* NO_ERROR, session_ident=1 */
-            send_reply(ring, msg, reply, sizeof(reply));
-            break;
-        }
-        case SRV_CMD_OBTAIN:
-        case SRV_CMD_DELEGATE: {
-            /* OBTAIN: reply with source range — caller reads FROM VPE1:10+
-             * DELEGATE: reply with destination range — caller writes TO VPE1:20+
-             * Separate base ranges so a delegate after an obtain doesn't collide.
-             *
-             * FPT-176 c10540 race fix: each call increments the per-cmd
-             * counter so concurrent OBTAINs/DELEGATEs from multiple peer
-             * kernels (3-node Test 14) get distinct destination slots.
-             * Without this, two concurrent DELEGATEs both reserve slot 20
-             * on VPE1's CapTable and the second errors INV_ARGS in the
-             * kernel's range_unused() check inside the rgate lambda. */
-            static uint32_t next_obtain_slot   = 10;
-            static uint32_t next_delegate_slot = 20;
-            uint32_t start = (cmd == SRV_CMD_OBTAIN)
-                                 ? next_obtain_slot++
-                                 : next_delegate_slot++;
-            printf("[VPE1] %s -> slot=%u\n",
-                   cmd == SRV_CMD_OBTAIN ? "OBTAIN" : "DELEGATE",
-                   (unsigned)start);
-            struct __attribute__((packed)) {
-                uint64_t error;
-                uint32_t type, start, count, pad;
-            } reply = {
-                0,
-                CAP_TYPE_OBJ,
-                start,
-                1,
-                0
-            };
-            send_reply(ring, msg, &reply, sizeof(reply));
-            break;
-        }
-        case SRV_CMD_CLOSE:
-            printf("[VPE1] CLOSE\n");
-            break;
-        default:
-            printf("[VPE1] Unknown cmd %lu\n", (unsigned long)cmd);
-            break;
-        }
+        dispatch_srv_msg(&msg->hdr, msg->data, msg->hdr.length, ring);
         vdtu_ring_ack(ring);
     }
 }
