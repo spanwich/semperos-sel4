@@ -66,10 +66,20 @@ extern "C" {
 
 #define VDTU_PER_EP_ROUTE_SIZE 4
 
+/* Magic byte stored in vdtu_per_ep_route.reserved when the route was
+ * written by vdtu_per_ep_send_to. DTUBridge's UDP-recv path uses it to
+ * unambiguously distinguish FPT-183 routed messages from the legacy
+ * vdtu_msg_header-only wire format that the g_net_out_ring path emits.
+ * 0xA5 was chosen so it would never collide with the legacy format's
+ * first 4 bytes — flags + sender_core_id (lo) + sender_core_id (hi) +
+ * sender_ep_id — which all carry small-integer values in practice. */
+#define VDTU_PER_EP_ROUTE_MAGIC 0xA5
+
 struct __attribute__((packed)) vdtu_per_ep_route {
     uint16_t dest_pe;       /* global PE ID of destination          */
     uint8_t  dest_ep;       /* endpoint ID on destination PE        */
-    uint8_t  reserved;
+    uint8_t  magic;         /* always VDTU_PER_EP_ROUTE_MAGIC after  *
+                             * vdtu_per_ep_send_to has populated it. */
 };
 
 struct __attribute__((packed)) vdtu_per_ep_routed_msg {

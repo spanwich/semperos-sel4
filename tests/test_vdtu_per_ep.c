@@ -290,7 +290,7 @@ static void test_routed_roundtrip(void)
     CHECK(m != NULL, "fetch_routed returned NULL");
     CHECK(m->route.dest_pe == 0x0102, "dest_pe mismatch");
     CHECK(m->route.dest_ep == 7,      "dest_ep mismatch");
-    CHECK(m->route.reserved == 0,     "reserved should be 0");
+    CHECK(m->route.magic == VDTU_PER_EP_ROUTE_MAGIC, "magic should be 0xA5");
     CHECK(m->hdr.sender_core_id == 42, "sender_core_id mismatch");
     CHECK(m->hdr.sender_ep_id   == 9,  "sender_ep_id mismatch");
     CHECK(m->hdr.sender_vpe_id  == 5,  "sender_vpe_id mismatch");

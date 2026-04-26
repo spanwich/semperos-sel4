@@ -191,9 +191,9 @@ int vdtu_per_ep_send_to(struct vdtu_per_ep_set *set, uint32_t ep,
 
     /* Routing prefix. */
     struct vdtu_per_ep_route *route = (struct vdtu_per_ep_route *)slot;
-    route->dest_pe  = dest_pe;
-    route->dest_ep  = dest_ep;
-    route->reserved = 0;
+    route->dest_pe = dest_pe;
+    route->dest_ep = dest_ep;
+    route->magic   = VDTU_PER_EP_ROUTE_MAGIC;
 
     /* DTU header (gem5 layout, untouched). */
     struct vdtu_msg_header *hdr =

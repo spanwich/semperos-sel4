@@ -1071,8 +1071,14 @@ static void dtu_udp_recv_cb(void *arg, struct udp_pcb *pcb,
 
     /* CryptoTransport: decrypt the entire UDP payload.
      * Wire format: [ct_header_t][ciphertext][tag]
-     * Plaintext is the original DTU message: [vdtu_msg_header][payload]. */
-    uint8_t ct_buf[600];
+     * Plaintext can be either:
+     *   Legacy : [vdtu_msg_header 25][payload]
+     *   FPT-183: [vdtu_per_ep_route 4][vdtu_msg_header 25][payload]
+     * Distinguished by route.magic == VDTU_PER_EP_ROUTE_MAGIC at byte 3. */
+    /* Buffers sized for KRNLC max payload (2048) + route(4) + hdr(25) +
+     * CT overhead. The legacy 600-byte cap silently truncated KRNLC; the
+     * step-3 send-side already uses 2256, so we match it here. */
+    uint8_t ct_buf[2256];
     uint16_t ct_len = p->tot_len;
     if (ct_len > sizeof(ct_buf)) {
         ct_len = sizeof(ct_buf);
@@ -1081,7 +1087,7 @@ static void dtu_udp_recv_cb(void *arg, struct udp_pcb *pcb,
     pbuf_copy_partial(p, ct_buf, ct_len, 0);
     pbuf_free(p);
 
-    uint8_t decrypted[600];
+    uint8_t decrypted[2256];
     uint8_t sender_node;
     int pt_len = ct_decrypt(ct_buf, ct_len, decrypted, sizeof(decrypted),
                             &sender_node);
@@ -1096,11 +1102,88 @@ static void dtu_udp_recv_cb(void *arg, struct udp_pcb *pcb,
         return;
     }
 
-    /* Extract DTU header from decrypted plaintext */
+    /* FPT-183: detect new wire format by the magic byte at offset 3.
+     * If matched, demux into the destination PE's inbound[dest_ep] ring;
+     * else fall through to the legacy single-ring path. */
+    bool is_routed = (pt_len >= (int)(VDTU_PER_EP_ROUTE_SIZE + VDTU_HEADER_SIZE))
+                     && (decrypted[3] == VDTU_PER_EP_ROUTE_MAGIC);
+
+    if (is_routed) {
+        struct vdtu_per_ep_route route;
+        memcpy(&route, decrypted, VDTU_PER_EP_ROUTE_SIZE);
+
+        struct vdtu_msg_header hdr;
+        memcpy(&hdr, decrypted + VDTU_PER_EP_ROUTE_SIZE, VDTU_HEADER_SIZE);
+
+        uint16_t payload_len = hdr.length;
+        uint8_t *payload_buf = decrypted + VDTU_PER_EP_ROUTE_SIZE
+                                         + VDTU_HEADER_SIZE;
+        uint16_t avail = (uint16_t)(pt_len - VDTU_PER_EP_ROUTE_SIZE
+                                           - VDTU_HEADER_SIZE);
+        if (payload_len > avail) payload_len = avail;
+
+        const uint16_t self_pe_kernel =
+            (uint16_t)(KERNEL_ID * NUM_LOCAL_PES + 0);
+        const uint16_t self_pe_vpe0   =
+            (uint16_t)(KERNEL_ID * NUM_LOCAL_PES + 2);
+        const uint16_t self_pe_vpe1   =
+            (uint16_t)(KERNEL_ID * NUM_LOCAL_PES + 3);
+
+        struct vdtu_per_ep_set *dst_in = NULL;
+        if (route.dest_pe == self_pe_kernel)      dst_in = &g_vdtu_pe0_in;
+        else if (route.dest_pe == self_pe_vpe0)   dst_in = &g_vdtu_pe1_in;
+        else if (route.dest_pe == self_pe_vpe1)   dst_in = &g_vdtu_pe2_in;
+
+        if (dst_in == NULL) {
+            /* Wrong-receiver: a remote sent a routed msg whose dest_pe
+             * doesn't match any local PE on this kernel. Drop. */
+            g_route_dropped++;
+            return;
+        }
+
+        if (net_rings_ready) {
+            int rc = vdtu_per_ep_send_to(dst_in, route.dest_ep,
+                                         route.dest_pe, route.dest_ep,
+                                         hdr.sender_core_id,
+                                         hdr.sender_ep_id,
+                                         hdr.sender_vpe_id,
+                                         hdr.reply_ep_id,
+                                         hdr.label, hdr.replylabel,
+                                         hdr.flags,
+                                         payload_buf, payload_len);
+            if (rc == 0) {
+                g_rx_ring_send++;
+                g_route_local_ok++;
+                static int rt_rx_log = 0;
+                if (rt_rx_log < 16) {
+                    printf("[%s] FPT-183 remote-recv: kid=%u → "
+                           "dest_pe=%u dest_ep=%u (pt=%d)\n",
+                           COMPONENT_NAME, sender_node,
+                           (unsigned)route.dest_pe,
+                           (unsigned)route.dest_ep, pt_len);
+                    rt_rx_log++;
+                }
+            } else if (rc == -1) {
+                /* Inbound ring full: drop here (per-EP, no head-of-line
+                 * blocking with other EPs). Sender will retransmit via
+                 * D8 (wired in 3c). */
+                g_rx_ring_full++;
+                g_route_local_full++;
+            } else {
+                g_route_dropped++;
+                printf("[%s] FPT-183 remote-recv: send_to rc=%d "
+                       "(dest_pe=%u dest_ep=%u)\n",
+                       COMPONENT_NAME, rc,
+                       (unsigned)route.dest_pe, (unsigned)route.dest_ep);
+            }
+        }
+        return;
+    }
+
+    /* Legacy path: extract DTU header from decrypted plaintext. */
     struct vdtu_msg_header hdr;
     memcpy(&hdr, decrypted, VDTU_HEADER_SIZE);
 
-    /* Extract payload */
     uint16_t payload_len = hdr.length;
     uint8_t *payload_buf = decrypted + VDTU_HEADER_SIZE;
     uint16_t avail = (uint16_t)(pt_len - VDTU_HEADER_SIZE);
@@ -1117,7 +1200,7 @@ static void dtu_udp_recv_cb(void *arg, struct udp_pcb *pcb,
         }
     }
 
-    /* Write to inbound ring buffer for kernel to consume */
+    /* Write to legacy inbound ring buffer for kernel to consume. */
     if (net_rings_ready) {
         int rc = vdtu_ring_send(&g_net_in_ring,
                                 hdr.sender_core_id, hdr.sender_ep_id,
