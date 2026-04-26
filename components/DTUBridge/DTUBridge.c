@@ -1473,15 +1473,68 @@ static bool vdtu_route_pump_local(void)
             else if (dest_pe == self_pe_vpe1)   dst_in = &g_vdtu_pe2_in;
 
             if (dst_in == NULL) {
-                /* Remote — leave for step-3. We deliberately do NOT ack
-                 * here so step-3 can pick the message up from the same
-                 * slot. Once remote routing lands, this branch becomes a
-                 * UDP send + ack. For step-2 we only count, and skip
-                 * acking which leaves the slot pinned — so to avoid
-                 * stalling we still ack for now and treat it as dropped.
-                 * Kernel data-path migration (step-5) is what actually
-                 * routes through here, so this is a no-op until then. */
+                /* Remote: encrypt the routed-msg blob (route+hdr+payload)
+                 * and UDP-send to the DTUBridge on the peer kernel.
+                 * dest_kid = dest_pe / NUM_LOCAL_PES; locate the matching
+                 * peer slot and dispatch. Mirrors the existing legacy
+                 * remote-send path at the top of run() but runs against
+                 * the new per-EP route format. Dormant until step-5 cuts
+                 * the kernel over to vdtu_per_ep_send_to. */
                 g_route_remote++;
+                uint8_t dest_kid = (uint8_t)(dest_pe / NUM_LOCAL_PES);
+                int peer_idx = -1;
+                for (int pi = 0; pi < NUM_PEERS; pi++) {
+                    if (peer_kernel_id[pi] == dest_kid) { peer_idx = pi; break; }
+                }
+                if (peer_idx < 0) {
+                    /* No peer for this kid: drop. */
+                    g_route_dropped++;
+                    vdtu_per_ep_ack(outs[src], ep);
+                    continue;
+                }
+
+                /* Plaintext = the entire slot blob: route(4) + hdr(25) +
+                 * payload. m points at the slot start, so the contiguous
+                 * region from m for `pt_len` bytes is exactly that. */
+                uint16_t pt_len = (uint16_t)(VDTU_PER_EP_ROUTE_SIZE
+                                             + VDTU_HEADER_SIZE
+                                             + m->hdr.length);
+                /* ct_buf sized for KRNLC max (2048) + route + hdr +
+                 * CT overhead. */
+                uint8_t ct_buf[2256];
+                int ct_len = ct_encrypt(peer_kernel_id[peer_idx],
+                                        (const uint8_t *)m, pt_len,
+                                        ct_buf, sizeof(ct_buf));
+                if (ct_len > 0) {
+                    struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, ct_len,
+                                                PBUF_RAM);
+                    if (p) {
+                        memcpy(p->payload, ct_buf, ct_len);
+                        ip_addr_t dest_ip;
+                        ip_addr_copy_from_ip4(dest_ip, peer_addrs[peer_idx]);
+                        err_t err = udp_sendto(g_udp_pcb, p, &dest_ip,
+                                               DTU_UDP_PORT);
+                        pbuf_free(p);
+                        g_tx_to_peer[peer_idx]++;
+                        static int rt_log = 0;
+                        if (rt_log < 16) {
+                            printf("[%s] FPT-183 remote-route: "
+                                   "dest_pe=%u dest_ep=%u kid=%u "
+                                   "pt=%u ct=%d err=%d\n",
+                                   COMPONENT_NAME,
+                                   (unsigned)dest_pe, (unsigned)dest_ep,
+                                   (unsigned)dest_kid, pt_len, ct_len, err);
+                            rt_log++;
+                        }
+                        did_route = true;
+                    } else {
+                        /* pbuf alloc failed — drop. */
+                        g_route_dropped++;
+                    }
+                } else {
+                    /* CT encrypt failed — drop. */
+                    g_route_dropped++;
+                }
                 vdtu_per_ep_ack(outs[src], ep);
                 continue;
             }
