@@ -397,6 +397,16 @@ extern "C" {
                          uint16_t sender_vpe, uint8_t reply_ep,
                          uint64_t label, uint64_t replylabel, uint8_t flags,
                          const void *payload, uint16_t payload_len);
+    /* FPT-183 Phase 3b-step-5: unified send. Replaces both vdtu_ring_send
+     * (LOCAL) and net_ring_send_to (REMOTE) — DTUBridge routes by
+     * (dest_pe, dest_ep) carried in the per-slot route tag. Defined in
+     * camkes_entry.c. */
+    int net_route_send(uint32_t src_ep,
+                       uint16_t dest_pe, uint8_t dest_ep,
+                       uint16_t sender_pe, uint8_t sender_ep,
+                       uint16_t sender_vpe, uint8_t reply_ep,
+                       uint64_t label, uint64_t replylabel, uint8_t flags,
+                       const void *payload, uint16_t payload_len);
 }
 
 void DTU::send_to(const VPEDesc &vpe, int ep, label_t label,
@@ -404,90 +414,56 @@ void DTU::send_to(const VPEDesc &vpe, int ep, label_t label,
 {
     ensure_channels_init();
 
-    /* Route remote PEs via DTUBridge ring buffer → UDP */
-    if (!is_local_pe(vpe.core)) {
-        /* Derive destination kernel ID from the global PE ID: PEs are
-         * allocated in NUM_LOCAL_PES-sized blocks per kernel. */
-        uint8_t dest_kid = (uint8_t)(vpe.core / NUM_LOCAL_PES);
-        KLOG(KRNLC, "Routing PE " << vpe.core << " (kid=" << (int)dest_kid
-                                  << ") to remote via ring (" << size << "B)");
-
-        int rc = net_ring_send_to(dest_kid,
-                                  MY_PE, (uint8_t)ep,
-                                  Platform::kernelId(), (uint8_t)replyep,
-                                  label, replylbl, 0,
-                                  msg, (uint16_t)size);
-        if (rc != 0) {
-            KLOG(ERR, "net_ring_send_to failed: " << rc);
-        }
-        return;
+    /* FPT-183 Phase 3b-step-5: drop the is_local_pe() branch. Every send
+     * goes through the kernel's outbound vDTU; DTUBridge routes by
+     * (dest_pe, dest_ep) carried in the per-slot route tag. Local
+     * destinations are written into the dest PE's vdtu_in[ep]; remote
+     * destinations are CryptoTransport-encrypted and UDP'd to the peer
+     * kernel's DTUBridge.
+     *
+     * src_ep convention: kernel uses dest_ep as its own outbound slot
+     * index, so concurrent sends to different dest EPs use different
+     * outbound rings — preserves per-EP isolation between independent
+     * flows. The receiver consults sender_pe + label for routing replies,
+     * so no requirement that sender_ep_id be a "real" send EP. */
+    int rc = net_route_send((uint32_t)ep,
+                            (uint16_t)vpe.core, (uint8_t)ep,
+                            (uint16_t)MY_PE, (uint8_t)ep,
+                            (uint16_t)Platform::kernelId(),
+                            (uint8_t)replyep,
+                            (uint64_t)label, (uint64_t)replylbl,
+                            (uint8_t)0,
+                            msg, (uint16_t)size);
+    if (rc != 0) {
+        KLOG(ERR, "send_to(pe=" << vpe.core << " ep=" << ep
+             << ") net_route_send failed rc=" << rc);
     }
-
-    /* Local PE: use shared memory channel (translate global→local) */
-    int local_pe = to_local_pe(vpe.core);
-    int ch = find_send_channel_for(local_pe, ep);
-    if (ch < 0) {
-        /* Auto-configure send channel to target EP (sel4 only).
-         * On gem5, DTU hardware writes to EP registers directly.
-         * On sel4, we need an explicit send→recv channel pairing.
-         * Find a free EP slot and configure via VDTUService. */
-        int auto_ep = -1;
-        for (int i = kernel::DTU::FIRST_FREE_EP; i < EP_COUNT; i++) {
-            if (ep_type[i] == EP_NONE) {
-                auto_ep = i;
-                break;
-            }
-        }
-        if (auto_ep < 0) {
-            KLOG(ERR, "send_to(pe=" << vpe.core << " ep=" << ep << ") no free EP");
-            return;
-        }
-
-        ch = vdtu_config_send(MY_PE, auto_ep, local_pe, ep,
-                              vpe.id, (int)size, label, VDTU_CREDITS_UNLIM);
-        if (ch < 0) {
-            KLOG(ERR, "send_to(pe=" << vpe.core << " ep=" << ep
-                 << ") config_send failed (recv EP not configured?)");
-            return;
-        }
-
-        vdtu_channels_attach_ring(&channels, ch);
-        ep_channel[auto_ep] = ch;
-        ep_type[auto_ep] = EP_SEND;
-        ep_send_config[auto_ep].dest_pe = local_pe;
-        ep_send_config[auto_ep].dest_ep = ep;
-        ep_send_config[auto_ep].dest_vpe = vpe.id;
-        ep_send_config[auto_ep].label = label;
-    }
-
-    struct vdtu_ring *ring = vdtu_channels_get_ring(&channels, ch);
-    if (!ring) return;
-
-    vdtu_ring_send(ring, MY_PE, (uint8_t)ep, Platform::kernelId(),
-                   (uint8_t)replyep, label, replylbl, 0,
-                   msg, (uint16_t)size);
 }
 
 void DTU::reply_to(const VPEDesc &vpe, int ep, int crdep, word_t credits,
     label_t label, const void *msg, size_t size)
 {
-    /* This is used for kernel→VPE replies (e.g., kernelcall replies).
-     * Find a send channel to the VPE's reply endpoint. */
+    /* FPT-183 Phase 3b-step-5: kernel→VPE replies also go through the
+     * unified path. ep is the destination's recv EP (the EP the receiver
+     * pulled the original message from). crdep is the credit-EP — used
+     * by gem5 hardware to refill the sender's credit pool; on our sel4
+     * port the credits are software-managed by KPE so crdep is mostly
+     * informational, carried in sender_ep_id per legacy convention. */
+    (void)credits;
     ensure_channels_init();
 
-    int local_pe = to_local_pe(vpe.core);
-    int ch = find_send_channel_for(local_pe, ep);
-    if (ch < 0) {
-        KLOG(ERR, "reply_to(pe=" << vpe.core << " ep=" << ep << ") no reply channel");
-        return;
+    int rc = net_route_send((uint32_t)ep,
+                            (uint16_t)vpe.core, (uint8_t)ep,
+                            (uint16_t)MY_PE, (uint8_t)crdep,
+                            (uint16_t)Platform::kernelId(),
+                            (uint8_t)ep,
+                            (uint64_t)label, (uint64_t)0,
+                            (uint8_t)VDTU_FLAG_REPLY,
+                            msg, (uint16_t)size);
+    if (rc != 0) {
+        KLOG(ERR, "reply_to(pe=" << vpe.core << " ep=" << ep
+             << ") net_route_send failed rc=" << rc);
     }
-
-    struct vdtu_ring *ring = vdtu_channels_get_ring(&channels, ch);
-    if (!ring) return;
-
-    vdtu_ring_send(ring, MY_PE, (uint8_t)crdep, Platform::kernelId(),
-                   (uint8_t)ep, label, 0, VDTU_FLAG_REPLY,
-                   msg, (uint16_t)size);
 }
 
 void DTU::write_mem(const VPEDesc &vpe, uintptr_t addr, const void *data, size_t size) {

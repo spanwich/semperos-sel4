@@ -103,30 +103,49 @@ static void init_channel_table(void)
  */
 static int wait_for_reply_ex(uint64_t *out_cycles)
 {
+    /* FPT-183 Phase 3b-step-5: kernel replies now arrive at our vdtu_in
+     * (per-EP) via DTUBridge as virtual NoC, not on dtu_ch_<N>. Scan
+     * every EP ring; the kernel's reply lands at the same EP id it
+     * previously used as the channel index — but per-EP isolation means
+     * any EP can carry the reply, so scan all 32. Legacy dtu_ch_<N>
+     * scan kept for now during the transition; safe to remove in 5f. */
     int timeout = 50000;
-    const struct vdtu_message *reply = NULL;
-    struct vdtu_ring *ring = NULL;
+    const struct vdtu_per_ep_routed_msg *reply = NULL;
+    uint32_t reply_ep = 0;
 
     if (out_cycles) *out_cycles = 0;
 
     while (timeout-- > 0) {
+        /* New per-EP path. */
+        for (uint32_t ep = 0; ep < VDTU_PER_EP_COUNT; ep++) {
+            const struct vdtu_per_ep_routed_msg *m =
+                vdtu_per_ep_fetch_routed(&g_vdtu_local_in, ep);
+            if (m) { reply = m; reply_ep = ep; break; }
+        }
+        if (reply) break;
+        /* Legacy dtu_ch_<N> scan (will go silent post-cutover). */
+        const struct vdtu_message *legacy = NULL;
+        struct vdtu_ring *ring = NULL;
         for (int ch = 1; ch < VDTU_CHANNELS_PER_PE; ch++) {
             if (!channels.ch[ch]) continue;
             if (!channels.rings[ch].ctrl)
                 vdtu_channels_attach_ring(&channels, ch);
             struct vdtu_ring *r = vdtu_channels_get_ring(&channels, ch);
             if (r && !vdtu_ring_is_empty(r)) {
-                reply = vdtu_ring_fetch(r);
-                if (reply) {
-                    ring = r;
-                    break;
-                }
+                legacy = vdtu_ring_fetch(r);
+                if (legacy) { ring = r; break; }
             }
         }
-        if (reply) break;
-        /* Yield every iteration so kernel + DTUBridge can run.
-         * On single-core QEMU, the kernel needs a few WorkLoop
-         * iterations to process our syscall and send the reply. */
+        if (legacy) {
+            int result = -1;
+            if (legacy->hdr.length >= sizeof(uint64_t))
+                result = (int)(*(const uint64_t *)legacy->data);
+            if (out_cycles && legacy->hdr.length >= 2 * sizeof(uint64_t))
+                *out_cycles = *(const uint64_t *)
+                    (legacy->data + sizeof(uint64_t));
+            vdtu_ring_ack(ring);
+            return result;
+        }
         seL4_Yield();
     }
 
@@ -136,11 +155,10 @@ static int wait_for_reply_ex(uint64_t *out_cycles)
     if (reply->hdr.length >= sizeof(uint64_t)) {
         result = (int)(*(const uint64_t *)reply->data);
     }
-    /* Second word: kernel-measured cycles (present when SEMPER_BENCH_MODE is on) */
     if (out_cycles && reply->hdr.length >= 2 * sizeof(uint64_t)) {
         *out_cycles = *(const uint64_t *)(reply->data + sizeof(uint64_t));
     }
-    vdtu_ring_ack(ring);
+    vdtu_per_ep_ack(&g_vdtu_local_in, reply_ep);
     return result;
 }
 
@@ -325,22 +343,38 @@ static int send_exchange(uint64_t tcap, uint32_t own_start, uint32_t own_count,
  */
 static int wait_for_reply_long(void)
 {
-    int timeout = 10000000; /* cross-node: kernel blocks for full KRNLC round-trip */
-    const struct vdtu_message *reply = NULL;
-    struct vdtu_ring *ring = NULL;
+    /* FPT-183 Phase 3b-step-5: same dual-source pattern as
+     * wait_for_reply_ex but with the long cross-kernel timeout. */
+    int timeout = 10000000;
+    const struct vdtu_per_ep_routed_msg *reply = NULL;
+    uint32_t reply_ep = 0;
 
     while (timeout-- > 0) {
+        for (uint32_t ep = 0; ep < VDTU_PER_EP_COUNT; ep++) {
+            const struct vdtu_per_ep_routed_msg *m =
+                vdtu_per_ep_fetch_routed(&g_vdtu_local_in, ep);
+            if (m) { reply = m; reply_ep = ep; break; }
+        }
+        if (reply) break;
+        const struct vdtu_message *legacy = NULL;
+        struct vdtu_ring *ring = NULL;
         for (int ch = 1; ch < VDTU_CHANNELS_PER_PE; ch++) {
             if (!channels.ch[ch]) continue;
             if (!channels.rings[ch].ctrl)
                 vdtu_channels_attach_ring(&channels, ch);
             struct vdtu_ring *r = vdtu_channels_get_ring(&channels, ch);
             if (r && !vdtu_ring_is_empty(r)) {
-                reply = vdtu_ring_fetch(r);
-                if (reply) { ring = r; break; }
+                legacy = vdtu_ring_fetch(r);
+                if (legacy) { ring = r; break; }
             }
         }
-        if (reply) break;
+        if (legacy) {
+            int result = -1;
+            if (legacy->hdr.length >= sizeof(uint64_t))
+                result = (int)(*(const uint64_t *)legacy->data);
+            vdtu_ring_ack(ring);
+            return result;
+        }
         seL4_Yield();
     }
 
@@ -348,7 +382,7 @@ static int wait_for_reply_long(void)
     int result = -1;
     if (reply->hdr.length >= sizeof(uint64_t))
         result = (int)(*(const uint64_t *)reply->data);
-    vdtu_ring_ack(ring);
+    vdtu_per_ep_ack(&g_vdtu_local_in, reply_ep);
     return result;
 }
 

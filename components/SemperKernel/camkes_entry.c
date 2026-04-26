@@ -305,6 +305,40 @@ static void net_link_connected(void)
     }
 }
 
+/*
+ * FPT-183 Phase 3b-step-5: unified send wrapper.
+ *
+ * DTU::send_to() and DTU::reply_to() in arch/sel4/DTU.cc call this for
+ * EVERY destination — local-PE or remote-kernel alike. The kernel no
+ * longer takes the is_local_pe() branch; DTUBridge inspects route.dest_pe
+ * and routes accordingly (local → write to dest's vdtu_in[dest_ep],
+ * remote → CryptoTransport+UDP to peer kernel's DTUBridge).
+ *
+ * src_ep is the kernel's outbound EP slot used for backpressure scoping
+ * — convention: src_ep = dest_ep, so concurrent sends to different
+ * dest EPs use different outbound rings, preserving per-EP isolation
+ * between independent flows.
+ *
+ * Returns 0 on success, vdtu_per_ep_send_to error codes (-1..-4) on
+ * failure. The Phase 3c D8 cache+retry will hide -1 (full) from callers
+ * for forward messages; for now -1 propagates to KLOG.
+ */
+int net_route_send(uint32_t src_ep,
+                   uint16_t dest_pe, uint8_t dest_ep,
+                   uint16_t sender_pe, uint8_t sender_ep,
+                   uint16_t sender_vpe, uint8_t reply_ep,
+                   uint64_t label, uint64_t replylabel, uint8_t flags,
+                   const void *payload, uint16_t payload_len)
+{
+    if (!net_rings_attached) return -1;
+    return vdtu_per_ep_send_to(&g_vdtu_local_out, src_ep,
+                               dest_pe, dest_ep,
+                               sender_pe, sender_ep,
+                               sender_vpe, reply_ep,
+                               label, replylabel, flags,
+                               payload, payload_len);
+}
+
 /* Called from kernel_start() to attach to ring buffers */
 void net_init_rings(void)
 {
@@ -376,6 +410,79 @@ int net_ring_send(uint16_t sender_pe, uint8_t sender_ep,
                             label, replylabel, flags, payload, payload_len);
 }
 
+/*
+ * FPT-183 Phase 3b-step-5: shared inbound dispatch.
+ *
+ * Both the legacy g_net_in_ring path and the new per-EP g_vdtu_local_in
+ * path feed into this helper. Mirrors the pre-183 inline logic exactly:
+ *   - PING: send PONG back (per-src-kid throttle).
+ *   - PONG: mark net_pong_received.
+ *   - Other: dispatch to KernelcallHandler with per-sender inflight gate
+ *     mimicking gem5 DTU hardware backpressure (FPT-176 c10540).
+ *
+ * Returns 1 on consume, 0 on defer (caller should not ack and should
+ * return from net_poll for retry on the next iteration).
+ */
+static int try_process_inbound_msg(const struct vdtu_message *msg)
+{
+    /* First inbound message proves bidirectional link. */
+    if (g_net_state != NET_CONNECTED) {
+        net_link_connected();
+    }
+
+    if (msg->hdr.label == NET_LABEL_PING) {
+        /* FPT-179 Stage 4: reply once per sender-kernel, not globally. */
+        static int pong_sent_to[MAX_SRC_KID];  /* indexed by src_kid */
+        uint8_t src_kid =
+            (uint8_t)(msg->hdr.sender_core_id / NUM_LOCAL_PES);
+        uint16_t my_pe = (uint16_t)(KERNEL_ID * NUM_LOCAL_PES);
+        printf("[SemperKernel] NET: PING RX from global_pe=%u → "
+               "src_kid=%u (my kid=%u)\n",
+               (unsigned)msg->hdr.sender_core_id, (unsigned)src_kid,
+               (unsigned)KERNEL_ID);
+        if (src_kid < MAX_SRC_KID && src_kid != KERNEL_ID
+            && !pong_sent_to[src_kid]) {
+            const char *pong = "PONG from kernel";
+            net_ring_send_to(src_kid, my_pe, 0, 0, 0,
+                             NET_LABEL_PONG, 0, 0,
+                             pong, (uint16_t)strlen(pong));
+            pong_sent_to[src_kid] = 1;
+            net_pong_sent = 1;
+            printf("[SemperKernel] NET: Sent PONG reply to kid=%u "
+                   "(my kid=%u)\n",
+                   (unsigned)src_kid, (unsigned)KERNEL_ID);
+        }
+        return 1;
+    }
+    if (msg->hdr.label == NET_LABEL_PONG) {
+        net_pong_received = 1;
+        printf("[SemperKernel] NET: === PONG RECEIVED -- "
+               "round trip complete! ===\n");
+        return 1;
+    }
+
+    /* Inter-kernel message (Task 08): dispatch to KernelcallHandler.
+     * Per-sender KRNLC serialisation (FPT-176 c10540): mimic gem5's
+     * DTU hardware backpressure. While the inflight flag for peer N is
+     * set, defer subsequent messages from N (caller leaves the slot
+     * unacked so we retry on the next net_poll). */
+    uint8_t src_kid = (uint8_t)(msg->hdr.sender_core_id / NUM_LOCAL_PES);
+    if (src_kid < MAX_SRC_KID && krnlc_inflight[src_kid]) {
+        return 0;  /* defer */
+    }
+    if (src_kid < MAX_SRC_KID) {
+        krnlc_inflight[src_kid] = 1;
+        __sync_synchronize();
+    }
+    g_krnlc_async_pending = 0;
+    uint16_t total = VDTU_HEADER_SIZE + msg->hdr.length;
+    dispatch_net_krnlc((const void *)msg, total);
+    __sync_synchronize();
+    if (!g_krnlc_async_pending && src_kid < MAX_SRC_KID)
+        krnlc_inflight[src_kid] = 0;
+    return 1;
+}
+
 /* Called from WorkLoop every iteration to handle network I/O */
 void net_poll(void)
 {
@@ -418,78 +525,47 @@ void net_poll(void)
             g_net_state = NET_CONNECTED;
     }
 
-    /* Poll inbound ring for messages from remote node */
-    const struct vdtu_message *msg = vdtu_ring_fetch(&g_net_in_ring);
-    if (msg) {
-        /* First inbound message proves bidirectional link — transition to CONNECTED */
-        if (g_net_state != NET_CONNECTED) {
-            net_link_connected();
-        }
+    /* Poll inbound ring(s) for messages from remote node.
+     * Two sources active during the FPT-183 transition:
+     *   - g_net_in_ring (legacy, single shared ring) — drained by older
+     *     peer kernels still running pre-183 code.
+     *   - g_vdtu_local_in (per-EP routed, FPT-183) — drained by peer
+     *     kernels that have cut over.
+     * Both feed the same dispatch helper. The legacy ring goes silent
+     * once all peers run the new code; we keep the path until 5f cleanup.
+     *
+     * Helper return value: 1 = consumed, ack the source. 0 = defer (per-
+     * sender KRNLC inflight gate active), don't ack and return from
+     * net_poll so the next iteration retries.
+     */
 
-        if (msg->hdr.label == NET_LABEL_PING) {
-            /* FPT-179 Stage 4: reply once per sender-kernel, not globally.
-             * Globally-once broke 3-node (only first peer ever saw PONG).
-             * Every-time floods the network. Per-sender is the right grain:
-             * each peer's PING stops once its PONG arrives. */
-            static int pong_sent_to[MAX_SRC_KID];  /* indexed by src_kid */
-            uint8_t src_kid = (uint8_t)(msg->hdr.sender_core_id / NUM_LOCAL_PES);
-            uint16_t my_pe = (uint16_t)(KERNEL_ID * NUM_LOCAL_PES);
-            printf("[SemperKernel] NET: PING RX from global_pe=%u → src_kid=%u (my kid=%u)\n",
-                   (unsigned)msg->hdr.sender_core_id, (unsigned)src_kid,
-                   (unsigned)KERNEL_ID);
-            if (src_kid < MAX_SRC_KID && src_kid != KERNEL_ID
-                && !pong_sent_to[src_kid]) {
-                const char *pong = "PONG from kernel";
-                /* sender_pe MUST be our global PE ID so the PONG receiver
-                 * correctly identifies us as the source (symmetric fix). */
-                net_ring_send_to(src_kid, my_pe, 0, 0, 0,
-                                 NET_LABEL_PONG, 0, 0,
-                                 pong, (uint16_t)strlen(pong));
-                pong_sent_to[src_kid] = 1;
-                net_pong_sent = 1;
-                printf("[SemperKernel] NET: Sent PONG reply to kid=%u (my kid=%u)\n",
-                       (unsigned)src_kid, (unsigned)KERNEL_ID);
-            }
-        } else if (msg->hdr.label == NET_LABEL_PONG) {
-            net_pong_received = 1;
-            printf("[SemperKernel] NET: === PONG RECEIVED -- round trip complete! ===\n");
-        } else {
-            /* Inter-kernel message (Task 08): dispatch to KernelcallHandler.
-             * The raw vdtu_message has the same layout as m3::DTU::Message.
-             *
-             * Per-sender KRNLC serialisation (FPT-176 comment 10540): mimic
-             * gem5's DTU hardware backpressure where a peer cannot deliver
-             * a second message until the first has been consumed. While the
-             * inflight flag for peer N is set, defer subsequent messages
-             * from N (leave in ring, no ack) so net_poll retries them next
-             * iteration. Cross-peer traffic is unaffected (per-peer slot).
-             *
-             * Lifecycle:
-             *  - Set inflight=1 before dispatch.
-             *  - Sync handlers complete inline → clear at dispatch return.
-             *  - Async handlers (createSessFwd / exchangeOverSessionFwd
-             *    subscribe to an rgate) call krnlc_mark_async_pending()
-             *    inside the handler; we then SKIP the post-dispatch clear,
-             *    and the lambda calls krnlc_clear_inflight(kid) at its
-             *    completion point (lambda exit / unsubscribe). */
-            uint8_t src_kid = (uint8_t)(msg->hdr.sender_core_id / NUM_LOCAL_PES);
-            if (src_kid < MAX_SRC_KID && krnlc_inflight[src_kid]) {
-                /* Defer: leave msg in ring (no ack), retry next iteration. */
-                return;
-            }
-            if (src_kid < MAX_SRC_KID) {
-                krnlc_inflight[src_kid] = 1;
-                __sync_synchronize();
-            }
-            g_krnlc_async_pending = 0;
-            uint16_t total = VDTU_HEADER_SIZE + msg->hdr.length;
-            dispatch_net_krnlc((const void *)msg, total);
-            __sync_synchronize();
-            if (!g_krnlc_async_pending && src_kid < MAX_SRC_KID)
-                krnlc_inflight[src_kid] = 0;
+    {
+        const struct vdtu_message *msg = vdtu_ring_fetch(&g_net_in_ring);
+        if (msg) {
+            int rc = try_process_inbound_msg(msg);
+            if (rc == 0) return;
+            vdtu_ring_ack(&g_net_in_ring);
         }
+    }
 
-        vdtu_ring_ack(&g_net_in_ring);
+    /* FPT-183: drain per-EP inbound rings. Each of 32 EPs is independent
+     * — EP N being full does not block EP M (the property the legacy
+     * single shared ring violated and FPT-183 restores). One slot per
+     * EP per iteration; remaining slots come up on subsequent net_poll
+     * calls. */
+    if (net_rings_attached) {
+        for (uint32_t ep = 0; ep < VDTU_PER_EP_COUNT; ep++) {
+            const struct vdtu_per_ep_routed_msg *rm =
+                vdtu_per_ep_fetch_routed(&g_vdtu_local_in, ep);
+            if (!rm) continue;
+            /* The slot layout is [route 4][hdr 25][payload]; vdtu_message
+             * starts at &rm->hdr. */
+            const struct vdtu_message *m =
+                (const struct vdtu_message *)&rm->hdr;
+            int rc = try_process_inbound_msg(m);
+            if (rc == 0) return;  /* defer this EP, retry next iteration */
+            vdtu_per_ep_ack(&g_vdtu_local_in, ep);
+        }
     }
 
     /* Layer 2: kernel-to-kernel ping after PONG proves link works.

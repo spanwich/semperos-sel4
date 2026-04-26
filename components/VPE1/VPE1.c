@@ -87,8 +87,22 @@ static void init_channels(void)
  * the same ring) and interpret the opcode as a spurious error code. */
 static int wait_for_reply(void)
 {
+    /* FPT-183 Phase 3b-step-5: kernel replies arrive at our vdtu_in
+     * (per-EP) via DTUBridge as virtual NoC. Scan all 32 EPs; legacy
+     * dtu_ch_<N> scan retained for transition until 5f cleanup. */
     int timeout = 50000;
     while (timeout-- > 0) {
+        for (uint32_t ep = 0; ep < VDTU_PER_EP_COUNT; ep++) {
+            const struct vdtu_per_ep_routed_msg *m =
+                vdtu_per_ep_fetch_routed(&g_vdtu_local_in, ep);
+            if (m) {
+                int result = -1;
+                if (m->hdr.length >= sizeof(uint64_t))
+                    result = (int)(*(const uint64_t *)m->data);
+                vdtu_per_ep_ack(&g_vdtu_local_in, ep);
+                return result;
+            }
+        }
         for (int ch = 1; ch < VDTU_CHANNELS_PER_PE; ch++) {
             if (!channels.ch[ch]) continue;
             if (!channels.rings[ch].ctrl)
