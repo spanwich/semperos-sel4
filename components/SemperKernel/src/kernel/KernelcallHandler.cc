@@ -41,6 +41,24 @@ extern void krnlc_clear_inflight(unsigned char src_kid);
 #include "pes/KPE.h"
 #include "com/RecvBufs.h"
 
+/* FPT-176 c10553 follow-up: read-only diagnostic counters for the
+ * Test 12/13/14 round-trip. No protocol behaviour changes. Each counter
+ * is incremented once per code path; periodic dump in net_poll (in C)
+ * prints them so we can see which leg of the round-trip is dropping
+ * requests on node-a / node-b. C linkage so camkes_entry.c can read. */
+extern "C" {
+volatile unsigned long g_fwd_alloc_createsess     = 0;
+volatile unsigned long g_fwd_recvreply_createsess = 0;
+volatile unsigned long g_fwd_unsubscribe_createsess = 0;
+volatile unsigned long g_fwd_alloc_xchgsess     = 0;
+volatile unsigned long g_fwd_recvreply_xchgsess = 0;
+volatile unsigned long g_fwd_unsubscribe_xchgsess = 0;
+volatile unsigned long g_resp_send_createsess     = 0;
+volatile unsigned long g_resp_dispatch_createsess = 0;
+volatile unsigned long g_resp_send_xchgsess     = 0;
+volatile unsigned long g_resp_dispatch_xchgsess = 0;
+}
+
 namespace kernel {
 
 INIT_PRIO_USER(3) KernelcallHandler KernelcallHandler::_inst;
@@ -404,6 +422,7 @@ void KernelcallHandler::createSessFwd(GateIStream &is) {
         ", srvname=" << srvname << ", cap=" << PRINT_HASH(cap) << ")");
     Service *srv = ServiceList::get().find(srvname);
     if(srv == nullptr || srv->closing) {
+        __sync_fetch_and_add(&g_resp_send_createsess, 1);
         Kernelcalls::get().createSessResp(senderKpe, vpeID, tid,
             m3::Errors::INV_ARGS, 0, 0);
         return;
@@ -420,7 +439,9 @@ void KernelcallHandler::createSessFwd(GateIStream &is) {
          * (Test 14 race). FPT-176 c10540. */
 
         RecvGate *rgate = new RecvGate(SyscallHandler::get().srvepid(), nullptr);
+        __sync_fetch_and_add(&g_fwd_alloc_createsess, 1);
         rgate->subscribe([this, rgate, rsrv, cap, tid, vpeID, sender] (GateIStream &reply, m3::Subscriber<GateIStream&> *s) {
+            __sync_fetch_and_add(&g_fwd_recvreply_createsess, 1);
             m3::Reference<Service> srvcpy = rsrv;
             srvcpy->received_reply();
 
@@ -434,6 +455,7 @@ void KernelcallHandler::createSessFwd(GateIStream &is) {
             reply >> res;
             LOG_KRNL(kpe, "createSessFwd-cb(res=" << res << ")");
             if(res != m3::Errors::NO_ERROR) {
+                __sync_fetch_and_add(&g_resp_send_createsess, 1);
                 Kernelcalls::get().createSessResp(kpe, vpeID, tid,
                     m3::Errors::INV_ARGS, 0, 0);
             }
@@ -442,14 +464,17 @@ void KernelcallHandler::createSessFwd(GateIStream &is) {
                 reply >> sess;
                 Capability *srvcap = rsrv->vpe().objcaps().get(rsrv->selector(), Capability::SERVICE);
                 if(!srvcap) {
+                    __sync_fetch_and_add(&g_resp_send_createsess, 1);
                     Kernelcalls::get().createSessResp(kpe, vpeID, tid,
                         m3::Errors::INV_ARGS, 0, 0);
+                    __sync_fetch_and_add(&g_fwd_unsubscribe_createsess, 1);
                     rgate->unsubscribe(s);
                     return;
                 }
                 static_cast<ServiceCapability*>(srvcap)->addChild(cap);
                 srvcpy->add_ref();
 
+                __sync_fetch_and_add(&g_resp_send_createsess, 1);
                 Kernelcalls::get().createSessResp(kpe, vpeID, tid,
                     m3::Errors::NO_ERROR, sess, srvcap->id());
             }
@@ -459,6 +484,7 @@ void KernelcallHandler::createSessFwd(GateIStream &is) {
              * subscriber list. Deleting the gate would free the list
              * while the iterator is still live, causing a use-after-free.
              * The gate leaks (one 48-byte alloc per cross-kernel session). */
+            __sync_fetch_and_add(&g_fwd_unsubscribe_createsess, 1);
             rgate->unsubscribe(s);
         });
 
@@ -475,6 +501,7 @@ void KernelcallHandler::createSessResp(GateIStream &is) {
     //       round-robin and it becomes possible to have two message handling
     //       threads running after another since the second would override the
     //       message of the first.
+    __sync_fetch_and_add(&g_resp_dispatch_createsess, 1);
     int vpeID, tid, res;
     is >> vpeID >> tid >> res;
     label_t sender = is.label();
@@ -580,6 +607,7 @@ void KernelcallHandler::exchangeOverSession(GateIStream &is) {
     label_t sender = is.label();
     m3::Reference<Service> rsrv(srv);
     RecvGate *rgate = new RecvGate(SyscallHandler::get().srvepid(), nullptr);
+    __sync_fetch_and_add(&g_fwd_alloc_xchgsess, 1);
 
     /* exchangeOverSession is NOT gated by the inflight slot. The first
      * implementation (FPT-176 c10540) cross-deadlocked when k0↔k1 sent
@@ -590,6 +618,7 @@ void KernelcallHandler::exchangeOverSession(GateIStream &is) {
 
     rgate->subscribe([this, rgate, rsrv, tid, sender, obtain, vpe, caps]
         (GateIStream &reply, m3::Subscriber<GateIStream&> *s) {
+        __sync_fetch_and_add(&g_fwd_recvreply_xchgsess, 1);
         CAP_BENCH_TRACE_X_F(RKERNEL_OBT_FROM_SRV);
         m3::Reference<Service> srvcpy = rsrv;
         srvcpy->received_reply();
@@ -739,6 +768,8 @@ void KernelcallHandler::exchangeOverSession(GateIStream &is) {
         }
 
         finish:
+            __sync_fetch_and_add(&g_resp_send_xchgsess, 1);
+            __sync_fetch_and_add(&g_fwd_unsubscribe_xchgsess, 1);
             // unsubscribe will delete the lambda
             RecvGate *rgatecpy = rgate;
             rgate->unsubscribe(s);
@@ -755,6 +786,7 @@ void KernelcallHandler::exchangeOverSession(GateIStream &is) {
 }
 
 void KernelcallHandler::exchangeOverSessionReply(GateIStream &is) {
+    __sync_fetch_and_add(&g_resp_dispatch_xchgsess, 1);
     int tid;
     m3::Errors::Code res;
     is >> tid >> res;

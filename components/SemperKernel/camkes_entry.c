@@ -494,6 +494,33 @@ void net_poll(void)
                    g_net_state == NET_RETRYING ? "RETRYING" : "DISCONNECTED");
         }
     }
+
+    /* FPT-176 c10553 follow-up — periodic dump of FWD lifecycle counters
+     * so we can correlate per-leg counts between the three nodes. Dumps
+     * every ~10M poll iterations once the kernel has been up long enough
+     * to have meaningful traffic. Read-only. */
+    extern volatile unsigned long g_fwd_alloc_createsess;
+    extern volatile unsigned long g_fwd_recvreply_createsess;
+    extern volatile unsigned long g_fwd_unsubscribe_createsess;
+    extern volatile unsigned long g_fwd_alloc_xchgsess;
+    extern volatile unsigned long g_fwd_recvreply_xchgsess;
+    extern volatile unsigned long g_fwd_unsubscribe_xchgsess;
+    extern volatile unsigned long g_resp_send_createsess;
+    extern volatile unsigned long g_resp_dispatch_createsess;
+    extern volatile unsigned long g_resp_send_xchgsess;
+    extern volatile unsigned long g_resp_dispatch_xchgsess;
+    if (net_poll_count > 4000000 && (net_poll_count % 10000000) == 0) {
+        printf("[SemperKernel] FWD-trace: createsess "
+               "alloc=%lu recvreply=%lu unsub=%lu | resp send=%lu dispatch=%lu\n",
+               g_fwd_alloc_createsess, g_fwd_recvreply_createsess,
+               g_fwd_unsubscribe_createsess,
+               g_resp_send_createsess, g_resp_dispatch_createsess);
+        printf("[SemperKernel] FWD-trace: xchgsess   "
+               "alloc=%lu recvreply=%lu unsub=%lu | resp send=%lu dispatch=%lu\n",
+               g_fwd_alloc_xchgsess, g_fwd_recvreply_xchgsess,
+               g_fwd_unsubscribe_xchgsess,
+               g_resp_send_xchgsess, g_resp_dispatch_xchgsess);
+    }
 }
 #else  /* SEMPEROS_NO_NETWORK */
 /* Stubs for builds without DTUBridge (e.g. XCP-ng local-only benchmarks) */
