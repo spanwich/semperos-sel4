@@ -1475,13 +1475,17 @@ void post_init(void)
 
     /* FPT-183: initialize the six per-PE vDTU dataports — DTUBridge owns
      * the init (the bridge becomes the virtual NoC; PEs attach on their
-     * side). Each set carries 32 EP rings at slot_count=2, slot_size=2048
-     * → stride 8192, total 256 KiB per dataport. Phase 3b switches the
-     * data path to flow through these; Phase 3a-step-2 just stands the
-     * infrastructure up. */
+     * side). Each set carries 32 EP rings at slot_count=4, slot_size=2048
+     * → stride 16384, total 512 KiB per dataport.
+     *
+     * slot_count must be ≥ 4 (SPSC capacity = slot_count − 1):
+     * SyscallHandler::broadcastCreateSess writes one createSessFwd per
+     * peer back-to-back to the same outbound EP — with capacity 1 the
+     * 2nd silently drops with ring-full. 4 slots gives capacity 3,
+     * enough for 3-peer broadcast plus a slot of headroom. */
     {
         const uint32_t EPS = VDTU_PER_EP_COUNT;
-        const uint32_t SC  = 2;                     /* slot_count */
+        const uint32_t SC  = 4;                     /* slot_count */
         const uint32_t SS  = VDTU_KRNLC_MSG_SIZE;   /* slot_size = 2048 */
         struct {
             const char *label;

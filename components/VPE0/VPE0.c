@@ -58,7 +58,8 @@ static int send_chan = -1;
 static struct vdtu_per_ep_set g_vdtu_local_out;  /* VPE0 → DTUBridge */
 static struct vdtu_per_ep_set g_vdtu_local_in;   /* DTUBridge → VPE0 */
 
-#define FPT183_SLOT_COUNT  2
+/* See camkes_entry.c FPT183_SLOT_COUNT comment for the slot_count rationale. */
+#define FPT183_SLOT_COUNT  4
 #define FPT183_SLOT_SIZE   VDTU_KRNLC_MSG_SIZE  /* 2048 — covers KRNLC max */
 
 static void init_vdtu_per_ep(void)

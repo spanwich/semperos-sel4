@@ -146,7 +146,13 @@ static volatile int net_rings_attached = 0;
 static struct vdtu_per_ep_set g_vdtu_local_out;  /* kernel → DTUBridge */
 static struct vdtu_per_ep_set g_vdtu_local_in;   /* DTUBridge → kernel */
 
-#define FPT183_SLOT_COUNT  2
+/* slot_count must be ≥ 4: SPSC rings have effective capacity slot_count − 1.
+ * SyscallHandler::broadcastCreateSess writes one createSessFwd per peer
+ * to the same outbound EP back-to-back; a 2-slot ring (capacity 1)
+ * silently drops the 2nd message with ring-full. With 4 slots, a 3-peer
+ * cluster broadcasts both peer messages without bouncing. The next
+ * larger pow2 (8) is reserved for D8 retransmission headroom in 3c. */
+#define FPT183_SLOT_COUNT  4
 #define FPT183_SLOT_SIZE   VDTU_KRNLC_MSG_SIZE  /* 2048 — covers KRNLC max */
 
 #define NET_LABEL_PING  0x50494E47ULL  /* "PING" in ASCII */
