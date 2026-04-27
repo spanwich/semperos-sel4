@@ -1296,33 +1296,63 @@ int run(void)
      * Test retries because remote VPE1 may still be registering when
      * VPE0 finishes tests 1-11.
      * ============================================================== */
+    /* FPT-183 Phase 4-fix: hoist the established-session sel out of Test
+     * 12's scope so Tests 13/14 below can use whichever peer's session
+     * actually succeeded. Initialised to -1; first successful peer wins. */
+    int test12_sess_sel = -1;
+    int test12_peer_kid = -1;
+
     {
-        /* Pick the PEER kernel's service name. Node 0 targets testsrv-k1;
-         * node 1 targets testsrv-k0. */
+        /* Iterate over all peer kernels in the cluster, not the 2-node
+         * hardcoded "(KERNEL_ID == 0) ? '1' : '0'" selector. For
+         * SEMPER_NUM_NODES = 3, node-a (kid=0) tests testsrv-k1 and
+         * testsrv-k2; node-b tests k0 and k2; node-c tests k0 and k1.
+         * Test 12 PASSES if AT LEAST ONE peer-targeted CREATESESS
+         * succeeds — that exercises the cross-kernel session path
+         * end-to-end. Each session lands in a distinct cap slot
+         * (300 + peer_kid) so a positive reply doesn't clobber any
+         * previous session's slot. The first peer that succeeds wins
+         * test12_sess_sel for use by Tests 13 and 14.
+         *
+         * Wait for mutual HELLO + remote VPE1 service registration. */
+        printf("[VPE0] Test 12: waiting for remote VPE1 + network ready...\n");
+        for (int y = 0; y < 50000; y++) seL4_Yield();
+
+        int peer_pass = 0;
+        int last_err = -1;
         char remote_name[11];
         remote_name[0] = 't'; remote_name[1] = 'e'; remote_name[2] = 's';
         remote_name[3] = 't'; remote_name[4] = 's'; remote_name[5] = 'r';
         remote_name[6] = 'v'; remote_name[7] = '-'; remote_name[8] = 'k';
-        remote_name[9] = (SEMPER_KERNEL_ID == 0) ? '1' : '0';
         remote_name[10] = '\0';
 
-        int ok = 0;
-        int last_err = -1;
-        /* Wait for mutual HELLO + remote VPE1 service registration.
-         * Cross-kernel CREATESESS has a ~10-hop round-trip through two
-         * DTUBridges. Single attempt — retries cause BUSY errors because
-         * the kernel thread from the first attempt is still blocked. */
-        printf("[VPE0] Test 12: waiting for remote VPE1 + network ready...\n");
-        for (int y = 0; y < 50000; y++) seL4_Yield();
+        for (int kid = 0; kid < SEMPER_NUM_NODES; kid++) {
+            if (kid == SEMPER_KERNEL_ID) continue;  /* skip self */
+            remote_name[9] = (char)('0' + kid);
+            int sess_sel = 300 + kid;
+            printf("[VPE0] Test 12: sending CREATESESS -> %s (sel=%d)\n",
+                   remote_name, sess_sel);
+            int e = send_createsess(sess_sel, remote_name, 10);
+            last_err = e;
+            if (e == 0) {
+                peer_pass++;
+                if (test12_sess_sel < 0) {
+                    test12_sess_sel = sess_sel;
+                    test12_peer_kid = kid;
+                }
+                printf("[VPE0] Test 12: %s session OK at sel=%d\n",
+                       remote_name, sess_sel);
+            } else {
+                printf("[VPE0] Test 12: %s FAILED err=%d\n", remote_name, e);
+            }
+        }
 
-        printf("[VPE0] Test 12: sending CREATESESS\n");
-        err = send_createsess(300, remote_name, 10);
-        last_err = err;
-        if (err == 0) ok = 1;
-
+        int ok = (peer_pass > 0);
         if (ok) pass++; else fail++;
-        printf("[VPE0] Test 12 (cross-kernel CREATESESS -> %s): %s (err=%d)\n",
-               remote_name, ok ? "PASS" : "FAIL", last_err);
+        printf("[VPE0] Test 12 (cross-kernel CREATESESS, %d/%d peers OK): "
+               "%s (last_err=%d)\n",
+               peer_pass, SEMPER_NUM_NODES - 1,
+               ok ? "PASS" : "FAIL", last_err);
     }
 
     /* ==============================================================
@@ -1338,15 +1368,21 @@ int run(void)
      * Destination: sel 400 (must be unused).
      * ============================================================== */
     {
-        printf("[VPE0] Test 13: waiting before OBTAIN...\n");
-        for (int y = 0; y < 50000; y++) seL4_Yield();
+        if (test12_sess_sel < 0) {
+            printf("[VPE0] Test 13: SKIP — no session established in Test 12\n");
+            fail++;
+        } else {
+            printf("[VPE0] Test 13: waiting before OBTAIN...\n");
+            for (int y = 0; y < 50000; y++) seL4_Yield();
 
-        printf("[VPE0] Test 13: sending OBTAIN (sess=300 -> cap=400)\n");
-        int obt_err = send_obtain(300, 400, 1);
-        int obt_ok = (obt_err == 0);
-        if (obt_ok) pass++; else fail++;
-        printf("[VPE0] Test 13 (cross-kernel OBTAIN via session): %s (err=%d)\n",
-               obt_ok ? "PASS" : "FAIL", obt_err);
+            printf("[VPE0] Test 13: sending OBTAIN (sess=%d -> cap=400, peer kid=%d)\n",
+                   test12_sess_sel, test12_peer_kid);
+            int obt_err = send_obtain(test12_sess_sel, 400, 1);
+            int obt_ok = (obt_err == 0);
+            if (obt_ok) pass++; else fail++;
+            printf("[VPE0] Test 13 (cross-kernel OBTAIN via session): %s (err=%d)\n",
+                   obt_ok ? "PASS" : "FAIL", obt_err);
+        }
     }
 
     /* ==============================================================
@@ -1365,19 +1401,25 @@ int run(void)
      *   peer kernel inserts caps into VPE1's CapTable → reply to VPE0
      * ============================================================== */
     {
-        printf("[VPE0] Test 14: creating local gate at sel 500\n");
-        int cg_err = send_creategate(500, 0xDE1E, 9, 32);
-        if (cg_err != 0) {
-            printf("[VPE0] Test 14: CREATEGATE sel 500 FAILED (err=%d)\n", cg_err);
+        if (test12_sess_sel < 0) {
+            printf("[VPE0] Test 14: SKIP — no session established in Test 12\n");
             fail++;
         } else {
-            for (int y = 0; y < 50000; y++) seL4_Yield();
-            printf("[VPE0] Test 14: sending DELEGATE (cap=500 -> sess=300)\n");
-            int del_err = send_delegate(300, 500, 1);
-            int del_ok = (del_err == 0);
-            if (del_ok) pass++; else fail++;
-            printf("[VPE0] Test 14 (cross-kernel DELEGATE via session): %s (err=%d)\n",
-                   del_ok ? "PASS" : "FAIL", del_err);
+            printf("[VPE0] Test 14: creating local gate at sel 500\n");
+            int cg_err = send_creategate(500, 0xDE1E, 9, 32);
+            if (cg_err != 0) {
+                printf("[VPE0] Test 14: CREATEGATE sel 500 FAILED (err=%d)\n", cg_err);
+                fail++;
+            } else {
+                for (int y = 0; y < 50000; y++) seL4_Yield();
+                printf("[VPE0] Test 14: sending DELEGATE (cap=500 -> sess=%d)\n",
+                       test12_sess_sel);
+                int del_err = send_delegate(test12_sess_sel, 500, 1);
+                int del_ok = (del_err == 0);
+                if (del_ok) pass++; else fail++;
+                printf("[VPE0] Test 14 (cross-kernel DELEGATE via session): %s (err=%d)\n",
+                       del_ok ? "PASS" : "FAIL", del_err);
+            }
         }
     }
 
@@ -1554,22 +1596,28 @@ int run(void)
     }
 
     {
-        /* 15a: revoke the obtained cap */
-        printf("[VPE0] Test 15a: REVOKE obtained cap at sel 400\n");
-        int rev_err = send_revoke(400);
-        int rev_ok = (rev_err == 0);
-        if (rev_ok) pass++; else fail++;
-        printf("[VPE0] Test 15a (revoke obtained cap): %s (err=%d)\n",
-               rev_ok ? "PASS" : "FAIL", rev_err);
+        if (test12_sess_sel < 0) {
+            printf("[VPE0] Test 15a/b: SKIP — no session established in Test 12\n");
+            fail += 2;
+        } else {
+            /* 15a: revoke the obtained cap */
+            printf("[VPE0] Test 15a: REVOKE obtained cap at sel 400\n");
+            int rev_err = send_revoke(400);
+            int rev_ok = (rev_err == 0);
+            if (rev_ok) pass++; else fail++;
+            printf("[VPE0] Test 15a (revoke obtained cap): %s (err=%d)\n",
+                   rev_ok ? "PASS" : "FAIL", rev_err);
 
-        /* 15b: revoke the session cap — this has remote children */
-        for (int y = 0; y < 50000; y++) seL4_Yield();
-        printf("[VPE0] Test 15b: REVOKE session cap at sel 300 (spanning)\n");
-        rev_err = send_revoke(300);
-        rev_ok = (rev_err == 0);
-        if (rev_ok) pass++; else fail++;
-        printf("[VPE0] Test 15b (spanning revoke session): %s (err=%d)\n",
-               rev_ok ? "PASS" : "FAIL", rev_err);
+            /* 15b: revoke the session cap — this has remote children */
+            for (int y = 0; y < 50000; y++) seL4_Yield();
+            printf("[VPE0] Test 15b: REVOKE session cap at sel %d (spanning, peer kid=%d)\n",
+                   test12_sess_sel, test12_peer_kid);
+            rev_err = send_revoke(test12_sess_sel);
+            rev_ok = (rev_err == 0);
+            if (rev_ok) pass++; else fail++;
+            printf("[VPE0] Test 15b (spanning revoke session): %s (err=%d)\n",
+                   rev_ok ? "PASS" : "FAIL", rev_err);
+        }
     }
 #endif /* SEMPER_MULTI_NODE */
 

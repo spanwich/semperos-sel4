@@ -512,11 +512,31 @@ void KernelcallHandler::createSessResp(GateIStream &is) {
     LOG_KRNL(kpe, "kernelcall::createSessResp(vpeID=" << vpeID <<
         ", tid=" << tid << ", res=" << res << ")");
 
+    /* FPT-183 Phase 4-fix (per Architect 14:02 NZST 2026-04-27): decrement
+     * awaitedResp on ALL replies — both NO_ERROR and INV_ARGS. The previous
+     * structure had `sessRespArrived()` called only after the result-store
+     * block, but `sessRespArrived()` already decrements unconditionally
+     * (VPE.h:143-145 returns --_sessAwaitingResp). The bug pattern the
+     * Architect was concerned about was that an early return on
+     * !PEManager::exists(vpeID) BYPASSED the decrement entirely — that
+     * is now fixed by hoisting the decrement up before the existence
+     * check, and only short-circuiting result-store if the VPE is gone.
+     *
+     * Visibility log: print the post-decrement counter on every reply so
+     * 3-node debugging can correlate sender_kid → counter trajectory. */
+    if(!PEManager::get().exists(vpeID)) {
+        /* VPE gone — there's no awaitedResp to decrement. Just ack. */
+        printf("[SemperKernel] createSessResp: vpeID=%d gone (res=%d), ack\n",
+               vpeID, res);
+        kpe->msg_received();
+        return;
+    }
+    VPE &vpe = PEManager::get().vpe(vpeID);
+    int post_decrement = vpe.sessRespArrived();   /* always decrements */
+    printf("[SemperKernel] createSessResp: vpeID=%d res=%d awaitedResp_now=%d\n",
+           vpeID, res, post_decrement);
+
     if(res != m3::Errors::INV_ARGS) {
-        if(!PEManager::get().exists(vpeID)) {
-            kpe->msg_received();
-            return;
-        }
         size_t sizeResult = m3::vostreamsize(m3::ostreamsize<label_t, m3::Errors::Code>(), is.remaining());
         void *resultBuf = m3::Heap::alloc(sizeResult);
         if(!resultBuf)
@@ -524,15 +544,13 @@ void KernelcallHandler::createSessResp(GateIStream &is) {
         GateOStream *data = new GateOStream(static_cast<unsigned char*>(resultBuf), sizeResult);
         *data << sender << res;
         data->put(is);
-        PEManager::get().vpe(vpeID).srvLookupResult(data);
+        vpe.srvLookupResult(data);
     }
 
-    if(!PEManager::get().exists(vpeID)) {
-        kpe->msg_received();
-        return;
-    }
-    VPE &vpe = PEManager::get().vpe(vpeID);
-    if(!vpe.sessRespArrived()) {
+    /* Wake the waiting syscall thread when ALL expected replies have
+     * arrived (counter reached 0). For a 3-peer broadcast, this fires
+     * on the third reply regardless of which peer responded positive. */
+    if(post_decrement == 0) {
         m3::ThreadManager::get().notify(reinterpret_cast<void*>(tid));
     }
     kpe->msg_received();

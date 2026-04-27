@@ -198,6 +198,7 @@ DeclareCAmkESComponent(VPE0
     C_FLAGS
         ${SEMPER_MULTI_NODE_FLAG}
         -DSEMPER_KERNEL_ID=${KERNEL_ID}
+        -DSEMPER_NUM_NODES=${SEMPER_NUM_NODES}
 )
 
 # =========================================================================
