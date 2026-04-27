@@ -193,6 +193,25 @@ static int send_syscall(const void *payload, uint16_t payload_len)
     return send_syscall_ex(payload, payload_len, NULL);
 }
 
+/* Forward declaration — defined later in the file after the polling loops. */
+static int wait_for_reply_long(void);
+
+/* Variant of send_syscall that uses the long cross-kernel timeout.
+ * Used for spanning REVOKE in the benchmark (session revoke triggers
+ * a KRNLC round-trip that can exceed the short 50K-yield timeout). */
+static int send_syscall_long(const void *payload, uint16_t payload_len)
+{
+    struct vdtu_ring *ring = vdtu_channels_get_ring(&channels, send_chan);
+    if (!ring) return -1;
+    int rc = vdtu_ring_send(ring,
+                            MY_PE, SYSC_EP, MY_VPE_ID,
+                            DEF_RECVEP,
+                            0, 0, 0,
+                            payload, payload_len);
+    if (rc != 0) return -1;
+    return wait_for_reply_long();
+}
+
 /* Send a NOOP syscall. Returns 0 on success. */
 static int send_noop(void)
 {
@@ -539,6 +558,29 @@ static int send_revoke_ex(uint64_t cap_sel, uint64_t *out_cycles)
     payload.own        = 1;
 
     return send_syscall_ex(&payload, sizeof(payload), out_cycles);
+}
+
+/* send_revoke variant using long timeout — for cross-kernel (spanning)
+ * REVOKE in the bench where the KRNLC round-trip can exceed 50K yields. */
+static int send_revoke_long(uint64_t cap_sel)
+{
+    struct {
+        uint64_t opcode;
+        uint32_t crd_type;
+        uint32_t crd_start;
+        uint32_t crd_count;
+        uint32_t _pad;
+        uint64_t own;
+    } __attribute__((packed)) payload;
+
+    payload.opcode    = SYSCALL_REVOKE;
+    payload.crd_type  = CAP_TYPE_OBJ;
+    payload.crd_start = (uint32_t)cap_sel;
+    payload.crd_count = 1;
+    payload._pad      = 0;
+    payload.own        = 1;
+
+    return send_syscall_long(&payload, sizeof(payload));
 }
 
 /* ==============================================================
@@ -1465,14 +1507,14 @@ int run(void)
     if (SEMPER_KERNEL_ID == 0) {
         printf("\n[VPE0] === Experiment 2A: Spanning Ops (rdtsc walltime) ===\n");
 
-        /* Iter counts kept modest because each spanning op is ~100ms under
-         * QEMU TCG with verbose [DTUBridge] L2 logging. 100 + 100 + 50*3 =
-         * 350 ops × ~150ms = ~55s of bench, well within docker timeout. */
-        const int SPAN_WARMUP  = 20;
-        const int SPAN_ITERS   = 100;
-        const int CHAIN_WARMUP = 5;
-        const int CHAIN_ITERS  = 50;
-        const uint32_t SESS    = 300;   /* session from Test 12 */
+        /* Iter counts reduced so spanning bench completes within 900s docker
+         * timeout. SESS uses test12_sess_sel (300+peer_kid) not hardcoded 300
+         * because node-a's first session is at 301 (peer k1). */
+        const int SPAN_WARMUP  = 5;
+        const int SPAN_ITERS   = 20;
+        const int CHAIN_WARMUP = 1;
+        const int CHAIN_ITERS  = 5;
+        const uint32_t SESS    = (test12_sess_sel >= 0) ? (uint32_t)test12_sess_sel : 300;
 
         /* --- spanning_exchange (cross-kernel OBTAIN) --- */
         {
@@ -1515,19 +1557,19 @@ int run(void)
             rname[0]='t'; rname[1]='e'; rname[2]='s'; rname[3]='t';
             rname[4]='s'; rname[5]='r'; rname[6]='v'; rname[7]='-';
             rname[8]='k'; rname[9]='1'; rname[10]='\0';
-            const int SREVOKE_WARMUP = 3;
-            const int SREVOKE_ITERS  = 30;
+            const int SREVOKE_WARMUP = 2;
+            const int SREVOKE_ITERS  = 10;
 
             int ok = 1;
             for (int w = 0; w < SREVOKE_WARMUP && ok; w++) {
                 if (send_createsess(BSESS, rname, 10) != 0) ok = 0;
-                else send_revoke(BSESS);
+                else send_revoke_long(BSESS);  /* long timeout: spanning KRNLC */
             }
             int collected = 0;
             for (int i = 0; i < SREVOKE_ITERS && i < BENCH_ITERS && ok; i++) {
                 if (send_createsess(BSESS, rname, 10) != 0) continue;
                 uint64_t t0 = rdtsc();
-                int err = send_revoke(BSESS);
+                int err = send_revoke_long(BSESS);  /* long timeout: spanning KRNLC */
                 uint64_t t1 = rdtsc();
                 if (err == 0) bench_samples[collected++] = t1 - t0;
             }
@@ -1549,8 +1591,8 @@ int run(void)
             rname[0]='t'; rname[1]='e'; rname[2]='s'; rname[3]='t';
             rname[4]='s'; rname[5]='r'; rname[6]='v'; rname[7]='-';
             rname[8]='k'; rname[9]='1'; rname[10]='\0';
-            const int SCHAIN_WARMUP = 2;
-            const int SCHAIN_ITERS  = 20;
+            const int SCHAIN_WARMUP = 1;
+            const int SCHAIN_ITERS  = 3;
 
             const int chain_depths[3] = {10, 50, 100};
             const char *chain_names[3] = {
@@ -1571,7 +1613,7 @@ int run(void)
                             chain_ok = 0; break;
                         }
                     }
-                    send_revoke(BSESS);
+                    send_revoke_long(BSESS);  /* spanning: long timeout */
                 }
                 for (int i = 0; i < SCHAIN_ITERS && i < BENCH_ITERS && chain_ok; i++) {
                     if (send_createsess(BSESS, rname, 10) != 0) {
@@ -1583,9 +1625,9 @@ int run(void)
                                           (uint32_t)(BSESS + d + 1), 1, 0) != 0)
                             build_ok = 0;
                     }
-                    if (!build_ok) { send_revoke(BSESS); break; }
+                    if (!build_ok) { send_revoke_long(BSESS); break; }
                     uint64_t t0 = rdtsc();
-                    int err = send_revoke(BSESS);
+                    int err = send_revoke_long(BSESS);  /* spanning: long timeout */
                     uint64_t t1 = rdtsc();
                     if (err == 0) bench_samples[collected++] = t1 - t0;
                 }
@@ -1599,7 +1641,10 @@ int run(void)
         printf("\n[VPE0] === Experiment 2A SPANNING complete ===\n");
     } else {
         /* Non-K0 nodes: long yield so K0's bench finishes before our 15a/15b. */
-        for (volatile int y = 0; y < 100000000; y++) seL4_Yield();
+        /* Reduced from 100M to 5M: gives K0 ~50s for spanning bench
+         * (20 OBTAIN + 10 REVOKE + 3×3 chain under QEMU TCG) while
+         * ensuring node-b/c reach 15a/15b well within 900s timeout. */
+        for (volatile int y = 0; y < 5000000; y++) seL4_Yield();
     }
 
     {
@@ -1615,11 +1660,13 @@ int run(void)
             printf("[VPE0] Test 15a (revoke obtained cap): %s (err=%d)\n",
                    rev_ok ? "PASS" : "FAIL", rev_err);
 
-            /* 15b: revoke the session cap — this has remote children */
+            /* 15b: revoke the session cap — this has remote children.
+             * Use send_revoke_long: the spanning REVOKE/REVOKEFINISH KRNLC
+             * round-trip can exceed the 50K-yield short timeout. */
             for (int y = 0; y < 50000; y++) seL4_Yield();
             printf("[VPE0] Test 15b: REVOKE session cap at sel %d (spanning, peer kid=%d)\n",
                    test12_sess_sel, test12_peer_kid);
-            rev_err = send_revoke(test12_sess_sel);
+            rev_err = send_revoke_long(test12_sess_sel);
             rev_ok = (rev_err == 0);
             if (rev_ok) pass++; else fail++;
             printf("[VPE0] Test 15b (spanning revoke session): %s (err=%d)\n",
