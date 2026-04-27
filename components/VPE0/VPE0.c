@@ -1314,9 +1314,16 @@ int run(void)
          * previous session's slot. The first peer that succeeds wins
          * test12_sess_sel for use by Tests 13 and 14.
          *
-         * Wait for mutual HELLO + remote VPE1 service registration. */
+         * Wait for mutual HELLO + remote VPE1 service registration. The
+         * 3-node Docker docker-compose-3node.yml staggers container starts
+         * by 6s per node, so node-a (boots first) must wait long enough
+         * for node-c (boots last) to register testsrv-k2 + complete
+         * KRNLC HELLO. 50000 yields was too short: pass-4 saw node-a's
+         * broadcast to kid=2 lost while node-c was still booting →
+         * awaitedResp stuck at 1, syscall thread permanently blocked.
+         * 5_000_000 yields gives ~100x more time, closing the race. */
         printf("[VPE0] Test 12: waiting for remote VPE1 + network ready...\n");
-        for (int y = 0; y < 50000; y++) seL4_Yield();
+        for (int y = 0; y < 5000000; y++) seL4_Yield();
 
         int peer_pass = 0;
         int last_err = -1;
