@@ -1507,11 +1507,17 @@ int run(void)
     if (SEMPER_KERNEL_ID == 0) {
         printf("\n[VPE0] === Experiment 2A: Spanning Ops (rdtsc walltime) ===\n");
 
-        /* Iter counts reduced so spanning bench completes within 900s docker
-         * timeout. SESS uses test12_sess_sel (300+peer_kid) not hardcoded 300
-         * because node-a's first session is at 301 (peer k1). */
-        const int SPAN_WARMUP  = 5;
-        const int SPAN_ITERS   = 20;
+        /* Iter counts match v2 baseline (exp_unified_legacy_v2_20260426.json)
+         * for an apples-to-apples FPT-183 vs OLD transport comparison —
+         * Architect direction (Slack 11:22 NZST 2026-04-30): controlled
+         * experiment must hold topology + NIC + iter counts constant so
+         * the only differing variable is the vDTU architecture itself.
+         * v2 was 2-node E1000 with: SPAN_WARMUP=20 SPAN_ITERS=100,
+         * SREVOKE_WARMUP=3 SREVOKE_ITERS=30, SCHAIN_WARMUP=2 SCHAIN_ITERS=20.
+         * SESS uses test12_sess_sel (300+peer_kid) not hardcoded 300 because
+         * node-a's first session is at 301 (peer k1). */
+        const int SPAN_WARMUP  = 20;
+        const int SPAN_ITERS   = 100;
         const int CHAIN_WARMUP = 1;
         const int CHAIN_ITERS  = 5;
         const uint32_t SESS    = (test12_sess_sel >= 0) ? (uint32_t)test12_sess_sel : 300;
@@ -1557,8 +1563,8 @@ int run(void)
             rname[0]='t'; rname[1]='e'; rname[2]='s'; rname[3]='t';
             rname[4]='s'; rname[5]='r'; rname[6]='v'; rname[7]='-';
             rname[8]='k'; rname[9]='1'; rname[10]='\0';
-            const int SREVOKE_WARMUP = 2;
-            const int SREVOKE_ITERS  = 10;
+            const int SREVOKE_WARMUP = 3;
+            const int SREVOKE_ITERS  = 30;
 
             int ok = 1;
             for (int w = 0; w < SREVOKE_WARMUP && ok; w++) {
@@ -1591,8 +1597,8 @@ int run(void)
             rname[0]='t'; rname[1]='e'; rname[2]='s'; rname[3]='t';
             rname[4]='s'; rname[5]='r'; rname[6]='v'; rname[7]='-';
             rname[8]='k'; rname[9]='1'; rname[10]='\0';
-            const int SCHAIN_WARMUP = 1;
-            const int SCHAIN_ITERS  = 3;
+            const int SCHAIN_WARMUP = 2;
+            const int SCHAIN_ITERS  = 20;
 
             const int chain_depths[3] = {10, 50, 100};
             const char *chain_names[3] = {
@@ -1640,11 +1646,13 @@ int run(void)
         (void)CHAIN_WARMUP; (void)CHAIN_ITERS;  /* unused now */
         printf("\n[VPE0] === Experiment 2A SPANNING complete ===\n");
     } else {
-        /* Non-K0 nodes: long yield so K0's bench finishes before our 15a/15b. */
-        /* Reduced from 100M to 5M: gives K0 ~50s for spanning bench
-         * (20 OBTAIN + 10 REVOKE + 3×3 chain under QEMU TCG) while
-         * ensuring node-b/c reach 15a/15b well within 900s timeout. */
-        for (volatile int y = 0; y < 5000000; y++) seL4_Yield();
+        /* Non-K0 nodes: long yield so K0's bench finishes before our 15a/15b.
+         * For the v2-parameter controlled run (n=100/30/20), K0's bench is
+         * ~5x longer than the n=20/10/3 run — bump yield back to give K0
+         * time. 100M was the v2 baseline value before pass-5's reduction;
+         * 50M is enough for v2 iter counts on 2-node Docker (single peer
+         * waiting, no third-node coordination delay). */
+        for (volatile int y = 0; y < 50000000; y++) seL4_Yield();
     }
 
     {
