@@ -488,11 +488,14 @@ assembly {
         /* MMIO must be uncached for device register access */
         dtu_bridge.eth_mmio_hardware_cached = false;
 
-        /* NIC hardware config — FPT-176 c10547 switched to VirtIO PCI.
-         * QEMU Q35 places virtio-net-pci BAR4 (modern cap region) at
-         * 0xfeb00000 by default. IRQ stays IOAPIC pin 11 / vector 11
-         * (slot 2 pin A on Q35 — same as the previous E1000 emulation). */
-        eth_hardware.mmio_paddr = 0xfeb00000;
+        /* NIC hardware config — driven by CMake variable @ETH_MMIO_PADDR@.
+         * VirtIO net PCI: BAR4 (modern cap region) at 0xfeb00000 (Q35 slot 3).
+         * E1000 82540EM:  BAR0                       at 0xfeb80000 (Q35 slot 2).
+         * The CMake `SEMPER_USE_VIRTIO_NET` flag picks which the build wants;
+         * configure_file substitutes the value into the generated .camkes
+         * so the seL4 kernel's MMIO mapping matches the actual NIC. IRQ
+         * stays IOAPIC pin 11 / vector 11 in both cases (Q35 IRQ routing). */
+        eth_hardware.mmio_paddr = @ETH_MMIO_PADDR@;
         eth_hardware.mmio_size = 0x20000;
         eth_hardware.irq_irq_type = "pci";
         eth_hardware.irq_irq_ioapic = 0;

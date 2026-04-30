@@ -70,22 +70,26 @@ if(SEMPER_USE_VIRTIO_NET)
 endif()
 
 
-# FPT-179 Phase 2b: when VirtIO net is selected, override the DTUBridge MMIO
-# dataport paddr to match the VirtIO BAR4 (modern cap region) instead of
-# the E1000 BAR0. QEMU Q35 places virtio-net-pci BAR4 at 0xfeb00000 by
-# default. On XCP-ng HVM the value may differ — TBD once we boot.
+# FPT-179 Phase 2b / FPT-183 Phase 4-bench: select the eth_hardware MMIO
+# paddr to match the runtime NIC backend.
+#   VirtIO net PCI: BAR4 modern-cap region at 0xfeb00000 (QEMU Q35 slot 3).
+#   E1000 82540EM:  BAR0                  at 0xfeb80000 (QEMU Q35 slot 2).
+# On XCP-ng HVM: VirtIO BAR4 may differ — placeholder 0xf0800000, TBD on boot.
+# IRQ stays IOAPIC pin 11 / vector 11 in both cases (Q35 IRQ routing).
+# ETH_MMIO_PADDR substitutes into semperos-sel4.camkes.in via configure_file.
 if(SEMPER_USE_VIRTIO_NET)
     if(SEMPER_XEN_HVM)
-        # Placeholder — update after first XCP-ng boot reveals actual paddr.
-        set(E1000_MMIO_PADDR "0xf0800000")
+        set(ETH_MMIO_PADDR "0xf0800000")
     else()
-        set(E1000_MMIO_PADDR "0xfeb00000")
+        set(ETH_MMIO_PADDR "0xfeb00000")
     endif()
-    # VirtIO-net-pci default IRQ on QEMU Q35 is pin A on slot 3 → IOAPIC 11.
-    # On Xen HVM it follows the same QEMU Q35 convention.
-    set(E1000_IOAPIC_PIN "11")
-    set(E1000_IRQ_VECTOR "11")
+else()
+    set(ETH_MMIO_PADDR "0xfeb80000")  # E1000 82540EM BAR0
 endif()
+# Legacy alias kept for existing -DDTUB_MMIO_PADDR= passthrough below.
+set(E1000_MMIO_PADDR "${ETH_MMIO_PADDR}")
+set(E1000_IOAPIC_PIN "11")
+set(E1000_IRQ_VECTOR "11")
 
 # Node identity (compile-time constants per image)
 set(KERNEL_ID "0" CACHE STRING "Kernel identity (0, 1, 2)")
@@ -326,6 +330,17 @@ endif(NOT SEMPEROS_NO_NETWORK)
 # =========================================================================
 #  CAmkES Assembly
 # =========================================================================
+# FPT-183: substitute the runtime-NIC-specific @ETH_MMIO_PADDR@ into the
+# CAmkES assembly file at configure time. configure_file writes the
+# generated semperos-sel4.camkes alongside the .in template in the source
+# tree so capdl-tool's static parse can find it without a build-dir-relative
+# path. The COPYONLY pattern can't be used here because @ETH_MMIO_PADDR@
+# requires substitution; @ONLY restricts substitution to ${VAR}-style markers.
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/semperos-sel4.camkes.in
+    ${CMAKE_CURRENT_SOURCE_DIR}/semperos-sel4.camkes
+    @ONLY)
+
 if(SEMPEROS_NO_NETWORK)
     DeclareCAmkESRootserver(semperos-sel4-xcpng.camkes)
 else()
