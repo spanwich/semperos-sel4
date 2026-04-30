@@ -26,7 +26,7 @@ services:
       - ../../../build-node0/images:/sel4-image:ro
     network_mode: host
     environment:
-      TIMEOUT: "900"
+      TIMEOUT: "3600"
     command:
       - -nic
       - none
@@ -42,7 +42,7 @@ services:
       - ../../../build-node1/images:/sel4-image:ro
     network_mode: host
     environment:
-      TIMEOUT: "900"
+      TIMEOUT: "3600"
     depends_on:
       - node-a
     entrypoint:
@@ -57,7 +57,7 @@ services:
       - ../../../build-node2/images:/sel4-image:ro
     network_mode: host
     environment:
-      TIMEOUT: "900"
+      TIMEOUT: "3600"
     depends_on:
       - node-a
     entrypoint:

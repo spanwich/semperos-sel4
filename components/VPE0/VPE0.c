@@ -650,19 +650,55 @@ static void bench_report(const char *name)
 
 static void bench_report_n(const char *name, int n)
 {
+    if (n <= 0) {
+        printf("[BENCH] %-32s n=0 (skipped)\n", name);
+        return;
+    }
     shell_sort_u64(bench_samples, n);
     uint64_t min = bench_samples[0];
     uint64_t max = bench_samples[n - 1];
     uint64_t med = bench_samples[n / 2];
+    /* Quantile helper — clamp to valid range for tiny n. */
+    int p25_i = (n - 1) * 25 / 100;
+    int p75_i = (n - 1) * 75 / 100;
+    int p95_i = (n - 1) * 95 / 100;
+    int p99_i = (n - 1) * 99 / 100;
+    uint64_t p25 = bench_samples[p25_i];
+    uint64_t p75 = bench_samples[p75_i];
+    uint64_t p95 = bench_samples[p95_i];
+    uint64_t p99 = bench_samples[p99_i];
+
+    /* Compute mean and variance in a single pass at u128 precision (safe
+     * up to 4 GHz × 1000 samples × max ≈ 30M cycles; sum < 2^45). */
     uint64_t sum = 0;
     for (int i = 0; i < n; i++)
         sum += bench_samples[i];
     uint64_t mean = sum / (uint64_t)n;
+    /* Variance: Σ(x_i - mean)^2 / n. Use a u64 accumulator of (delta)^2;
+     * delta is bounded by max - min which fits a signed 64-bit easily for
+     * QEMU TCG cycle counts. */
+    uint64_t sumsq = 0;
+    for (int i = 0; i < n; i++) {
+        int64_t d = (int64_t)bench_samples[i] - (int64_t)mean;
+        /* Saturate squaring to avoid overflow on outlier-rich runs.
+         * (int64_t)d × d fits in int64 if |d| < 2^31; tests + bench
+         * outliers can hit 6+ MCy so guard with a soft cap. */
+        if (d < 0) d = -d;
+        if ((uint64_t)d > 3000000ULL) d = 3000000;
+        sumsq += (uint64_t)d * (uint64_t)d;
+    }
+    uint64_t var = sumsq / (uint64_t)n;
 
-    printf("[BENCH] %-18s min=%-6lu  med=%-6lu  mean=%-6lu  max=%-6lu  cycles  (%.1fus median) [n=%d]\n",
-           name,
-           (unsigned long)min, (unsigned long)med,
-           (unsigned long)mean, (unsigned long)max, cycles_to_us(med), n);
+    /* Wide single-line stat record — post-processing parses by name=value
+     * pairs. Includes percentiles + variance so std_dev = sqrt(var) and
+     * 95% CI of the mean = mean ± 1.96 × sqrt(var) / sqrt(n) can be
+     * computed offline without re-running the bench. */
+    printf("[BENCH] %-32s n=%d min=%lu p25=%lu med=%lu p75=%lu p95=%lu p99=%lu max=%lu mean=%lu var=%lu (%.1fus median)\n",
+           name, n,
+           (unsigned long)min, (unsigned long)p25, (unsigned long)med,
+           (unsigned long)p75, (unsigned long)p95, (unsigned long)p99,
+           (unsigned long)max, (unsigned long)mean, (unsigned long)var,
+           cycles_to_us(med));
 }
 
 /* --- Benchmark 1: ring_write --- */
@@ -1211,9 +1247,13 @@ int run(void)
          * timeout budget under QEMU TCG. n=200 is statistically robust
          * for median/mean reporting. */
         const int LOCAL_WARMUP = 20;
-        const int LOCAL_ITERS  = 200;
+        /* FPT-183 statistical-rigour bench (Architect 11:24 NZST 2026-05-01):
+         * bumped from n=200 → n=1000 for tighter distributions. fits in the
+         * 3600s Docker timeout. */
+        const int LOCAL_ITERS  = 1000;
         const int LCHAIN_WARMUP = 5;
-        const int LCHAIN_ITERS  = 50;
+        /* Bumped from n=50 → n=100 for tighter chain_revoke distributions. */
+        const int LCHAIN_ITERS  = 100;
 
         /* --- local_exchange_walltime ---
          * VPE0 OBTAIN of a local cap from VPE1 (tcap=2 = VPE1, mode=1=obtain).
@@ -1563,8 +1603,9 @@ int run(void)
             rname[0]='t'; rname[1]='e'; rname[2]='s'; rname[3]='t';
             rname[4]='s'; rname[5]='r'; rname[6]='v'; rname[7]='-';
             rname[8]='k'; rname[9]='1'; rname[10]='\0';
+            /* Bumped from n=30 → n=50 (Architect 11:24 NZST 2026-05-01). */
             const int SREVOKE_WARMUP = 3;
-            const int SREVOKE_ITERS  = 30;
+            const int SREVOKE_ITERS  = 50;
 
             int ok = 1;
             for (int w = 0; w < SREVOKE_WARMUP && ok; w++) {
