@@ -1607,19 +1607,40 @@ int run(void)
             const int SREVOKE_WARMUP = 3;
             const int SREVOKE_ITERS  = 50;
 
+            printf("[BENCH-PHASE] entering spanning_revoke_session iters=%d\n", SREVOKE_ITERS);
             int ok = 1;
             for (int w = 0; w < SREVOKE_WARMUP && ok; w++) {
-                if (send_createsess(BSESS, rname, 10) != 0) ok = 0;
-                else send_revoke_long(BSESS);  /* long timeout: spanning KRNLC */
+                if (send_createsess(BSESS, rname, 10) != 0) {
+                    printf("[BENCH-FAIL] srevoke warmup createsess w=%d\n", w);
+                    ok = 0;
+                } else {
+                    send_revoke_long(BSESS);  /* long timeout: spanning KRNLC */
+                }
             }
             int collected = 0;
+            int fail_create = 0, fail_revoke = 0;
             for (int i = 0; i < SREVOKE_ITERS && i < BENCH_ITERS && ok; i++) {
-                if (send_createsess(BSESS, rname, 10) != 0) continue;
+                if (send_createsess(BSESS, rname, 10) != 0) {
+                    fail_create++;
+                    printf("[BENCH-FAIL] srevoke createsess iter=%d\n", i);
+                    continue;
+                }
                 uint64_t t0 = rdtsc();
                 int err = send_revoke_long(BSESS);  /* long timeout: spanning KRNLC */
                 uint64_t t1 = rdtsc();
-                if (err == 0) bench_samples[collected++] = t1 - t0;
+                if (err == 0) {
+                    bench_samples[collected++] = t1 - t0;
+                } else {
+                    fail_revoke++;
+                    printf("[BENCH-FAIL] srevoke revoke iter=%d rc=%d\n", i, err);
+                }
+                if ((i + 1) % 10 == 0) {
+                    printf("[BENCH-PROG] srevoke iter=%d/%d collected=%d fail_create=%d fail_revoke=%d\n",
+                           i + 1, SREVOKE_ITERS, collected, fail_create, fail_revoke);
+                }
             }
+            printf("[BENCH-PHASE] completed spanning_revoke_session collected=%d fail_create=%d fail_revoke=%d\n",
+                   collected, fail_create, fail_revoke);
             if (collected > 0)
                 bench_report_n("spanning_revoke_session_walltime", collected);
             printf("[BENCH-2A-SPANNING] spanning_revoke_session_walltime: collected n=%d (true cross-kernel REVOKE)\n", collected);
@@ -1648,15 +1669,21 @@ int run(void)
                 "spanning_chain_revoke_session_100_walltime"};
             for (int dx = 0; dx < 3; dx++) {
                 int depth = chain_depths[dx];
+                printf("[BENCH-PHASE] entering spanning_chain_revoke depth=%d iters=%d\n",
+                       depth, SCHAIN_ITERS);
                 int chain_ok = 1;
                 int collected = 0;
+                int fail_create = 0, fail_build = 0, fail_revoke = 0;
                 for (int w = 0; w < SCHAIN_WARMUP && chain_ok; w++) {
                     if (send_createsess(BSESS, rname, 10) != 0) {
+                        printf("[BENCH-FAIL] schain warmup createsess depth=%d w=%d\n", depth, w);
                         chain_ok = 0; break;
                     }
                     for (int d = 0; d < depth && chain_ok; d++) {
                         if (send_exchange(0, (uint32_t)(BSESS + d), 1,
                                           (uint32_t)(BSESS + d + 1), 1, 0) != 0) {
+                            printf("[BENCH-FAIL] schain warmup build depth=%d w=%d d=%d\n",
+                                   depth, w, d);
                             chain_ok = 0; break;
                         }
                     }
@@ -1664,20 +1691,46 @@ int run(void)
                 }
                 for (int i = 0; i < SCHAIN_ITERS && i < BENCH_ITERS && chain_ok; i++) {
                     if (send_createsess(BSESS, rname, 10) != 0) {
+                        fail_create++;
+                        printf("[BENCH-FAIL] schain createsess depth=%d iter=%d\n", depth, i);
                         chain_ok = 0; break;
                     }
                     int build_ok = 1;
+                    int build_fail_at = -1;
                     for (int d = 0; d < depth && build_ok; d++) {
                         if (send_exchange(0, (uint32_t)(BSESS + d), 1,
-                                          (uint32_t)(BSESS + d + 1), 1, 0) != 0)
+                                          (uint32_t)(BSESS + d + 1), 1, 0) != 0) {
                             build_ok = 0;
+                            build_fail_at = d;
+                        }
                     }
-                    if (!build_ok) { send_revoke_long(BSESS); break; }
+                    if (!build_ok) {
+                        fail_build++;
+                        printf("[BENCH-FAIL] schain build depth=%d iter=%d at d=%d\n",
+                               depth, i, build_fail_at);
+                        send_revoke_long(BSESS);
+                        break;
+                    }
                     uint64_t t0 = rdtsc();
                     int err = send_revoke_long(BSESS);  /* spanning: long timeout */
                     uint64_t t1 = rdtsc();
-                    if (err == 0) bench_samples[collected++] = t1 - t0;
+                    if (err == 0) {
+                        bench_samples[collected++] = t1 - t0;
+                    } else {
+                        fail_revoke++;
+                        printf("[BENCH-FAIL] schain revoke depth=%d iter=%d rc=%d\n",
+                               depth, i, err);
+                    }
+                    if ((i + 1) % 5 == 0) {
+                        printf("[BENCH-PROG] schain depth=%d iter=%d/%d collected=%d "
+                               "fail_create=%d fail_build=%d fail_revoke=%d\n",
+                               depth, i + 1, SCHAIN_ITERS, collected,
+                               fail_create, fail_build, fail_revoke);
+                    }
                 }
+                printf("[BENCH-PHASE] completed spanning_chain_revoke depth=%d collected=%d "
+                       "fail_create=%d fail_build=%d fail_revoke=%d\n",
+                       depth, collected, fail_create, fail_build, fail_revoke);
                 if (chain_ok && collected > 0)
                     bench_report_n(chain_names[dx], collected);
                 printf("[BENCH-2A-SPANNING] %s: collected n=%d\n",
