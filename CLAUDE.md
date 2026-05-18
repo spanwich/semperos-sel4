@@ -15,10 +15,22 @@ USE THESE — do not search the filesystem for skill/agent files.
 | `/build-isos` | Build three SemperOS XCP-ng node ISOs (dist/semperos-node{0,1,2}.iso) | Before any XCP-ng deployment. Always build fresh ISOs from the current branch. |
 | `/xcpng-deploy` | Deploy ISOs to XCP-ng cluster, reboot VMs, collect output from Loki | **Every EVALUATE phase.** Do NOT skip XCP-ng and fall back to QEMU. |
 | `/qemu-smoke-test` | Boot ISO/multiboot in QEMU, verify no crash | Quick sanity check after build. |
+| `/slack-post` | Send a Slack message to `#semperos-ex-dev` with the required identity-tag header. | Status pings, decision asks, run results, "I posted cXXXX" follow-ups. Reduces Jira round-trip. |
 | `semperos-build` agent | Build CAmkES system (QEMU or XCP-ng), diagnose build failures | Build errors, missing symbols, cmake/ninja issues. |
 | `semperos-test` agent | Run standalone (10/10) + on-target (11/11) tests, check regressions | Before/after every task, regression checks. |
 
 **Rule: If a story's EVALUATE phase requires multi-node testing, you MUST use `/xcpng-deploy`. Do NOT conclude that deployment "requires manual intervention" — you have the skill.**
+
+**Rule: Every Slack message Claude Code sends MUST start with the identity-tag header `[Implementer · <session> · <branch>]` on its own first line, followed by a blank line.** Three speakers in `#semperos-ex-dev`: `[Architect]` = Claude on Claude.ai (design / task briefs), `[Implementer]` = Claude Code (status / results / questions — this is us), `[Ford]` = Ford himself. Multiple Implementer instances can run in parallel against the same workspace, so the tag also carries (a) an 8-char session fingerprint (first 8 hex of the session UUID — find it with `ls -t ~/.claude/projects/<sanitized-cwd>/*.jsonl | head -1`) and (b) the current git branch, both cached at first Slack post. Without the tag, the workspace posts everything under Ford's name (`U0AV409930D`) and conversations from different Claude instances become indistinguishable.
+
+**Session-start rule:** at the start of every session — before doing any FPT-NNN work — read `#semperos-ex-dev` (`mcp__plugin_slack_slack__slack_read_channel` on `C0B09MZK02V`, limit 15) for new Architect briefs / Ford direction that may have landed since the previous session.
+
+**Venue trichotomy** — pick by payload shape, not importance:
+- **Jira comment** → long-form per-card content (FPT-NNN history, decisions, design notes that belong to one story).
+- **Confluence page** (FO space, ID `2162691`) → tables, code listings >10 lines, multi-section reports, anything Ford may forward to Claude.ai for a second opinion.
+- **Slack `#semperos-ex-dev`** (`C0B09MZK02V`) → in-flight chat, status pings, decision asks, pointers to the durable venues.
+
+When in doubt, two venues are usually right: post to the durable venue (Jira/Confluence) for the record, then a one-line Slack pointer for awareness. See `.claude/skills/slack-post/SKILL.md` for the full contract (session derivation, decision rule, message shapes, STATUS block format, draft vs send).
 
 ---
 
@@ -41,6 +53,63 @@ USE THESE — do not search the filesystem for skill/agent files.
 CAmkES builds a monolithic system image. **Two stories that modify the CAmkES build graph cannot be implemented in parallel.** They must execute sequentially. **Only research/analysis tasks can run in parallel** with implementation stories.
 
 **CAmkES sequencing: ONE implementation story at a time.** Do not start a new implementation story until the current one is merged to master and the image builds clean.
+
+---
+
+## Way of Work — Deferral Discipline & Wrong-Premise Protocol
+
+This project has a hard rule against silent deferrals and silent
+wrong-premise execution. Authority: Ford. Full mechanism: Confluence
+page 23101474 ("Deferred-Item Ledger & Way of Work"). The two rules
+that bind YOU (the Implementer) directly:
+
+### You cannot defer. Only Ford can.
+
+If your work surfaces something that "should be done later" — a
+follow-up, future work, a known gap, a deferred fix — that is NOT a
+status line you write and move past. It is a ledger event. In your
+STATUS, flag it explicitly and separately (e.g. "DEFERRAL CANDIDATE:
+<what> / why it can't be done now / what assumption makes deferring it
+safe / what event would invalidate that assumption"). Do not bury it in
+prose. Do not treat it as decided. It remains active work until Ford
+explicitly approves a ledger entry. Phrases like "deferred to X",
+"follow-up", "future work" in a STATUS will be extracted and surfaced
+to Ford — write them as explicit deferral candidates, not as
+fait-accompli.
+
+### Wrong-Premise Protocol (mandatory when a brief premise is wrong)
+
+If, mid-execution, you discover a premise in your brief or design input
+is wrong (a file path differs, an assumed mechanism doesn't exist, the
+code is structured differently than briefed, a hypothesis is refuted by
+the source), DO NOT silently proceed on the wrong premise, and DO NOT
+simply halt and wait. Follow all five steps:
+
+1. **Surface** — state in STATUS: which premise, why it is wrong, the
+   primary-source evidence (file:line, test output, paper section).
+   Name it as a premise error.
+2. **Reasoned call** — decide the most defensible way forward given the
+   corrected premise; state what you chose, what you rejected, why.
+3. **Build** — implement against the corrected premise, not the
+   briefed-but-wrong version.
+4. **Verify** — test/validate; include the verification evidence in the
+   same STATUS as the surfaced premise error.
+5. **Flag** — explicitly mark the STATUS as containing a premise
+   correction so the Architect cannot let it pass unprocessed and it
+   routes to Ford.
+
+Boundary: this is "correct and flag", NOT "defer". Building the
+corrected thing is autonomous progress — you do not need pre-approval
+to do the right thing instead of the briefed-wrong thing. BUT if the
+correction means the originally-briefed scope should now be postponed,
+that postponement is a deferral and goes through Ford (see above). You
+build the corrected thing autonomously; you do not park the original
+scope autonomously.
+
+The strongest work in this project's history (e.g. the FPT-182
+archaeology that refuted three Architect hypotheses from source) was
+exactly this protocol applied well. It is expected behaviour, not
+exceptional.
 
 ---
 
